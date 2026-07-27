@@ -112,6 +112,13 @@ pub fn save_mcp_connection_settings(
             settings.command_path
         ));
     }
+    // 校验 command_args：黑名单只挡 command_path，攻击者可用 "python.exe -c '恶意代码'" 绕过。
+    // 这里拒绝明显的 shell 元字符注入（; | & 反引号 $()），script 模式下正常脚本参数不会用到这些。
+    if settings.transport == "stdio" && contains_shell_metacharacters(&settings.command_args) {
+        return Err(
+            "MCP 启动参数包含不允许的 shell 元字符（; | & ` $ 等），请确认参数是直接传给程序的，而非 shell 命令。".to_string(),
+        );
+    }
     app_database::with_database(&app, initialize_mcp_db, |connection, _| {
         let service_id = settings.service_id.clone();
         save_mcp_connection_settings_to_db(connection, &settings)?;
@@ -170,6 +177,17 @@ pub fn is_blocked_mcp_program(program: &str) -> bool {
     BLOCKED_INTERPRETER_STEMS
         .iter()
         .any(|blocked| *blocked == stem)
+}
+
+/// 检测 command_args 是否含 shell 元字符，防御 "python.exe -c 'os.system(...)'"
+/// 这类通过参数注入的命令执行（黑名单只挡 command_path，参数侧需要额外守门）。
+///
+/// 注意：这只是加固层，正常 MCP 参数（模块名、配置路径）不会包含这些字符。
+/// 真正的命令构造在 host 端用 `Command::arg`（不走 shell），这里挡的是用户误配/恶意配置。
+fn contains_shell_metacharacters(args: &str) -> bool {
+    // 顺序无关；匹配裸的 shell 控制字符。引号是合法的（参数含空格时需要），不在拦截范围。
+    const METACHARS: &[char] = &[';', '|', '&', '`', '\n', '\r'];
+    args.chars().any(|c| METACHARS.contains(&c)) || args.contains("$(")
 }
 
 pub fn load_mcp_connection_settings(
@@ -259,7 +277,7 @@ fn load_mcp_connection_settings_from_db(
                    show_in_employee_list,
                    enabled, transport, command_path, command_args, http_url, launch_mode
               FROM mcp_connection_settings
-             WHERE service_id = ?1
+             WHERE service_id = ?1 AND deleted = 0
             "#,
         )
         .map_err(|error| format!("读取 MCP 连接配置失败：{error}"))?;

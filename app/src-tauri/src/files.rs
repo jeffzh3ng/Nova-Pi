@@ -9,8 +9,8 @@ use std::path::{Path, PathBuf};
 use serde_json::json;
 use tauri::{AppHandle, Manager};
 
-use crate::rpc::send_rpc_blocking;
 use crate::mcp_settings::load_mcp_connection_settings;
+use crate::rpc::send_rpc_blocking_with_timeout;
 
 const MAX_UPLOADED_PCAP_BYTES: usize = 25 * 1024 * 1024;
 const MAX_UPLOADED_ALERT_IMAGE_BYTES: usize = 10 * 1024 * 1024;
@@ -134,13 +134,21 @@ pub fn show_file_in_folder(app: AppHandle, path: String) -> Result<(), String> {
 }
 
 /// Directories whose files `open_file_path` is allowed to launch.
+///
+/// 安全：不把整个系统 temp 目录列为可信根（否则任何能写 /tmp 的进程都能让本应用
+/// 帮它打开恶意 .app/.exe/.desktop）。仅信任本应用专属子目录：nova-uploads、nova-exports，
+/// 以及 app_data_dir/exports。
 fn allowed_open_roots(app: &AppHandle) -> Vec<PathBuf> {
     let mut roots = Vec::new();
     let temp = std::env::temp_dir();
-    if let Ok(canonical_temp) = temp.canonicalize() {
-        roots.push(canonical_temp);
-    } else {
-        roots.push(temp);
+    // 本应用上传/导出子目录（与 write_uploaded_blob / write_temp_text_file 写入路径一致）。
+    for sub in ["nova-uploads", "nova-exports"] {
+        let dir = temp.join(sub);
+        if let Ok(canonical) = dir.canonicalize() {
+            roots.push(canonical);
+        } else {
+            roots.push(dir);
+        }
     }
     if let Ok(data_dir) = app.path().app_data_dir() {
         let exports = data_dir.join("exports");
@@ -155,57 +163,67 @@ fn allowed_open_roots(app: &AppHandle) -> Vec<PathBuf> {
 
 /// 弹出保存对话框，将源文件另存为用户指定位置
 #[tauri::command]
-pub fn save_file_as(app: AppHandle, source_path: String) -> Result<String, String> {
-    let trimmed = source_path.trim();
-    if trimmed.starts_with(r"\\") || trimmed.starts_with(r"\\?\") {
-        return Err("不允许保存网络路径的文件。".to_string());
-    }
-    let source = Path::new(trimmed);
-    if !source.exists() {
-        return Err(format!("文件不存在：{}", source.display()));
-    }
-    let canonical = source
-        .canonicalize()
-        .map_err(|e| format!("无法解析文件路径：{e}"))?;
-    let allowed_roots = allowed_open_roots(&app);
-    let is_allowed = allowed_roots.iter().any(|root| canonical.starts_with(root));
-    if !is_allowed {
-        return Err("只能另存本应用生成的导出文件。".to_string());
-    }
-    let file_name = canonical
-        .file_name()
-        .and_then(|n| n.to_str())
-        .unwrap_or("result.xlsx");
-    let ext = canonical
-        .extension()
-        .and_then(|e| e.to_str())
-        .unwrap_or("xlsx")
-        .to_ascii_lowercase();
-    let (filter_label, filter_ext): (&str, &str) = match ext.as_str() {
-        "md" => ("Markdown 文件", "md"),
-        "txt" => ("文本文件", "txt"),
-        "xlsx" => ("Excel 文件", "xlsx"),
-        "docx" => ("Word 文件", "docx"),
-        "pdf" => ("PDF 文件", "pdf"),
-        "zip" => ("压缩包", "zip"),
-        _ => ("所有文件", "*"),
-    };
-    let dest = rfd::FileDialog::new()
-        .set_title("另存为")
-        .set_file_name(file_name)
-        .add_filter(filter_label, &[filter_ext])
-        .add_filter("所有文件", &["*"])
-        .save_file()
-        .ok_or_else(|| "已取消".to_string())?;
-    std::fs::copy(&canonical, &dest).map_err(|e| format!("保存失败：{e}"))?;
-    Ok(dest.to_string_lossy().to_string())
+pub async fn save_file_as(app: AppHandle, source_path: String) -> Result<String, String> {
+    // rfd::FileDialog 在 macOS 上必须在主线程调度，文件拷贝也是阻塞 IO。
+    // 用 spawn_blocking 移出 Tauri 同步命令线程，避免对话框延迟/UI 卡死。
+    let app_for_blocking = app.clone();
+    tokio::task::spawn_blocking(move || -> Result<String, String> {
+        let trimmed = source_path.trim();
+        if trimmed.starts_with(r"\\") || trimmed.starts_with(r"\\?\") {
+            return Err("不允许保存网络路径的文件。".to_string());
+        }
+        let source = Path::new(trimmed);
+        if !source.exists() {
+            return Err(format!("文件不存在：{}", source.display()));
+        }
+        let canonical = source
+            .canonicalize()
+            .map_err(|e| format!("无法解析文件路径：{e}"))?;
+        let allowed_roots = allowed_open_roots(&app_for_blocking);
+        let is_allowed = allowed_roots.iter().any(|root| canonical.starts_with(root));
+        if !is_allowed {
+            return Err("只能另存本应用生成的导出文件。".to_string());
+        }
+        let file_name = canonical
+            .file_name()
+            .and_then(|n| n.to_str())
+            .unwrap_or("result.xlsx");
+        let ext = canonical
+            .extension()
+            .and_then(|e| e.to_str())
+            .unwrap_or("xlsx")
+            .to_ascii_lowercase();
+        let (filter_label, filter_ext): (&str, &str) = match ext.as_str() {
+            "md" => ("Markdown 文件", "md"),
+            "txt" => ("文本文件", "txt"),
+            "xlsx" => ("Excel 文件", "xlsx"),
+            "docx" => ("Word 文件", "docx"),
+            "pdf" => ("PDF 文件", "pdf"),
+            "zip" => ("压缩包", "zip"),
+            _ => ("所有文件", "*"),
+        };
+        let dest = rfd::FileDialog::new()
+            .set_title("另存为")
+            .set_file_name(file_name)
+            .add_filter(filter_label, &[filter_ext])
+            .add_filter("所有文件", &["*"])
+            .save_file()
+            .ok_or_else(|| "已取消".to_string())?;
+        std::fs::copy(&canonical, &dest).map_err(|e| format!("保存失败：{e}"))?;
+        Ok(dest.to_string_lossy().to_string())
+    })
+    .await
+    .map_err(|e| format!("另存任务失败：{e}"))?
 }
 
 /// 将文本内容写入临时文件，返回文件路径（供 save_file_as 使用）
 #[tauri::command]
 pub fn write_temp_text_file(content: String, extension: String) -> Result<String, String> {
     let extension = sanitize_text_export_extension(&extension)?;
-    let dir = std::env::temp_dir();
+    // 写到 nova-exports 子目录而非 temp 根，配合 allowed_open_roots 收紧可信根
+    // （整个 temp_dir 不再可信，只有本应用专属子目录可信）。
+    let dir = std::env::temp_dir().join("nova-exports");
+    std::fs::create_dir_all(&dir).map_err(|e| format!("创建临时目录失败：{e}"))?;
     let ts = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
         .unwrap_or_default()
@@ -397,7 +415,9 @@ async fn call_alert_mcp_tool(
         "args": args,
         "timeoutSecs": timeout_secs,
     });
-    let response = send_rpc_blocking(app, command).await?;
+    // Rust 侧超时 = sidecar 任务超时 + 30s 缓冲，避免 Rust 先超时导致 sidecar 响应被丢弃。
+    let rpc_timeout = std::time::Duration::from_secs(timeout_secs.saturating_add(30));
+    let response = send_rpc_blocking_with_timeout(app, command, rpc_timeout).await?;
     // response 是 host 返回的 MCP callTool 原始结果（可能含 content/structuredContent）
     Ok(response)
 }

@@ -16,7 +16,6 @@
 import { join, basename, dirname, resolve } from "node:path";
 import { readFile, writeFile, mkdir, readdir, stat } from "node:fs/promises";
 import { existsSync } from "node:fs";
-import { readFile as readFileSync } from "node:fs/promises";
 
 let settingsJsonPath = "";
 let globalExtensionsDir = ""; // ~/.pi/agent/extensions 或 appDataDir/.pi/agent/extensions
@@ -115,7 +114,9 @@ export async function addExtension(rawPath: string): Promise<void> {
   if (list.some((p) => normalizeExtensionPath(p).id === normalized.id)) {
     throw new Error(`扩展已存在：${trimmed}`);
   }
-  list.push(trimmed);
+  // 统一存规范化的绝对路径（id），与 setExtensionEnabled 推入的 extensionId 格式一致，
+  // 避免 "用户原路径" 与 "绝对路径" 混用导致 settings.json 数据漂移。
+  list.push(normalized.id);
   settings.extensions = list;
   await writeSettingsJson(settings);
 }
@@ -161,7 +162,7 @@ export async function readExtensionContent(extensionId: string): Promise<string>
 /** 在全局扩展目录创建一个新的扩展文件（带模板代码），并自动加入 settings.json。 */
 export async function createExtension(name: string, template: string): Promise<ExtensionSummary> {
   const safeName = name.trim().replace(/[^A-Za-z0-9._-]/g, "-").replace(/^-+|-+$/g, "");
-  if (!safeName) throw new Error("扩展名只能包含字母、数字、点、下划线、短横线。");
+  if (!safeName) throw new Error("扩展名规范化后为空，请使用字母、数字、点、下划线或短横线命名。");
   await mkdir(globalExtensionsDir, { recursive: true });
   const filePath = join(globalExtensionsDir, `${safeName}.ts`);
   if (existsSync(filePath)) throw new Error(`扩展已存在：${safeName}.ts`);
@@ -261,10 +262,10 @@ async function scanExtensionsDir(dir: string): Promise<Omit<ExtensionSummary, "e
 }
 
 /** 从扩展文件头部 JSDoc 注释提取首行描述。 */
-async function extractDescription(filePath: string, _isDir: boolean): Promise<string> {
+async function extractDescription(filePath: string, isDir: boolean): Promise<string> {
   try {
-    const target = (await isDirectory(filePath)) ? join(filePath, "index.ts") : filePath;
-    const content = await readFileSync(target, "utf8");
+    const target = isDir ? join(filePath, "index.ts") : filePath;
+    const content = await readFile(target, "utf8");
     // 匹配 /** ... */ 第一段
     const match = content.match(/\/\*\*([\s\S]*?)\*\//);
     if (match?.[1]) {
@@ -311,6 +312,8 @@ function stripJsonComments(text: string): string {
     if (char === "/" && next === "*") {
       i += 2;
       while (i < text.length && !(text[i] === "*" && text[i + 1] === "/")) i += 1;
+      // 块注释未闭合（读到末尾）：直接结束，避免 i+=2 越界导致死循环。
+      if (i >= text.length) break;
       i += 2;
       continue;
     }

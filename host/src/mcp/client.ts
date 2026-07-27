@@ -67,8 +67,34 @@ function validateHttpUrl(url: string): URL {
   return parsed;
 }
 
-/** 连接一个 MCP 服务，完成 initialize + tools/list 握手。 */
+/** MCP 握手超时（毫秒）。子进程卡死或 HTTP 慢时避免永久阻塞（registry 串行连接会让后续全部饿死）。 */
+const HANDSHAKE_TIMEOUT_MS = 30_000;
+
+/** 连接一个 MCP 服务，完成 initialize + tools/list 握手（带超时）。 */
 export async function connectMcpServer(config: McpServerConfig): Promise<ConnectedMcpServer> {
+  // 整个握手包一层超时：子进程卡死或 HTTP 慢时避免永久阻塞。
+  const handshakePromise = connectMcpServerNoTimeout(config);
+  const timeoutPromise = new Promise<never>((_, reject) => {
+    setTimeout(
+      () => reject(new Error(`MCP 服务握手超时（${HANDSHAKE_TIMEOUT_MS / 1000}s）：${config.serviceId}`)),
+      HANDSHAKE_TIMEOUT_MS,
+    );
+  });
+  try {
+    return await Promise.race([handshakePromise, timeoutPromise]);
+  } catch (error) {
+    // 握手失败：尽力清理半连接的 client，避免子进程残留。
+    try {
+      const result = await handshakePromise.catch(() => null);
+      if (result) await disconnectMcpServer(result);
+    } catch {
+      // ignore
+    }
+    throw error;
+  }
+}
+
+async function connectMcpServerNoTimeout(config: McpServerConfig): Promise<ConnectedMcpServer> {
   if (config.transport === "http") {
     const url = validateHttpUrl(config.url);
     const transport = new StreamableHTTPClientTransport(url);
@@ -91,7 +117,16 @@ export async function connectMcpServer(config: McpServerConfig): Promise<Connect
   if (isBlockedProgram(command)) {
     throw new Error(`不允许使用 ${command} 作为 MCP 启动命令。`);
   }
-  const transport = new StdioClientTransport({ command, args, env: { ...process.env, ...(env ?? {}) } as Record<string, string> });
+  // 安全：不继承全部 process.env。Node sidecar 持有所有 LLM API key，
+  // 若把 ...process.env 透传给 MCP 子进程（含第三方 Python server），密钥会泄漏。
+  // 仅传显式声明的 env + 必要的 PATH/系统变量，让子进程能找到可执行文件。
+  const safeEnv: Record<string, string> = {
+    PATH: process.env.PATH ?? "",
+    ...(process.platform === "win32" ? { SYSTEMROOT: process.env.SYSTEMROOT ?? "" } : {}),
+    ...(process.env.LANG ? { LANG: process.env.LANG } : {}),
+    ...(env ?? {}),
+  };
+  const transport = new StdioClientTransport({ command, args, env: safeEnv });
   const client = new Client(
     { name: "nova-pi-host", version: "0.1.0" },
     { capabilities: {} },
@@ -106,20 +141,31 @@ export async function connectMcpServer(config: McpServerConfig): Promise<Connect
   return { config, client, tools };
 }
 
-/** 带超时地调用一个 MCP 工具。 */
+/** 带超时地调用一个 MCP 工具。超时后关闭连接（牺牲连接换取取消，避免子进程持续占用）。 */
 export async function callMcpToolWithTimeout(
   server: ConnectedMcpServer,
   toolName: string,
   args: Record<string, unknown>,
   timeoutSecs?: number,
 ): Promise<unknown> {
-  const timeoutMs = timeoutSecs ? timeoutSecs * 1000 : undefined;
   const callPromise = server.client.callTool({ name: toolName, arguments: args });
-  if (!timeoutMs) return await callPromise;
+  if (!timeoutSecs) return await callPromise;
+  const timeoutMs = timeoutSecs * 1000;
+  let timer: NodeJS.Timeout | undefined;
   const timeoutPromise = new Promise<never>((_, reject) => {
-    setTimeout(() => reject(new Error(`MCP 工具调用超时（${timeoutSecs}s）：${toolName}`)), timeoutMs);
+    timer = setTimeout(() => reject(new Error(`MCP 工具调用超时（${timeoutSecs}s）：${toolName}`)), timeoutMs);
   });
-  return await Promise.race([callPromise, timeoutPromise]);
+  try {
+    return await Promise.race([callPromise, timeoutPromise]);
+  } catch (error) {
+    // MCP SDK 的 callTool 不支持 abort signal，超时后底层调用仍在跑。
+    // 关闭连接以终止子进程/HTTP，避免长任务（如分类分级 4h）持续烧资源。
+    // 下次调用时 registry 会按需重连。
+    await disconnectMcpServer(server).catch(() => {});
+    throw error;
+  } finally {
+    if (timer) clearTimeout(timer);
+  }
 }
 
 /** 关闭连接（stdio 会终止子进程）。 */

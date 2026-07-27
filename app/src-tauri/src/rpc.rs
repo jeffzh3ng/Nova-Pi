@@ -6,6 +6,7 @@
 
 use std::collections::HashMap;
 use std::sync::{Mutex, OnceLock};
+use std::time::Duration;
 
 use serde_json::Value;
 use tauri::{AppHandle, Emitter};
@@ -31,7 +32,8 @@ pub fn handle_sidecar_message(app: &AppHandle, message: Value) {
         "response" => {
             let id = message.get("id").and_then(|v| v.as_str()).unwrap_or("").to_string();
             let success = message.get("success").and_then(|v| v.as_bool()).unwrap_or(false);
-            let mut map = pending().map.lock().unwrap();
+            // 锁中毒时仍取出内部数据继续：单次 panic 不应让整个 RPC 子系统永久瘫痪。
+            let mut map = pending().map.lock().unwrap_or_else(|e| e.into_inner());
             if let Some(sender) = map.remove(&id) {
                 let result = if success {
                     Ok(message.get("data").cloned().unwrap_or(Value::Null))
@@ -48,6 +50,11 @@ pub fn handle_sidecar_message(app: &AppHandle, message: Value) {
         "event" => {
             // 把 event 整体 emit 给前端（前端 hostBridge.subscribePiEvents 监听 "pi-event"）
             if let Some(event) = message.get("event") {
+                // 拦截 usage 事件写入 SQLite：pi 的真实 token 用量只有 host 知道，
+                // Rust 的 call_llm 路径在新架构下几乎不被触达，必须在此记录。
+                if event.get("type").and_then(|v| v.as_str()) == Some("usage") {
+                    persist_usage_event(app, event);
+                }
                 let _ = app.emit("pi-event", event.clone());
             }
         }
@@ -57,8 +64,20 @@ pub fn handle_sidecar_message(app: &AppHandle, message: Value) {
     }
 }
 
-/// 发送一条 RPC 命令到 sidecar，等待响应（带超时）。
-pub async fn send_rpc_blocking(_app: &AppHandle, command: Value) -> Result<Value, String> {
+/// 发送一条 RPC 命令到 sidecar，等待响应（默认 5 分钟超时，容纳长任务）。
+pub async fn send_rpc_blocking(app: &AppHandle, command: Value) -> Result<Value, String> {
+    send_rpc_blocking_with_timeout(app, command, Duration::from_secs(300)).await
+}
+
+/// 发送一条 RPC 命令到 sidecar，等待响应（自定义超时）。
+///
+/// 调用方应保证 Rust 侧超时 **大于** 传给 sidecar 的 `timeoutSecs`，否则 Rust 先超时后，
+/// sidecar 仍会跑完任务但响应因 pending 表无对应 id 而被静默丢弃，浪费 CPU/Token。
+pub async fn send_rpc_blocking_with_timeout(
+    _app: &AppHandle,
+    command: Value,
+    timeout: Duration,
+) -> Result<Value, String> {
     let id = format!("rust-{}", uuid_v7_like());
     let full_command = {
         let mut cmd = command;
@@ -69,20 +88,18 @@ pub async fn send_rpc_blocking(_app: &AppHandle, command: Value) -> Result<Value
     };
 
     let (tx, rx) = oneshot::channel();
-    pending().map.lock().unwrap().insert(id.clone(), tx);
+    pending().map.lock().unwrap_or_else(|e| e.into_inner()).insert(id.clone(), tx);
 
     crate::sidecar::write_command(&full_command)?;
 
-    // 超时等待响应（默认 5 分钟，容纳长任务）
-    let timeout = tokio::time::Duration::from_secs(300);
     match tokio::time::timeout(timeout, rx).await {
         Ok(Ok(result)) => result,
         Ok(Err(_)) => {
-            pending().map.lock().unwrap().remove(&id);
+            pending().map.lock().unwrap_or_else(|e| e.into_inner()).remove(&id);
             Err("sidecar 响应通道已关闭".to_string())
         }
         Err(_) => {
-            pending().map.lock().unwrap().remove(&id);
+            pending().map.lock().unwrap_or_else(|e| e.into_inner()).remove(&id);
             Err("sidecar 响应超时".to_string())
         }
     }
@@ -106,6 +123,47 @@ fn uuid_v7_like() -> String {
     let counter = COUNTER.fetch_add(1, Ordering::Relaxed);
     let mixed = counter | ((std::process::id() as u64) << 32);
     format!("{ms:013x}{mixed:019x}")
+}
+
+/// 把 host 发来的 usage 事件写入 token_usage 表。
+///
+/// 新架构下 LLM 调用上移到 pi（host 内部），Rust 自身的 `call_llm` 几乎不被触达，
+/// 因此 `save_token_usage` 不能依赖 call_llm 路径。host 在 agent_end 时聚合 usage 并 emit，
+/// Rust 在此拦截并落库，让 TokenUsagePanel 能展示真实用量。
+fn persist_usage_event(app: &AppHandle, event: &Value) {
+    let model = event
+        .get("model")
+        .and_then(|v| v.as_str())
+        .unwrap_or("unknown")
+        .to_string();
+    let agent_name = event
+        .get("agentName")
+        .and_then(|v| v.as_str())
+        .unwrap_or("")
+        .to_string();
+    let prompt_tokens = event
+        .get("promptTokens")
+        .and_then(|v| v.as_u64())
+        .unwrap_or(0) as u32;
+    let completion_tokens = event
+        .get("completionTokens")
+        .and_then(|v| v.as_u64())
+        .unwrap_or(0) as u32;
+    let total_tokens = event
+        .get("totalTokens")
+        .and_then(|v| v.as_u64())
+        .unwrap_or(0) as u32;
+    // 跳过全 0 的无效 usage（host 的 emitUsageFromAgentEnd 已过滤，这里二次防御）。
+    if prompt_tokens == 0 && completion_tokens == 0 && total_tokens == 0 {
+        return;
+    }
+    let usage = crate::llm_settings::Usage {
+        prompt_tokens,
+        completion_tokens,
+        total_tokens,
+    };
+    // 写库失败不应影响事件流，仅记录日志。
+    crate::llm_settings::save_token_usage(app, &model, &agent_name, &usage);
 }
 
 /// 让 lib.rs 在初始化时调用（占位，目前无需额外初始化）。

@@ -61,26 +61,28 @@ Nova-PI/
 │   └── src-tauri/               # Rust 薄壳
 │       ├── Cargo.toml / tauri.conf.json / capabilities/
 │       └── src/
-│           ├── lib.rs           # 命令注册 + AbortFlag
-│           ├── sidecar.rs       # Node sidecar 进程管理
-│           ├── rpc.rs           # JSON-line RPC 编排
+│           ├── lib.rs           # 命令注册 + Tauri Builder
+│           ├── sidecar.rs       # Node sidecar 进程管理（spawn/watchdog/孤儿防护）
+│           ├── rpc.rs           # JSON-line RPC 编排 + usage 事件落库
 │           ├── conversation_store.rs  # SQLite 会话索引
-│           ├── llm_settings.rs  # ModelSettings CRUD
-│           ├── token_usage.rs   # token 统计
+│           ├── llm_settings.rs  # ModelSettings CRUD + token 统计
+│           ├── mcp_settings.rs  # MCP 连接配置 CRUD
 │           ├── risk_http.rs     # 风评大文件上传/下载
-│           └── files.rs         # 文件对话框/路径守卫
+│           ├── skill_registry.rs # 技能 zip 安装/脚本执行
+│           ├── app_database.rs  # SQLite 连接帮助（WAL/busy_timeout）
+│           └── files.rs         # 文件对话框/路径守卫/告警 MCP 转发
 ├── host/                        # Node sidecar（pi 内核）
 │   ├── package.json / tsconfig.json / tsup.config.ts
 │   └── src/
 │       ├── main.ts              # RPC 入口派发
-│       ├── rpc-protocol.ts      # 命令/响应/事件类型
-│       ├── session-pool.ts      # pi AgentSession 生命周期
+│       ├── rpc-protocol.ts      # 命令/响应/事件类型 + stdout 背压
+│       ├── session-pool.ts      # pi AgentSession 生命周期 + usage 聚合
 │       ├── model-setup.ts       # ModelRuntime 配置
+│       ├── models-manager.ts    # pi models.json CRUD
+│       ├── extensions-manager.ts # pi settings.json extensions CRUD
 │       ├── digital-human.ts     # 9 员工 system prompt + MCP 白名单
 │       ├── mcp/                 # MCP 桥接（registry/client/schema-convert/payload）
-│       ├── built-in-tools/      # risk/alert/gongwen customTool
-│       ├── skills/              # pi ResourceLoader 配置
-│       └── storage-bridge.ts    # session JSONL → Rust 索引通知
+│       └── skills/              # pi ResourceLoader 配置
 ├── services/                    # 外部 MCP 服务（Python FastMCP）
 └── skills/                      # 内置技能包
 ```
@@ -89,29 +91,34 @@ Nova-PI/
 
 JSON-line over stdin/stdout。详见 `host/src/rpc-protocol.ts`。
 
-- **Rust → Node（命令）**：`new_session` / `dispose_session` / `prompt` / `steer` / `abort` / `set_model` / `configure_mcp` / `list_mcp_tools` / `test_mcp` / `list_skills` / `resolve_skill` / `risk_submit` / `risk_status` / `risk_cancel` / `shutdown`
-- **Node → Rust（响应+事件）**：`response{id}` 同步响应；`event` 异步事件流（`message_update`/`tool_execution_*`/`agent_end`/`usage`/`risk_job_update`/`session_saved`/`error`），Rust 以 `emit("pi-event")` 转发前端。
+- **Rust → Node（命令）**：`new_session`（含 `mcpServiceId`/`resumeMessages`）/ `dispose_session` / `prompt` / `steer` / `abort` / `set_model` / `test_model` / `get_state` / `configure_mcp` / `list_mcp_tools` / `test_mcp` / `mcp_call` / `list_skills` / `resolve_skill` / `models_*`（10 个）/ `extensions_*`（6 个）/ `shutdown`
+- **Node → Rust（响应+事件）**：`response{id}` 同步响应；`event` 异步事件流（`message_start/update/end`/`tool_execution_start/update/end`/`agent_start/end`/`usage`/`error`），Rust 以 `emit("pi-event")` 透传 RpcEvent 本体给前端；`usage` 事件由 Rust 在 rpc.rs 拦截写入 token_usage 表。
+- 注：风评（`risk_*`）命令已移除，风评流程完全走 `mcp_call`（pi 自主调用 data-security-risk-assessment-mcp 工具），进度由前端 3s 轮询。
 
 ## Main Tauri Commands（Rust 薄壳）
 
 | Command | Module | Purpose |
 |---|---|---|
-| `start_sidecar` / `stop_sidecar` | sidecar | 启动/停止 Node sidecar |
-| `send_rpc` | rpc | 前端 → sidecar 命令转发 |
+| `start_sidecar` | sidecar | 启动 Node sidecar（`stop_sidecar` 是 Rust 内部函数，窗口销毁时自动调用，未注册为 command）|
+| `send_rpc` | rpc | 前端 → sidecar 命令转发（带 5min 默认超时） |
+| `test_mcp_connection` / `list_mcp_tools` | lib → sidecar | MCP 服务握手测试/工具枚举 |
 | `list_conversations` / `load_conversation` / `save_conversation_snapshot` | conversation_store | 会话 CRUD |
 | `archive_conversation` / `restore_conversation` / `delete_conversation` / `rename_conversation` | conversation_store | 归档/删除/重命名 |
 | `list_archived_conversations` | conversation_store | 归档列表 |
 | `generate_conversation_title` | conversation_store | LLM 标题生成 |
 | `get_model_settings` / `save_model_settings` / `reset_model_settings` | llm_settings | LLM 配置 CRUD |
-| `list_token_usage` | token_usage | token 统计 |
+| `test_model_connection` | llm_settings | 模型连通性测试 |
+| `list_token_usage` | llm_settings | token 统计（pi 的真实用量由 rpc.rs 拦截 usage 事件写入）|
 | `upload_risk_assessment_material` / `download_risk_assessment_result` | risk_http | 风评大文件 |
 | `open_file_path` / `show_file_in_folder` / `save_file_as` | files | 文件操作 |
 | `write_temp_text_file` / `write_uploaded_blob` | files | 临时文件 |
 | `parse_pcap_file_cmd` / `extract_alert_image_text_cmd` | files | PCAP/OCR 解析 |
-| `list_mcp_connection_settings` / `save_mcp_connection_settings` / `delete_mcp_connection_settings` | conversation_store (settings 表) | MCP 配置 CRUD |
-| `list_skills` / `list_skill_catalog` / `get_skill` / `set_skill_enabled` | files/skills | 技能管理 |
-| `pick_and_install_skill` / `delete_user_skill` / `open_user_skill_dir` / `execute_skill_plan` | files/skills | 技能安装/执行 |
-| `abort_task` / `reset_abort_flag` | lib | 中断标志 |
+| `list_mcp_connection_settings` / `save_mcp_connection_settings` / `delete_mcp_connection_settings` | mcp_settings | MCP 配置 CRUD |
+| `list_skills` / `list_skill_catalog` / `get_skill` / `set_skill_enabled` | skill_registry | 技能管理 |
+| `pick_and_install_skill` / `delete_user_skill` / `open_user_skill_dir` / `execute_skill_plan` | skill_registry | 技能安装/执行 |
+
+注：`abort_task` / `reset_abort_flag` 命令已删除（pi agent loop 中止走 sidecar 的 `abort` RPC 命令）。
+模型管理（`models_*`）和扩展管理（`extensions_*`）走 sidecar RPC，不经 Rust command。
 
 **重要**：命令名为 snake_case（匹配 Rust 函数名）。Tauri v2 不做 camelCase 转换。
 
@@ -138,10 +145,14 @@ JSON-line over stdin/stdout。详见 `host/src/rpc-protocol.ts`。
 3. **会话持久化双轨**：pi 的 `SessionManager` 写 JSONL（完整历史，host 内部）；Rust SQLite 存索引+消息快照（侧栏列表+重启恢复）。
 4. **title 保护**：只在 INSERT 时设 title，UPDATE 不覆盖。`title_source` 三态（pending/manual/auto）。手动重命名设 `manual`，LLM 生成设 `auto`，条件 UPDATE（`WHERE title_source='pending' AND archived=0`）防竞态。
 5. **归档独立**：`archived` 列隔离，归档会话不自动保存、不出现在历史、有独立列表。ReadOnly 守卫。点首页/任务/归档清空当前会话视图。
-6. **风评轮询上移到 host**：3s 间隔，网络失败退避 3→15s，poll token 取消。通过 `risk_job_update` 事件推送进度，前端不轮询。
+6. **风评轮询在前端**：风评进度由前端 `pollRiskAssessment` 每 3s 调 MCP `get_task_status`（网络失败退避 3→15s，poll token 取消）。`risk_job_update` 事件类型保留供未来 host 推送，但当前 host 不 emit。
 7. **Rust rebuild required**：任何 `src-tauri/src/**/*.rs` 改动需重启 `npm run tauri:dev`。Vite 热重载不覆盖 Rust。
 8. **DeepSeek 兼容**：pi 内置 DeepSeek provider，`thinking:disabled` 由 pi 处理。
-9. **sidecar 重启**：Node sidecar 崩溃由 Rust 自动重启。
+9. **sidecar watchdog**：Node sidecar 意外退出（stdout EOF 且非主动 stop）由 Rust 自动重启并 emit `pi-sidecar-restarted`；重启失败 emit `pi-sidecar-fatal`。
+10. **abort 走 sidecar**：pi agent loop 的中止通过 sidecar 的 `abort` RPC 命令（pi 的 `session.abort()`）。Rust 无中断标志，耗时 Rust 操作（风评上传等）目前不可中断。
+11. **token 用量落库**：pi 的真实 token 用量由 host 在 agent_end 聚合后 emit `usage` 事件，Rust 在 rpc.rs 拦截写入 token_usage 表（`call_llm` 路径在新架构下几乎不被触达）。
+12. **历史上下文**：pi 无"静默灌入 assistant 回复"的公开 API，切换会话继续对话时，历史作为 system prompt 附录注入（`session-pool.injectHistory`，最多 20 轮）。
+13. **stdout 背压**：host 的所有 stdout 写入经串行化 Promise 队列，`process.stdout.write` 返回 false 时等 `drain`，避免流式事件高吞吐下数据截断。
 
 ## UI Text Guidelines
 

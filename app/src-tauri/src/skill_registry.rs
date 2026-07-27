@@ -155,16 +155,24 @@ pub fn open_user_skill_dir(app: AppHandle) -> Result<String, String> {
 }
 
 #[tauri::command]
-pub fn pick_and_install_skill(app: AppHandle) -> Result<SkillManifest, String> {
-    let Some(source) = rfd::FileDialog::new()
-        .set_title("Import Skill package")
-        .add_filter("Skill package", &["zip"])
-        .add_filter("Skill manifest", &["json", "md"])
-        .pick_file()
-    else {
-        return Err("cancelled".to_string());
-    };
-    install_skill_from_picked_path(&app, &source)
+pub async fn pick_and_install_skill(app: AppHandle) -> Result<SkillManifest, String> {
+    // rfd::FileDialog 在 macOS 上必须在主线程调度（NSRunLoop），zip 解压/文件拷贝也较重。
+    // 用 spawn_blocking 把整个流程移出 Tauri 同步命令线程，避免阻塞或对话框不出现。
+    // AppHandle 是 Clone（Arc 内部），可安全 move 到阻塞线程。
+    let app_for_blocking = app.clone();
+    tokio::task::spawn_blocking(move || {
+        let Some(source) = rfd::FileDialog::new()
+            .set_title("Import Skill package")
+            .add_filter("Skill package", &["zip"])
+            .add_filter("Skill manifest", &["json", "md"])
+            .pick_file()
+        else {
+            return Err("cancelled".to_string());
+        };
+        install_skill_from_picked_path(&app_for_blocking, &source)
+    })
+    .await
+    .map_err(|e| format!("技能安装任务失败：{e}"))?
 }
 
 #[tauri::command]

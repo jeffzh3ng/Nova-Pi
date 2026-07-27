@@ -69,9 +69,17 @@ fn risk_api_url(mcp_url: &str, suffix: &str) -> Result<Url, String> {
     url.set_query(None);
     url.set_fragment(None);
     let current_path = url.path().trim_end_matches('/');
-    let base_path = current_path.strip_suffix("/mcp").unwrap_or(current_path);
+    // 先去掉可能的 /mcp 后缀（默认配置 https://x/mcp → /api）。
+    let after_mcp = current_path.strip_suffix("/mcp").unwrap_or(current_path);
+    // 若已经以 /api 结尾（如用户配 https://x/api/v1/mcp → /api/v1），不再追加 /api，避免 /api/api/...。
+    let base_path: String = if after_mcp.ends_with("/api") || after_mcp == "api" {
+        after_mcp.to_string()
+    } else {
+        // 末尾不剩 /api：补一个。常见情况 https://x/mcp → "" → "/api"。
+        format!("{after_mcp}/api")
+    };
     let suffix = suffix.trim_start_matches('/');
-    url.set_path(&format!("{base_path}/api/{suffix}"));
+    url.set_path(&format!("{base_path}/{suffix}"));
     Ok(url)
 }
 
@@ -347,6 +355,19 @@ mod tests {
                 .unwrap()
                 .as_str(),
             "https://example.com/risk/api/tasks/t1/result"
+        );
+        // 已有 /api 前缀时不重复追加（避免 /api/v1/api/materials）。
+        assert_eq!(
+            risk_api_url("https://example.com/api/v1/mcp", "materials")
+                .unwrap()
+                .as_str(),
+            "https://example.com/api/v1/api/materials"
+        );
+        assert_eq!(
+            risk_api_url("https://example.com/api/mcp", "materials")
+                .unwrap()
+                .as_str(),
+            "https://example.com/api/materials"
         );
     }
 }

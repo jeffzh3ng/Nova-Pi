@@ -386,6 +386,12 @@ export default function App() {
   const [mcpCatalog, setMcpCatalog] = useState<McpConnectionSettings[]>([]);
   const [mcpAvailability, setMcpAvailability] = useState<Record<string, McpAvailability>>({});
   const activeRunIdRef = useRef(0);
+  // busy 的 ref 镜像：catch/超时等非渲染上下文需要读最新值，避免 stale closure。
+  const busyRef = useRef(false);
+  // busy 安全超时：agent_end 正常会清 busy，但若 sidecar 崩溃/事件流静默中断，
+  // 这里兜底防止 UI 永久卡死。key = `${runId}`。
+  const busySafetyTimersRef = useRef<Map<string, ReturnType<typeof setTimeout>>>(new Map());
+  const BUSY_SAFETY_TIMEOUT_MS = 5 * 60 * 1000;
 
   // conversationId ↔ pi sessionId 映射。pi 的 AgentSession 在 host 内部按 sessionId 管理，
   // 前端只持有这个映射，发 prompt 时把 sessionId 一起带给 host。
@@ -1076,8 +1082,8 @@ export default function App() {
       return;
     }
 
-    const metadata = metadataFromCurrentSelection();
-    rememberConversationMetadata(currentConversationId, metadata);
+    // metadata 优先用会话已记住的（首次创建时由 submitPrompt 写入），见 buildSnapshotForConversation
+    // 内部的 getConversationMetadata。这样会话进行中切换"最近使用"员工不会改写历史会话的 agent 元信息。
     const messageFingerprint = buildMessagesFingerprint(conversationMessages);
     if (
       loadedConversationFingerprintRef.current?.id === currentConversationId &&
@@ -1134,8 +1140,9 @@ export default function App() {
     conversationMessages,
     currentConversationId,
     runningConversationIds,
-    selectedHuman.id,
-    selectedHuman.name,
+    // 不依赖 selectedHuman：会话的 agentId/agentName 由首次创建时记住（getConversationMetadata），
+    // 此处仅按消息变化保存。依赖 selectedHuman 会导致 MCP 可用性变化时触发整库重存，
+    // 且会改写历史会话已记住的 agent 元信息。
   ]);
 
   const setConversationRunning = (conversationId: string, running: boolean) => {
@@ -1592,6 +1599,35 @@ export default function App() {
 
   const isCurrentRun = (runId: number) => activeRunIdRef.current === runId;
 
+  // 提交 prompt 成功后，启动一个安全超时：若超时后该 run 仍在跑（说明 agent_end
+  // 因 sidecar 崩溃/事件流中断而未到达），强制清理 running/busy，避免会话永久卡死。
+  const scheduleBusySafetyTimeout = (runId: number, conversationId: string) => {
+    const key = `${runId}`;
+    const existing = busySafetyTimersRef.current.get(key);
+    if (existing) clearTimeout(existing);
+    const timer = setTimeout(() => {
+      busySafetyTimersRef.current.delete(key);
+      // 仍在跑才需要兜底；正常已由 agent_end 清理并取消本 timer。
+      if (activeRunIdRef.current === runId && busyRef.current) {
+        console.warn(`[busy-safety] run ${runId} 超时未收到 agent_end，强制清理`);
+        setConversationRunning(conversationId, false);
+        setBusy(false);
+        busyRef.current = false;
+        activeRunIdRef.current += 1; // 后续 run 失效
+      }
+    }, BUSY_SAFETY_TIMEOUT_MS);
+    busySafetyTimersRef.current.set(key, timer);
+  };
+
+  const clearBusySafetyTimeout = (runId: number) => {
+    const key = `${runId}`;
+    const timer = busySafetyTimersRef.current.get(key);
+    if (timer) {
+      clearTimeout(timer);
+      busySafetyTimersRef.current.delete(key);
+    }
+  };
+
   // ── pi 事件订阅：把 host 转发的 AgentSessionEvent 流映射为 ChatMessage 增量 ──
   // 这是新架构的核心：pi 的 agent loop 在 host 内部跑，事件流驱动前端对话视图。
   useEffect(() => {
@@ -1630,6 +1666,13 @@ export default function App() {
           );
           break;
         }
+        case "message_end": {
+          // 单条 assistant 消息流式结束：清理 streaming id，防止下一轮 message_start 复用旧 id。
+          // agent_end 会再清一次（兜底），但若中途有多条 message（如工具调用后继续回复），
+          // 这里逐条清理更准确。
+          delete streamingMessageIdRef.current[conversationId];
+          break;
+        }
         case "tool_execution_start": {
           // 工具调用气泡：登记 id，end 时把结果合进同一条。
           const key = `${conversationId}:${event.toolCallId}`;
@@ -1645,6 +1688,35 @@ export default function App() {
               steps: [`参数：${JSON.stringify(event.args ?? {}).slice(0, 500)}`],
               time: formatMessageTime(),
             },
+            "running",
+          );
+          break;
+        }
+        case "tool_execution_update": {
+          // 工具执行中的进度片段（partialResult）。把进度文本追加到工具气泡的 steps，
+          // 让用户看到长任务（如风评、研判）的实时进度，而非只有 start/end 两个状态。
+          const key = `${conversationId}:${event.toolCallId}`;
+          const messageId = toolMessageIdRef.current[key];
+          if (!messageId) break;
+          const partial = event.partialResult;
+          const partialText =
+            typeof partial === "string"
+              ? partial
+              : (partial as { text?: string; content?: unknown })?.text ??
+                (typeof (partial as { content?: unknown })?.content === "string"
+                  ? String((partial as { content: string }).content)
+                  : (() => {
+                      try {
+                        return partial == null ? "" : JSON.stringify(partial).slice(0, 300);
+                      } catch {
+                        return "";
+                      }
+                    })());
+          if (!partialText) break;
+          updateMessageInConversation(
+            conversationId,
+            messageId,
+            (message) => ({ ...message, steps: [...(message.steps ?? []), partialText] }),
             "running",
           );
           break;
@@ -1679,7 +1751,11 @@ export default function App() {
         case "agent_end": {
           delete streamingMessageIdRef.current[conversationId];
           setConversationRunning(conversationId, false);
-          if (currentConversationIdRef.current === conversationId) setBusy(false);
+          clearBusySafetyTimeout(activeRunIdRef.current);
+          if (currentConversationIdRef.current === conversationId) {
+            setBusy(false);
+            busyRef.current = false;
+          }
           const triggered = maybeGenerateTitle(
             conversationId,
             conversationMessageBuffersRef.current[conversationId] ?? [],
@@ -1692,7 +1768,8 @@ export default function App() {
           break;
         }
         case "risk_job_update": {
-          // host 内部风评轮询推送的进度（替代前端轮询）。
+          // 当前 host 不 emit 此事件（风评进度由前端 pollRiskAssessment 每 3s 轮询）。
+          // 保留 case 以兼容未来 host 推送进度的实现。
           const job = event.job as RiskAssessmentJob | undefined;
           if (!job) break;
           const context = riskAssessmentContextsRef.current[conversationId];
@@ -1701,17 +1778,24 @@ export default function App() {
           break;
         }
         case "usage": {
-          // token 统计由 host 写入 Rust 的 token_usage 表，前端只需在用量面板轮询时读取。
-          // 这里不额外处理，留给 TokenUsagePanel 的 30s 轮询展示。
+          // token 用量由 Rust 在 rpc.rs 拦截 usage 事件写入 token_usage 表（见 persist_usage_event）。
+          // 前端不在此处理，TokenUsagePanel 轮询 list_token_usage 时读取最新数据。
           break;
         }
         case "error": {
-          if (event.recoverable === false || event.sessionId) {
-            appendMessageToConversation(
-              conversationId,
-              progressToMessage({ title: "处理出错", content: event.message }),
-              "paused",
-            );
+          // host 的 error 事件都是会话级不可恢复错误（prompt 抛错、agent loop 异常）。
+          // 可恢复错误（如单次工具调用失败）由 pi 在 customTool execute 内部处理，不走此事件。
+          // 因此这里无条件展示错误并清理 running/busy（recoverable 字段保留供未来扩展）。
+          appendMessageToConversation(
+            conversationId,
+            progressToMessage({ title: "处理出错", content: event.message }),
+            "paused",
+          );
+          setConversationRunning(conversationId, false);
+          clearBusySafetyTimeout(activeRunIdRef.current);
+          if (currentConversationIdRef.current === conversationId) {
+            setBusy(false);
+            busyRef.current = false;
           }
           break;
         }
@@ -1753,10 +1837,10 @@ export default function App() {
     recordHumanUsage(selectedHuman.id);
     const runId = activeRunIdRef.current + 1;
     activeRunIdRef.current = runId;
-    await invoke("reset_abort_flag").catch(() => {});
 
     const conversationId = ensureConversation();
     setBusy(true);
+    busyRef.current = true;
     setConversationRunning(conversationId, true);
     setActiveNav("tasks");
     const attachmentContext = getAlertAttachmentContext(conversationId);
@@ -1789,6 +1873,8 @@ export default function App() {
           type: "new_session",
           humanId: selectedHuman.id,
           conversationId,
+          // 自定义 MCP 员工（非内置 9 个）需要 mcpServiceId 才能在 host 端获得 MCP 工具白名单。
+          mcpServiceId: selectedHuman.mcpService,
           resumeMessages: conversationMessageBuffersRef.current[conversationId]?.map((message) => ({
             role: message.role,
             content: message.content,
@@ -1814,6 +1900,8 @@ export default function App() {
         setSelectedQuickActionId(undefined);
       }
     } catch (error) {
+      // prompt 调用本身失败（网络/会话不存在等），pi 尚未或已停止跑 agent loop，
+      // agent_end 不会到达，必须在此兜底清理 running/busy，否则会话永久卡死。
       if (isCurrentRun(runId)) {
         appendMessageToConversation(
           conversationId,
@@ -1823,13 +1911,17 @@ export default function App() {
           }),
           "paused",
         );
+        setConversationRunning(conversationId, false);
+        if (busyRef.current) setBusy(false);
       }
     } finally {
-      // pi 的 agent_end 事件会负责清理 running 标记和 busy；
-      // 这里只在出错（没等到 agent_end）时兜底清理。
-      if (!isCurrentRun(runId)) {
-        // no-op：当前 run 已被 newer run 取代，pi 事件订阅会处理。
-      }
+      // 正常情况下 pi 的 agent_end 事件负责清理 running/busy（见 subscribePiEvents）。
+      // 但 agent loop 内部异步异常（LLM 网络错误、customTool 抛错）可能不发 agent_end/error，
+      // 此时 sendRpc 已成功返回但事件流静默中断。为防止 UI 永久卡死，加一个安全超时：
+      // 若 5 分钟后该 run 仍在跑，强制清理。
+      const runIdAtFinally = runId;
+      const conversationIdAtFinally = conversationId;
+      scheduleBusySafetyTimeout(runIdAtFinally, conversationIdAtFinally);
     }
   };
 
@@ -2397,11 +2489,14 @@ export default function App() {
     if (piSessionId) {
       await sendRpc({ type: "abort", sessionId: piSessionId }).catch(() => {});
     }
-    await invoke("abort_task").catch(() => {});
     if (conversationId) {
       setConversationRunning(conversationId, false);
     }
+    // 取消安全超时并清理 busy（abort 后 agent_end 可能仍会到达，但这里即时清理更稳）。
+    clearBusySafetyTimeout(activeRunIdRef.current);
+    activeRunIdRef.current += 1; // 使当前 run 失效，避免迟到的 agent_end 错误清理
     setBusy(false);
+    busyRef.current = false;
     setPrompt("");
   };
 
@@ -2529,6 +2624,22 @@ export default function App() {
     }
   };
 
+  /** 清理某会话相关的所有内存 ref（删除/归档时调用，避免长期使用后 ref 表无限增长）。 */
+  const cleanupConversationRefs = (conversationId: string) => {
+    delete conversationMessageBuffersRef.current[conversationId];
+    delete conversationMetadataRef.current[conversationId];
+    delete conversationPiSessionRef.current[conversationId];
+    delete streamingMessageIdRef.current[conversationId];
+    delete conversationSaveQueuesRef.current[conversationId];
+    // toolMessageIdRef 按 `${conversationId}:${toolCallId}` 索引，需按前缀清理。
+    const prefix = `${conversationId}:`;
+    for (const key of Object.keys(toolMessageIdRef.current)) {
+      if (key.startsWith(prefix)) delete toolMessageIdRef.current[key];
+    }
+    clearAlertAttachmentContext(conversationId);
+    clearRiskAssessmentContext(conversationId);
+  };
+
   const handleModalConfirm = async (value?: string) => {
     if (!modal) return;
     const { type, task } = modal;
@@ -2540,11 +2651,7 @@ export default function App() {
         await stopPersistedRiskAssessment(task.id, false);
         deletedConversationIdsRef.current.add(task.id);
         archivedTaskIdsRef.current.delete(task.id);
-        delete conversationMessageBuffersRef.current[task.id];
-        delete conversationMetadataRef.current[task.id];
-        delete conversationPiSessionRef.current[task.id];
-        clearAlertAttachmentContext(task.id);
-        clearRiskAssessmentContext(task.id);
+        cleanupConversationRefs(task.id);
         await deleteConversation(task.id);
         setRecentTasks((items) => items.filter((item) => item.id !== task.id));
         setArchivedTasks((items) => items.filter((item) => item.id !== task.id));
@@ -2555,6 +2662,8 @@ export default function App() {
       } else if (type === "archive") {
         await stopPersistedRiskAssessment(task.id, true);
         await archiveConversation(task.id);
+        // 归档会话不再活跃，释放其内存 ref（恢复时会重新 load）。
+        cleanupConversationRefs(task.id);
         archivedTaskIdsRef.current.add(task.id);
         setRecentTasks((items) => items.filter((item) => item.id !== task.id));
         setArchivedTasks((items) => {

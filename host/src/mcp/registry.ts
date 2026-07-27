@@ -42,26 +42,24 @@ export class McpRegistry {
 
   /** 重载所有 MCP 连接（配置变更时调用）。返回每个服务的连接结果。 */
   async configure(servers: McpServerConfig[]): Promise<Array<{ serviceId: string; ok: boolean; error?: string; toolCount?: number }>> {
-    // 关闭不再启用的旧连接
-    const newServiceIds = new Set(servers.filter((s) => s.enabled).map((s) => s.serviceId));
+    // 关闭不再启用、或配置已变更的旧连接（后者需要重连）
+    const newConfigById = new Map<string, McpServerConfig>();
+    for (const s of servers) {
+      if (s.enabled) newConfigById.set(s.serviceId, s);
+    }
     for (const [serviceId, server] of this.servers) {
-      if (!newServiceIds.has(serviceId)) {
+      const newCfg = newConfigById.get(serviceId);
+      if (!newCfg || !this.configEquals(server.config, newCfg)) {
         await disconnectMcpServer(server);
         this.servers.delete(serviceId);
         this.toolWhitelists.delete(serviceId);
       }
     }
 
-    const results: Array<{ serviceId: string; ok: boolean; error?: string; toolCount?: number }> = [];
-    for (const config of servers) {
-      if (!config.enabled) continue;
-      // 已连接且配置未变：跳过
-      const existing = this.servers.get(config.serviceId);
-      if (existing) {
-        results.push({ serviceId: config.serviceId, ok: true, toolCount: existing.tools.length });
-        continue;
-      }
-      try {
+    // 并发连接所有需要（重新）建立的服务：串行连接时单个卡死会拖死全部（即便有握手超时也要等 30s）。
+    const toConnect = servers.filter((s) => s.enabled && !this.servers.has(s.serviceId));
+    const connectResults = await Promise.allSettled(
+      toConnect.map(async (config) => {
         const server = await connectMcpServer(config);
         this.servers.set(config.serviceId, server);
         // alert-analysis 限定 4 个工具（与原 Nova alert_analysis_mcp.rs 白名单一致）
@@ -73,16 +71,54 @@ export class McpRegistry {
             "extract_alert_image",
           ]));
         }
-        results.push({ serviceId: config.serviceId, ok: true, toolCount: server.tools.length });
-      } catch (error) {
+        return { serviceId: config.serviceId, ok: true, toolCount: server.tools.length };
+      }),
+    );
+
+    const results: Array<{ serviceId: string; ok: boolean; error?: string; toolCount?: number }> = [];
+    // 保留连接（配置未变）的服务
+    for (const [serviceId, server] of this.servers) {
+      if (!toConnect.some((c) => c.serviceId === serviceId)) {
+        results.push({ serviceId, ok: true, toolCount: server.tools.length });
+      }
+    }
+    // 新连接结果（allSettled 保持输入顺序，用索引对齐 toConnect）
+    connectResults.forEach((settled, idx) => {
+      if (settled.status === "fulfilled") {
+        results.push(settled.value);
+      } else {
+        const config = toConnect[idx];
         results.push({
           serviceId: config.serviceId,
           ok: false,
-          error: error instanceof Error ? error.message : String(error),
+          error: settled.reason instanceof Error ? settled.reason.message : String(settled.reason),
         });
       }
-    }
+    });
     return results;
+  }
+
+  /** 浅比较配置字段，判断是否需要重连。 */
+  private configEquals(a: McpServerConfig, b: McpServerConfig): boolean {
+    return (
+      a.transport === b.transport &&
+      a.commandPath === b.commandPath &&
+      a.commandArgs === b.commandArgs &&
+      a.url === b.url &&
+      a.launchMode === b.launchMode &&
+      a.timeoutSecs === b.timeoutSecs &&
+      this.envEquals(a.env, b.env)
+    );
+  }
+
+  private envEquals(a?: Record<string, string>, b?: Record<string, string>): boolean {
+    const ak = a ? Object.keys(a) : [];
+    const bk = b ? Object.keys(b) : [];
+    if (ak.length !== bk.length) return false;
+    for (const k of ak) {
+      if (a![k] !== b?.[k]) return false;
+    }
+    return true;
   }
 
   /** 把指定员工允许的 MCP 服务的工具，全部注册为 pi customTool。 */

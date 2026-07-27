@@ -18,9 +18,17 @@ where
 {
     let connection =
         Connection::open(path).map_err(|error| format!("无法打开 SQLite 数据库：{error}"))?;
+    // 启用 WAL + busy_timeout：并发写（自动保存 / 标题生成 / token 写入）默认 rollback journal
+    // + 0 超时会直接抛 SQLITE_BUSY，用户偶发看到"保存失败"。WAL 允许并发读+单写，busy_timeout
+    // 让写方等待 5s 而非立即失败。
     connection
-        .execute_batch("PRAGMA foreign_keys = ON;")
-        .map_err(|error| format!("无法启用本地存储外键约束：{error}"))?;
+        .execute_batch(
+            "PRAGMA journal_mode = WAL;\
+             PRAGMA busy_timeout = 5000;\
+             PRAGMA synchronous = NORMAL;\
+             PRAGMA foreign_keys = ON;",
+        )
+        .map_err(|error| format!("无法初始化本地存储参数：{error}"))?;
     initialize(&connection)?;
     Ok(connection)
 }

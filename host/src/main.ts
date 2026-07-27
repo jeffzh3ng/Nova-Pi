@@ -73,7 +73,7 @@ async function handleCommand(command: RpcCommand): Promise<void> {
         const sessionId = await pool.createSession({
           humanId: command.humanId,
           conversationId: command.conversationId,
-          mcpServiceId: undefined,
+          mcpServiceId: command.mcpServiceId,
           resumeMessages: command.resumeMessages,
         });
         writeResponse(id, true, sessionId);
@@ -86,6 +86,12 @@ async function handleCommand(command: RpcCommand): Promise<void> {
       }
       case "prompt": {
         if (!pool) throw new Error("host 尚未就绪");
+        // 先校验 session 存在性：不存在直接同步失败，避免"响应成功后又收到 error 事件"
+        // 的状态机不一致（前端 sendRpc 会 reject，不会误以为已开始）。
+        if (!pool.hasSession(command.sessionId)) {
+          writeResponse(id, false, `会话不存在：${command.sessionId}`);
+          return;
+        }
         // 异步触发：立即响应成功，流式事件通过 forwardEvent 回流
         writeResponse(id, true);
         void pool.prompt({
@@ -191,15 +197,9 @@ async function handleCommand(command: RpcCommand): Promise<void> {
         writeResponse(id, true, { skillId: null });
         return;
       }
-      case "risk_list_matrices":
-      case "risk_submit":
-      case "risk_status":
-      case "risk_cancel": {
-        // 风评的 MCP 工具已通过 mcpRegistry 注册为 customTool，pi 会自主调用；
-        // 这些显式命令保留给前端编排（如上传后的矩阵选择）。MVP 通过 mcp_call 转发。
-        writeResponse(id, true, { note: "use mcp_call with data-security-risk-assessment-mcp tools" });
-        return;
-      }
+      // 注：risk_list_matrices / risk_submit / risk_status / risk_cancel 命令已移除。
+      // 风评流程完全走 mcp_call（data-security-risk-assessment-mcp 的工具），由 pi 自主调用，
+      // 前端 pollRiskAssessment 每 3s 轮询 get_task_status。host 不再做风评编排。
       // ── 模型管理 ──
       case "models_list_providers": {
         writeResponse(id, true, await listProviders(getModelRuntime()));

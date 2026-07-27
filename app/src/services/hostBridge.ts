@@ -2,6 +2,14 @@ import { invoke } from "@tauri-apps/api/core";
 import { listen, type UnlistenFn } from "@tauri-apps/api/event";
 
 /**
+ * Rust rpc.rs 的响应路径说明：
+ * sidecar 的 response 消息在 Rust 端被 oneshot 截获，作为 `invoke("send_rpc")` 的返回值给前端。
+ * Rust 只对 event 类型消息 `app.emit("pi-event", event)`，且 emit 的是 RpcEvent 本体
+ * （`{type:"message_update", sessionId, ...}`），**不带 envelope 包装**。
+ * 因此这里的 listener 直接消费 RpcEvent 本体，不再按 envelope 的 `kind` 字段分发。
+ */
+
+/**
  * hostBridge —— 前端 ↔ Rust ↔ Node sidecar(pi 内核) 的统一桥接层。
  *
  * 前端通过 `sendRpc(command)` 把命令交给 Rust，Rust 转发给 Node sidecar，
@@ -17,7 +25,7 @@ import { listen, type UnlistenFn } from "@tauri-apps/api/event";
 
 export type RpcCommand =
   // 会话生命周期
-  | { id?: string; type: "new_session"; humanId: string; conversationId: string; resumeMessages?: unknown[] }
+  | { id?: string; type: "new_session"; humanId: string; conversationId: string; mcpServiceId?: string; resumeMessages?: unknown[] }
   | { id?: string; type: "dispose_session"; sessionId: string }
   // 对话
   | { id?: string; type: "prompt"; sessionId: string; message: string; images?: unknown[]; attachments?: ConversationAttachments }
@@ -35,11 +43,7 @@ export type RpcCommand =
   // 技能
   | { id?: string; type: "list_skills" }
   | { id?: string; type: "resolve_skill"; request: string; sessionId?: string }
-  // 风评
-  | { id?: string; type: "risk_list_matrices" }
-  | { id?: string; type: "risk_submit"; sessionId: string; materialId: string; matrixName: string }
-  | { id?: string; type: "risk_status"; taskId: string }
-  | { id?: string; type: "risk_cancel"; taskId: string }
+  // 风评：完全走 mcp_call（pi 自主调用 data-security-risk-assessment-mcp 工具），无独立 risk_* 命令。
   // 模型管理（pi models.json + ModelRuntime）
   | { id?: string; type: "models_list_providers" }
   | { id?: string; type: "models_list_all" }
@@ -165,36 +169,19 @@ export type PiEvent =
 // 发送 RPC 命令并等待响应
 // ─────────────────────────────────────────────────────────────────────────────
 
-let requestIdCounter = 0;
-const pendingRequests = new Map<string, { resolve: (data: unknown) => void; reject: (error: Error) => void }>();
 let eventUnlisten: Promise<UnlistenFn> | null = null;
 
 const ensureEventListener = () => {
   if (eventUnlisten) return eventUnlisten;
-  eventUnlisten = listen<RiEventEnvelope>("pi-event", (event) => {
+  // Rust 透传的是 RpcEvent 本体（见文件顶部说明），这里按 `type` 字段识别事件，
+  // 过滤掉非事件 payload（防御性：未来若 Rust 改为 emit envelope 也不致崩溃）。
+  eventUnlisten = listen<PiEvent>("pi-event", (event) => {
     const payload = event.payload;
-    if (!payload) return;
-    // 同步响应：按 id 匹配 pending 请求
-    if (payload.kind === "response" && payload.id) {
-      const pending = pendingRequests.get(payload.id);
-      if (!pending) return;
-      pendingRequests.delete(payload.id);
-      if (payload.success) pending.resolve(payload.data);
-      else pending.reject(new Error(payload.error || "RPC 调用失败"));
-      return;
-    }
-    // 异步事件流：分发给订阅者
-    if (payload.kind === "event" && payload.event) {
-      notifyEventListeners(payload.event as PiEvent);
-    }
+    if (!payload || typeof payload !== "object" || !("type" in payload)) return;
+    notifyEventListeners(payload as PiEvent);
   });
   return eventUnlisten;
 };
-
-type RiEventEnvelope =
-  | { kind: "response"; id?: string; success: true; data?: unknown }
-  | { kind: "response"; id?: string; success: false; error: string }
-  | { kind: "event"; event: unknown };
 
 const eventListeners = new Set<(event: PiEvent) => void>();
 
@@ -212,6 +199,9 @@ function notifyEventListeners(event: PiEvent) {
  * 发送一条 RPC 命令到 Node sidecar（经 Rust 转发），并等待同步响应。
  * 异步事件（流式 token、工具执行、风评进度等）通过 `subscribePiEvents` 订阅。
  *
+ * 同步响应由 Rust 的 `send_rpc` 命令直接返回（rpc.rs 用 oneshot 在 Rust 端
+ * 截获 sidecar 的 response 消息，作为 invoke 的返回值），不经过 `pi-event` 事件。
+ *
  * 用泛型分发保留联合类型推断：传入某个具体命令变体时，TS 能正确匹配到
  * `RpcCommand` 的对应分支，避免「Object literal may only specify known properties」。
  *
@@ -223,18 +213,9 @@ export async function sendRpc<TResult = unknown, TCommand extends RpcCommand = R
   command: TCommand extends { id?: string } ? Omit<TCommand, "id"> : TCommand,
 ): Promise<TResult> {
   await ensureEventListener();
-  const id = `req-${Date.now()}-${requestIdCounter++}`;
-  const fullCommand = { ...command, id } as RpcCommand;
-  return new Promise<TResult>((resolve, reject) => {
-    pendingRequests.set(id, {
-      resolve: (data) => resolve(data as TResult),
-      reject,
-    });
-    invoke<boolean>("send_rpc", { command: fullCommand }).catch((error) => {
-      pendingRequests.delete(id);
-      reject(error instanceof Error ? error : new Error(String(error)));
-    });
-  });
+  // Rust 端会重新生成内部 id（rpc.rs:62 `rust-{uuid}`）覆写这里的 id；
+  // 前端无需匹配响应（走 invoke 返回值），这里保留 id 仅为日志/调试可读性。
+  return invoke<TResult>("send_rpc", { command });
 }
 
 /**

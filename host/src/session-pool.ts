@@ -51,15 +51,28 @@ export class SessionPool {
     mcpServiceId?: string;
     resumeMessages?: Array<{ role: string; content: string }>;
   }): Promise<string> {
-    // 若该 conversation 已有 session，先复用（避免重复创建）
-    const existing = this.conversationToSession.get(params.conversationId);
-    if (existing) return existing;
+    // 若该 conversation 已有 session：仅当 humanId 一致时复用，否则销毁重建。
+    // 否则切换数字员工后会沿用旧员工的 system prompt 和 MCP 白名单，角色错乱。
+    const existingSessionId = this.conversationToSession.get(params.conversationId);
+    if (existingSessionId) {
+      const existingEntry = this.sessions.get(existingSessionId);
+      if (existingEntry && existingEntry.humanId === params.humanId) {
+        return existingSessionId;
+      }
+      // humanId 变了（用户切换员工）：销毁旧 session，下面重建。
+      if (existingEntry) {
+        await this.dispose(existingSessionId);
+      }
+    }
 
     const human = getDigitalHuman(params.humanId) ?? makeGenericHuman(params.humanId, params.mcpServiceId);
     const model = this.resolveCurrentModel();
     const customTools = mcpRegistry.buildCustomTools(human.allowedMcpServices);
-    // 每个会话构造一个带员工 systemPromptOverride 的 ResourceLoader
-    const sessionResourceLoader = createSessionResourceLoader(human.systemPrompt);
+    // 把历史对话作为 system prompt 附录灌入，让 pi 在创建时就拥有完整上下文。
+    // pi 无"静默灌入 assistant 回复"的公开 API（sendUserMessage 会触发 turn），
+    // 因此用 system prompt 承载历史文本，避免协议层撒谎（resumeMessages 之前收到后直接 break）。
+    const systemPromptWithHistory = this.injectHistory(human.systemPrompt, params.resumeMessages);
+    const sessionResourceLoader = createSessionResourceLoader(systemPromptWithHistory);
 
     const sessionId = `pi-${params.conversationId}-${Date.now().toString(36)}`;
     const sessionManager = SessionManager.inMemory();
@@ -77,27 +90,25 @@ export class SessionPool {
     });
 
     // 订阅事件流，转发为 RPC event（sessionId 关联回 conversationId）
+    // 包 try/catch：pi 内部抛错不应冒泡到 unhandledRejection 导致进程级问题。
     session.subscribe((event: AgentSessionEvent) => {
-      this.forwardEvent(sessionId, event);
+      try {
+        this.forwardEvent(sessionId, event);
+      } catch (error) {
+        console.error(`[session-pool] forwardEvent 抛错（sessionId=${sessionId}）：`, error);
+      }
     });
 
     const entry: SessionEntry = { sessionId, conversationId: params.conversationId, session, humanId: params.humanId };
     this.sessions.set(sessionId, entry);
     this.conversationToSession.set(params.conversationId, sessionId);
 
-    // 恢复历史消息（把 resumeMessages 灌入 pi 的上下文，但不重新生成回复）
-    if (params.resumeMessages?.length) {
-      for (const msg of params.resumeMessages) {
-        if (msg.role === "user") {
-          // pi 的 session 不直接支持「静默灌入历史」，这里通过 sendUserMessage 把历史
-          // 作为上下文累加。MVP 简化：只在无历史时创建干净 session；有历史时仍创建新 session，
-          // 让前端发送的 prompt 自带必要上下文（前端已在 submitPrompt 里传 resumeMessages）。
-          break;
-        }
-      }
-    }
-
     return sessionId;
+  }
+
+  /** 判断 session 是否存在（供 main.ts 的 prompt 命令预校验，避免响应成功后又发 error）。 */
+  hasSession(sessionId: string): boolean {
+    return this.sessions.has(sessionId);
   }
 
   /** 发送 prompt 到指定会话。流式事件通过 forwardEvent 回流。 */
@@ -165,6 +176,24 @@ export class SessionPool {
     throw new Error("未配置大模型，请在设置面板配置 API Key 和模型。");
   }
 
+  /** 把历史对话作为附录拼到 system prompt 末尾，让 pi 创建时即拥有上下文。 */
+  private injectHistory(
+    basePrompt: string,
+    resumeMessages?: Array<{ role: string; content: string }>,
+  ): string {
+    if (!resumeMessages?.length) return basePrompt;
+    // 过滤空消息，截取 content 文本（assistant 消息可能是复杂结构，这里取文本即可）。
+    const turns = resumeMessages
+      .filter((msg) => msg && msg.content && typeof msg.content === "string")
+      .slice(-20) // 最多 20 轮，避免 system prompt 过长
+      .map((msg) => {
+        const role = msg.role === "assistant" ? "助手" : "用户";
+        return `${role}：${msg.content}`;
+      });
+    if (turns.length === 0) return basePrompt;
+    return `${basePrompt}\n\n--- 以下是之前的历史对话，作为上下文参考（请基于此继续，不要重复已回答的内容）---\n${turns.join("\n")}`;
+  }
+
   private injectAttachments(message: string, attachments?: ConversationAttachments): string {
     if (!attachments) return message;
     const parts: string[] = [];
@@ -188,13 +217,15 @@ export class SessionPool {
 
   private forwardEvent(sessionId: string, event: AgentSessionEvent): void {
     const entry = this.sessions.get(sessionId);
-    const conversationId = entry?.conversationId;
+    // dispose 后残留的队列事件直接丢弃，避免发出无 conversationId 的孤儿事件。
+    if (!entry) return;
+    const conversationId = entry.conversationId;
     // 透传 pi 事件的核心子集；前端按 sessionId→conversationId 映射后更新 ChatMessage。
     // 不同事件类型携带的字段不同，这里统一加 sessionId 后转发。
     const payload = { ...event, sessionId } as Record<string, unknown>;
     // agent_end 时聚合 usage 上报（token 统计）
     if (event.type === "agent_end" && conversationId) {
-      this.emitUsageFromAgentEnd(sessionId, event, entry?.humanId);
+      this.emitUsageFromAgentEnd(sessionId, event, entry.humanId);
     }
     writeEvent(payload as Parameters<typeof writeEvent>[0]);
   }

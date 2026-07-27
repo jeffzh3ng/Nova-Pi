@@ -18,8 +18,6 @@ mod rpc;
 mod sidecar;
 mod skill_registry;
 
-use std::sync::{atomic::AtomicBool, Arc};
-
 use conversation_store::{
     archive_conversation, delete_conversation, generate_conversation_title,
     list_archived_conversations, list_conversations, load_conversation, rename_conversation,
@@ -44,10 +42,6 @@ use skill_registry::{
     delete_user_skill, execute_skill_plan, get_skill, list_skill_catalog, list_skills,
     open_user_skill_dir, pick_and_install_skill, set_skill_enabled,
 };
-use tauri::State;
-
-/// 任务中止标志（跨 command 共享）
-pub struct AbortFlag(pub Arc<AtomicBool>);
 
 /// MCP 连接测试：经 sidecar 的 MCP 客户端做 initialize + tools/list 握手。
 #[tauri::command]
@@ -111,23 +105,10 @@ fn start_sidecar(app: tauri::AppHandle) -> Result<(), String> {
     sidecar::start_sidecar(&app)
 }
 
-/// 设置中止标志
-#[tauri::command]
-fn abort_task(flag: State<AbortFlag>) {
-    flag.0.store(true, std::sync::atomic::Ordering::Relaxed);
-}
-
-/// 重置中止标志（新任务开始前调用）
-#[tauri::command]
-fn reset_abort_flag(flag: State<AbortFlag>) {
-    flag.0.store(false, std::sync::atomic::Ordering::Relaxed);
-}
-
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
     rpc::init();
     tauri::Builder::default()
-        .manage(AbortFlag(Arc::new(AtomicBool::new(false))))
         .setup(|app| {
             // 应用启动时拉起 Node sidecar
             if let Err(error) = sidecar::start_sidecar(app.handle()) {
@@ -186,10 +167,7 @@ pub fn run() {
             execute_skill_plan,
             // 风评大文件
             upload_risk_assessment_material,
-            download_risk_assessment_result,
-            // 中断
-            abort_task,
-            reset_abort_flag
+            download_risk_assessment_result
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");

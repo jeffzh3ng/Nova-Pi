@@ -31,7 +31,7 @@ export type ConversationAttachments = {
 
 export type RpcCommand =
   // 会话生命周期
-  | { id?: string; type: "new_session"; humanId: string; conversationId: string; resumeMessages?: Array<{ role: string; content: string }> }
+  | { id?: string; type: "new_session"; humanId: string; conversationId: string; mcpServiceId?: string; resumeMessages?: Array<{ role: string; content: string }> }
   | { id?: string; type: "dispose_session"; sessionId: string }
   // 对话
   | { id?: string; type: "prompt"; sessionId: string; message: string; images?: unknown[]; attachments?: ConversationAttachments }
@@ -49,11 +49,8 @@ export type RpcCommand =
   // 技能
   | { id?: string; type: "list_skills" }
   | { id?: string; type: "resolve_skill"; request: string; sessionId?: string }
-  // 风评（host 内部编排，避免前端轮询）
-  | { id?: string; type: "risk_list_matrices" }
-  | { id?: string; type: "risk_submit"; sessionId: string; materialId: string; matrixName: string }
-  | { id?: string; type: "risk_status"; taskId: string }
-  | { id?: string; type: "risk_cancel"; taskId: string }
+  // 风评：完全走 mcp_call（pi 自主调用 data-security-risk-assessment-mcp 工具），
+  // 前端 pollRiskAssessment 轮询进度。host 不再编排，故无独立 risk_* 命令。
   // 模型管理（读写 pi models.json + ModelRuntime）
   | { id?: string; type: "models_list_providers" }
   | { id?: string; type: "models_list_all" }
@@ -107,8 +104,43 @@ export type RpcEvent =
 export type RpcEventEnvelope = { type: "event"; event: RpcEvent };
 
 // ─────────────────────────────────────────────────────────────────────────────
-// stdout 写入帮助
+// stdout 写入帮助（带背压处理）
 // ─────────────────────────────────────────────────────────────────────────────
+//
+// Node 的 `process.stdout.write(buf)` 在内部写缓冲超过 highWaterMark 时返回 `false`，
+// 调用方必须等 `'drain'` 事件再继续写，否则数据会被静默截断。流式 token 事件可达几十/秒，
+// 若 Rust 端读取/解析/emitter 跟不上，写缓冲会持续增长，最终导致前端显示残缺甚至
+// 行边界错乱（一行 JSON 被截成两半，Rust 端 from_str 失败丢弃整行）。
+//
+// 下面用一个串行化的 Promise 队列封装所有 stdout 写入：每次写都等待前一次完成，
+// write 返回 false 时等 drain 再继续，保证每行 JSON 完整且有序。
+
+let writeQueue: Promise<void> = Promise.resolve();
+
+function writeJsonLine(text: string): Promise<void> {
+  writeQueue = writeQueue.then(
+    () =>
+      new Promise<void>((resolve) => {
+        const onDrain = () => {
+          cleanup();
+          resolve();
+        };
+        const cleanup = () => {
+          process.stdout.off("drain", onDrain);
+        };
+        const canWriteWithoutDrain = process.stdout.write(text);
+        if (canWriteWithoutDrain) {
+          resolve();
+        } else {
+          process.stdout.once("drain", onDrain);
+        }
+      }),
+  ).catch((error) => {
+    // 单次写失败不应让整个队列永久 reject；记录后继续，避免后续事件全丢。
+    console.error("[rpc] stdout 写入失败：", error);
+  });
+  return writeQueue;
+}
 
 /** 写一条同步响应到 stdout（按 id 匹配 pending 请求）。 */
 export function writeResponse(id: string | undefined, success: true, data?: unknown): void;
@@ -117,11 +149,11 @@ export function writeResponse(id: string | undefined, success: boolean, payload?
   const response: RpcResponse = success
     ? { id, type: "response", success: true, data: payload }
     : { id, type: "response", success: false, error: typeof payload === "string" ? payload : String(payload ?? "") };
-  process.stdout.write(`${JSON.stringify(response)}\n`);
+  void writeJsonLine(`${JSON.stringify(response)}\n`);
 }
 
 /** 写一条异步事件到 stdout（Rust 以 emit("pi-event") 转发前端）。 */
 export function writeEvent(event: RpcEvent): void {
   const envelope: RpcEventEnvelope = { type: "event", event };
-  process.stdout.write(`${JSON.stringify(envelope)}\n`);
+  void writeJsonLine(`${JSON.stringify(envelope)}\n`);
 }

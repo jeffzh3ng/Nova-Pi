@@ -22,9 +22,10 @@
  * 也写进 models.json 的 apiKey 字段持久化，保证重启后仍可用。
  */
 
-import { join } from "node:path";
-import { readFile, writeFile, mkdir } from "node:fs/promises";
+import { join, dirname } from "node:path";
+import { readFile, writeFile, mkdir, rename } from "node:fs/promises";
 import { existsSync } from "node:fs";
+import { randomUUID } from "node:crypto";
 import { ModelRuntime } from "@earendil-works/pi-coding-agent";
 
 /** pi 支持的 API 类型（用于 provider 配置的下拉选择）。 */
@@ -95,6 +96,19 @@ export type DefaultModelInfo = {
 let modelsJsonPath = "";
 let settingsJsonPath = "";
 
+// 全局写锁：所有 read-modify-write 操作（upsert/remove/setKey）串行化，
+// 防止两个并发 RPC 读到同一份旧数据后互相覆盖（导致 apiKey 或 model 丢失）。
+let writeChain: Promise<unknown> = Promise.resolve();
+function withWriteLock<T>(task: () => Promise<T>): Promise<T> {
+  const next = writeChain.then(task, task);
+  // 无论 task 成功失败，链都继续；保存错误用于返回。
+  writeChain = next.then(
+    () => undefined,
+    () => undefined,
+  );
+  return next;
+}
+
 /** 初始化路径（agentDir = appDataDir/.pi/agent）。 */
 export function initModelsManagerPaths(agentDir: string): void {
   modelsJsonPath = join(agentDir, "models.json");
@@ -114,13 +128,14 @@ export async function readModelsJson(): Promise<ModelsJson> {
   }
 }
 
-/** 写入 models.json（原子写：先写临时文件再 rename）。 */
+/** 写入 models.json（原子写：先写唯一临时文件再 rename）。 */
 async function writeModelsJson(config: ModelsJson): Promise<void> {
-  await mkdir(join(modelsJsonPath, ".."), { recursive: true });
+  await mkdir(dirname(modelsJsonPath), { recursive: true });
   const content = JSON.stringify(config, null, 2);
-  const tmp = `${modelsJsonPath}.${process.pid}.tmp`;
+  // 用 randomUUID 而非 process.pid 做临时文件后缀：同一进程并发写会用相同 tmp 路径，
+  // 后写覆盖前写且 rename 顺序不可控，导致写入丢失。
+  const tmp = `${modelsJsonPath}.${randomUUID()}.tmp`;
   await writeFile(tmp, content, "utf8");
-  const { rename } = await import("node:fs/promises");
   await rename(tmp, modelsJsonPath);
 }
 
@@ -166,38 +181,42 @@ export async function upsertProvider(
     models?: ModelsJsonModel[];
   },
 ): Promise<void> {
-  const id = params.id.trim();
-  if (!id) throw new Error("Provider ID 不能为空。");
-  const config = await readModelsJson();
-  const existing = config.providers[id];
-  const provider: ModelsJsonProvider = {
-    name: params.name?.trim() || existing?.name || id,
-    baseUrl: params.baseUrl.trim(),
-    api: params.api,
-    models: params.models ?? existing?.models ?? [{ id: "default" }],
-  };
-  // apiKey 为空时不覆盖已有值（保留旧 key）；非空时更新。
-  if (params.apiKey !== undefined && params.apiKey.trim() !== "") {
-    provider.apiKey = params.apiKey.trim();
-  } else if (existing?.apiKey) {
-    provider.apiKey = existing.apiKey;
-  }
-  config.providers[id] = provider;
-  await writeModelsJson(config);
-  applyProviderToRuntime(runtime, id, provider);
+  return withWriteLock(async () => {
+    const id = params.id.trim();
+    if (!id) throw new Error("Provider ID 不能为空。");
+    const config = await readModelsJson();
+    const existing = config.providers[id];
+    const provider: ModelsJsonProvider = {
+      name: params.name?.trim() || existing?.name || id,
+      baseUrl: params.baseUrl.trim(),
+      api: params.api,
+      models: params.models ?? existing?.models ?? [{ id: "default" }],
+    };
+    // apiKey 为空时不覆盖已有值（保留旧 key）；非空时更新。
+    if (params.apiKey !== undefined && params.apiKey.trim() !== "") {
+      provider.apiKey = params.apiKey.trim();
+    } else if (existing?.apiKey) {
+      provider.apiKey = existing.apiKey;
+    }
+    config.providers[id] = provider;
+    await writeModelsJson(config);
+    applyProviderToRuntime(runtime, id, provider);
+  });
 }
 
 /** 删除一个 provider。 */
 export async function removeProvider(runtime: ModelRuntime, providerId: string): Promise<void> {
-  const config = await readModelsJson();
-  if (!config.providers[providerId]) return;
-  delete config.providers[providerId];
-  await writeModelsJson(config);
-  try {
-    await runtime.removeRuntimeApiKey(providerId);
-  } catch {
-    // ignore
-  }
+  return withWriteLock(async () => {
+    const config = await readModelsJson();
+    if (!config.providers[providerId]) return;
+    delete config.providers[providerId];
+    await writeModelsJson(config);
+    try {
+      await runtime.removeRuntimeApiKey(providerId);
+    } catch {
+      // ignore
+    }
+  });
 }
 
 /** 设置 provider 的 API key（同时更新 models.json 和 runtime 内存层）。 */
@@ -206,12 +225,14 @@ export async function setProviderApiKey(
   providerId: string,
   apiKey: string,
 ): Promise<void> {
-  const config = await readModelsJson();
-  const provider = config.providers[providerId];
-  if (!provider) throw new Error(`Provider 不存在：${providerId}`);
-  provider.apiKey = apiKey.trim();
-  await writeModelsJson(config);
-  runtime.setRuntimeApiKey(providerId, apiKey.trim());
+  return withWriteLock(async () => {
+    const config = await readModelsJson();
+    const provider = config.providers[providerId];
+    if (!provider) throw new Error(`Provider 不存在：${providerId}`);
+    provider.apiKey = apiKey.trim();
+    await writeModelsJson(config);
+    runtime.setRuntimeApiKey(providerId, apiKey.trim());
+  });
 }
 
 /** 给 provider 增删改单个 model。 */
@@ -220,14 +241,16 @@ export async function upsertModel(
   providerId: string,
   model: ModelsJsonModel,
 ): Promise<void> {
-  const config = await readModelsJson();
-  const provider = config.providers[providerId];
-  if (!provider) throw new Error(`Provider 不存在：${providerId}`);
-  provider.models = provider.models ?? [];
-  const idx = provider.models.findIndex((m) => m.id === model.id);
-  if (idx >= 0) provider.models[idx] = model;
-  else provider.models.push(model);
-  await writeModelsJson(config);
+  return withWriteLock(async () => {
+    const config = await readModelsJson();
+    const provider = config.providers[providerId];
+    if (!provider) throw new Error(`Provider 不存在：${providerId}`);
+    provider.models = provider.models ?? [];
+    const idx = provider.models.findIndex((m) => m.id === model.id);
+    if (idx >= 0) provider.models[idx] = model;
+    else provider.models.push(model);
+    await writeModelsJson(config);
+  });
 }
 
 export async function removeModel(
@@ -235,11 +258,13 @@ export async function removeModel(
   providerId: string,
   modelId: string,
 ): Promise<void> {
-  const config = await readModelsJson();
-  const provider = config.providers[providerId];
-  if (!provider?.models) return;
-  provider.models = provider.models.filter((m) => m.id !== modelId);
-  await writeModelsJson(config);
+  return withWriteLock(async () => {
+    const config = await readModelsJson();
+    const provider = config.providers[providerId];
+    if (!provider?.models) return;
+    provider.models = provider.models.filter((m) => m.id !== modelId);
+    await writeModelsJson(config);
+  });
 }
 
 /** 读取/写入 settings.json 的默认 provider + model。 */
@@ -362,7 +387,10 @@ function stripJsonComments(text: string): string {
     if (char === "/" && next === "*") {
       i += 2;
       while (i < text.length && !(text[i] === "*" && text[i + 1] === "/")) i += 1;
-      i += 2;
+      // 块注释未闭合（读到末尾）：直接结束，不要再 += 2（否则 i 越界，
+      // 下次循环 text[i] 为 undefined，与 "/" 不等落入 result += char，死循环 CPU 100%）。
+      if (i >= text.length) break;
+      i += 2; // 跳过结尾的 */
       continue;
     }
     result += char;
