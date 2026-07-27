@@ -1,7 +1,7 @@
 /**
  * pi AgentSession 生命周期管理 + 事件转发。
  *
- * 每个 conversation 创建一个 AgentSession（noTools:"all" + customTools 来自 MCP 注册中心
+ * 每个 conversation 创建一个 AgentSession（noTools:"builtin" + MCP inline extension
  * + 该员工的 system prompt）。pi 的事件流订阅后转发为 RPC event，由 Rust emit 给前端。
  */
 
@@ -13,7 +13,6 @@ import {
   type ResourceLoader,
 } from "@earendil-works/pi-coding-agent";
 import type { Model } from "@earendil-works/pi-ai";
-import { mcpRegistry } from "./mcp/registry.js";
 import { getDigitalHuman, makeGenericHuman } from "./digital-human.js";
 import { getModelRuntime, resolveModel, applyApiKey, type HostModelSettings } from "./model-setup.js";
 import { writeEvent, type ConversationAttachments } from "./rpc-protocol.js";
@@ -40,8 +39,19 @@ export class SessionPool {
     void _loader;
   }
 
-  setModelSettings(settings: HostModelSettings): void {
+  async setModelSettings(settings: HostModelSettings): Promise<void> {
+    applyApiKey(settings);
+    const model = resolveModel(settings);
     this.modelSettings = settings;
+    await Promise.all(
+      Array.from(this.sessions.values(), async (entry) => {
+        try {
+          await entry.session.setModel(model);
+        } catch (error) {
+          console.error(`[session-pool] 切换会话模型失败（sessionId=${entry.sessionId}）：`, error);
+        }
+      }),
+    );
   }
 
   /** 创建新会话。返回 sessionId（供前端后续 prompt/abort 引用）。 */
@@ -67,12 +77,14 @@ export class SessionPool {
 
     const human = getDigitalHuman(params.humanId) ?? makeGenericHuman(params.humanId, params.mcpServiceId);
     const model = this.resolveCurrentModel();
-    const customTools = mcpRegistry.buildCustomTools(human.allowedMcpServices);
     // 把历史对话作为 system prompt 附录灌入，让 pi 在创建时就拥有完整上下文。
     // pi 无"静默灌入 assistant 回复"的公开 API（sendUserMessage 会触发 turn），
     // 因此用 system prompt 承载历史文本，避免协议层撒谎（resumeMessages 之前收到后直接 break）。
     const systemPromptWithHistory = this.injectHistory(human.systemPrompt, params.resumeMessages);
-    const sessionResourceLoader = createSessionResourceLoader(systemPromptWithHistory);
+    const sessionResourceLoader = await createSessionResourceLoader(
+      systemPromptWithHistory,
+      human.allowedMcpServices,
+    );
 
     const sessionId = `pi-${params.conversationId}-${Date.now().toString(36)}`;
     const sessionManager = SessionManager.inMemory();
@@ -81,10 +93,9 @@ export class SessionPool {
       model,
       thinkingLevel: "off",
       modelRuntime: getModelRuntime(),
-      // noTools:"all" 禁用 pi 内置 read/bash/edit/write（桌面工作台不需要文件操作 agent），
-      // 所有能力通过 customTools 注入：MCP 工具 + 内置工具（风评/告警/公文）。
-      noTools: "all",
-      customTools,
+      // 仅禁用 pi 内置 read/bash/edit/write；MCP 作为 extensionFactories
+      // 注入，因此必须保留扩展工具。这也是 pi SDK 对嵌入式扩展的标准配置。
+      noTools: "builtin",
       resourceLoader: sessionResourceLoader,
       sessionManager,
     });
@@ -148,17 +159,6 @@ export class SessionPool {
     }
     this.sessions.clear();
     this.conversationToSession.clear();
-  }
-
-  /** 配置变更后，对现有会话重注册工具（新增/移除 MCP 服务）。 */
-  refreshTools(): void {
-    for (const entry of this.sessions.values()) {
-      const human = getDigitalHuman(entry.humanId);
-      if (!human) continue;
-      // AgentSession 的 customTools 在创建时固定；MVP 不支持运行时动态增删工具，
-      // 配置变更后用户需重新发起会话。下次 createSession 会自动带上最新工具集。
-      void human;
-    }
   }
 
   // ── 内部 ──

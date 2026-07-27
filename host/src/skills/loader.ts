@@ -13,14 +13,16 @@
 
 import {
   DefaultResourceLoader,
-  createExtensionRuntime,
   type ResourceLoader,
 } from "@earendil-works/pi-coding-agent";
+import { createMcpExtension } from "../mcp/extension.js";
 
 let baseLoader: ResourceLoader | null = null;
+let configuredAgentDir: string | null = null;
 
 /** 初始化基础 ResourceLoader（在 agentDir 下发现 skills/extensions/prompts）。 */
 export async function initBaseResourceLoader(agentDir: string): Promise<ResourceLoader> {
+  configuredAgentDir = agentDir;
   baseLoader = new DefaultResourceLoader({
     cwd: process.cwd(),
     agentDir,
@@ -35,21 +37,24 @@ export function getBaseResourceLoader(): ResourceLoader | null {
 
 /**
  * 为单个会话构造一个带 systemPromptOverride 的 ResourceLoader。
- * base 来自已初始化的基础 loader（复用 skills/extensions 发现结果），仅替换 system prompt。
+ * 每个会话使用独立 extension runtime，避免 pi 会话之间共享事件状态；skills、用户扩展
+ * 仍由同一个 agentDir 发现，同时额外注入该员工允许的 MCP inline extension。
  */
-export function createSessionResourceLoader(humanSystemPrompt: string): ResourceLoader {
-  const base = baseLoader;
-  return {
-    getExtensions: () => base?.getExtensions() ?? { extensions: [], errors: [], runtime: createExtensionRuntime() },
-    getSkills: () => base?.getSkills() ?? { skills: [], diagnostics: [] },
-    getPrompts: () => base?.getPrompts() ?? { prompts: [], diagnostics: [] },
-    getThemes: () => base?.getThemes() ?? { themes: [], diagnostics: [] },
-    getAgentsFiles: () => base?.getAgentsFiles() ?? { agentsFiles: [] },
-    getSystemPrompt: () => humanSystemPrompt,
-    getAppendSystemPrompt: () => base?.getAppendSystemPrompt() ?? [],
-    extendResources: (paths) => base?.extendResources(paths),
-    reload: async (options) => { await base?.reload(options); },
-  };
+export async function createSessionResourceLoader(
+  humanSystemPrompt: string,
+  allowedMcpServices: string[],
+): Promise<ResourceLoader> {
+  if (!configuredAgentDir) {
+    throw new Error("pi ResourceLoader 尚未初始化。");
+  }
+  const loader = new DefaultResourceLoader({
+    cwd: process.cwd(),
+    agentDir: configuredAgentDir,
+    systemPromptOverride: () => humanSystemPrompt,
+    extensionFactories: [createMcpExtension(allowedMcpServices)],
+  });
+  await loader.reload();
+  return loader;
 }
 
 /** 列出已发现的 skills（供 list_skills RPC 返回给前端的 Skill Center）。 */

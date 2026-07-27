@@ -8,6 +8,9 @@ use std::path::PathBuf;
 use std::process::{Child, Command, Stdio};
 use std::sync::{Mutex, OnceLock};
 
+#[cfg(windows)]
+use std::os::windows::process::CommandExt;
+
 use tauri::{AppHandle, Emitter, Manager};
 
 /// 全局 sidecar 句柄（整个应用生命周期共享一个 Node 进程）。
@@ -46,13 +49,20 @@ pub fn start_sidecar(app: &AppHandle) -> Result<(), String> {
     // 先关闭旧实例，避免重复调用产生孤儿进程。
     kill_existing();
 
-    let mut child = Command::new(&program)
+    let mut command = Command::new(&program);
+    command
         .args(&args)
         .arg(agent_dir.to_string_lossy().as_ref())
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
-        .env("NOVA_PI_HOST_MODE", &mode)
+        .env("NOVA_PI_HOST_MODE", &mode);
+    // Tauri 本身是 Windows GUI 程序。Node sidecar 若按默认控制台模式
+    // 创建，会在应用启动或 watchdog 重启时短暂弹出黑色 cmd 窗口。
+    #[cfg(windows)]
+    command.creation_flags(0x0800_0000); // CREATE_NO_WINDOW
+
+    let mut child = command
         .spawn()
         .map_err(|e| format!("启动 Node sidecar 失败：{e}。请确认已安装 Node.js 22.19+。"))?;
 
@@ -168,10 +178,7 @@ fn resolve_sidecar_command(
         ))
     } else {
         // 生产期：node host/dist/main.js
-        Ok((
-            "node".to_string(),
-            vec![format!("{host_dir}/dist/main.js")],
-        ))
+        Ok(("node".to_string(), vec![format!("{host_dir}/dist/main.js")]))
     }
 }
 
@@ -180,7 +187,7 @@ fn find_host_dir() -> Result<String, String> {
     // 编译期已知的相对路径：app/src-tauri → 上溯两级到 Nova-PI，再进 host。
     // 不硬编码开发者本机绝对路径（移植性差且会随目录调整失效）。
     let candidates = [
-        "../host".to_string(),  // 标准：从 src-tauri 工作目录相对
+        "../host".to_string(),    // 标准：从 src-tauri 工作目录相对
         "../../host".to_string(), // 某些构建布局
     ];
     for candidate in &candidates {

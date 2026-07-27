@@ -27,6 +27,9 @@ import { readFile, writeFile, mkdir, rename } from "node:fs/promises";
 import { existsSync } from "node:fs";
 import { randomUUID } from "node:crypto";
 import { ModelRuntime } from "@earendil-works/pi-coding-agent";
+import { completeSimple } from "@earendil-works/pi-ai/compat";
+import type { Api, Model } from "@earendil-works/pi-ai";
+import type { HostModelSettings } from "./model-setup.js";
 
 /** pi 支持的 API 类型（用于 provider 配置的下拉选择）。 */
 export const PI_API_TYPES = [
@@ -276,6 +279,29 @@ export async function getDefaultModel(): Promise<DefaultModelInfo | null> {
   return null;
 }
 
+/** 把 models.json 中的供应商配置转换为 SessionPool 可直接应用的模型设置。 */
+export async function getProviderModelSettings(
+  providerId: string,
+  modelId: string,
+): Promise<HostModelSettings> {
+  const config = await readModelsJson();
+  const provider = config.providers[providerId];
+  if (!provider) throw new Error(`供应商不存在：${providerId}`);
+  const model = provider.models?.find((item) => item.id === modelId);
+  if (!model) throw new Error(`模型不存在：${providerId}/${modelId}`);
+  const apiKey = resolveApiKey(provider.apiKey ?? "");
+  if (!apiKey) throw new Error("未配置可用的 API Key。");
+  return {
+    provider: providerId,
+    apiKey,
+    baseUrl: provider.baseUrl ?? "",
+    model: modelId,
+    temperature: 0.2,
+    maxTokens: model.maxTokens ?? 4096,
+    proxyUrl: "",
+  };
+}
+
 export async function setDefaultModel(provider: string, model: string): Promise<void> {
   const settings = await readSettingsJson();
   settings.defaultProvider = provider;
@@ -296,6 +322,64 @@ export function listAllModels(runtime: ModelRuntime): ModelSummary[] {
     maxTokens: m.maxTokens,
     available: runtime.hasConfiguredAuth(m.provider),
   }));
+}
+
+/**
+ * 发起一次极小的真实请求，验证 provider 的 Key、Base URL 和模型 ID。
+ * hasConfiguredAuth 只能说明“存在凭据”，不能证明凭据有效，因此卡片状态必须使用本结果。
+ */
+export async function testProviderConnection(providerId: string, modelId?: string): Promise<void> {
+  const config = await readModelsJson();
+  const provider = config.providers[providerId];
+  if (!provider) throw new Error(`供应商不存在：${providerId}`);
+
+  const modelConfig = modelId
+    ? provider.models?.find((model) => model.id === modelId)
+    : provider.models?.[0];
+  if (!modelConfig) throw new Error("未配置模型 ID。");
+
+  const apiKey = resolveApiKey(provider.apiKey ?? "");
+  if (!apiKey) throw new Error("未配置可用的 API Key。");
+  if (!provider.baseUrl?.trim()) throw new Error("未配置 Base URL。");
+
+  const model: Model<Api> = {
+    id: modelConfig.id,
+    name: modelConfig.name ?? modelConfig.id,
+    api: provider.api ?? "openai-completions",
+    provider: providerId,
+    baseUrl: provider.baseUrl.trim(),
+    reasoning: modelConfig.reasoning ?? false,
+    input: modelConfig.input ?? ["text"],
+    cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
+    contextWindow: modelConfig.contextWindow ?? 128_000,
+    maxTokens: modelConfig.maxTokens ?? 4096,
+  };
+
+  const controller = new AbortController();
+  const timeout = setTimeout(() => controller.abort(), 12_000);
+  try {
+    const response = await completeSimple(
+      model,
+      {
+        messages: [{ role: "user", content: "Reply OK.", timestamp: Date.now() }],
+      },
+      {
+        apiKey,
+        maxTokens: 8,
+        maxRetries: 0,
+        timeoutMs: 10_000,
+        signal: controller.signal,
+      },
+    );
+    if (response.stopReason === "error" || response.stopReason === "aborted") {
+      throw new Error(response.errorMessage || "模型连接验证失败。");
+    }
+  } catch (error) {
+    if (controller.signal.aborted) throw new Error("模型连接验证超时。");
+    throw error;
+  } finally {
+    clearTimeout(timeout);
+  }
 }
 
 // ── 内部帮助 ──

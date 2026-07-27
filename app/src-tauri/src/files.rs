@@ -136,12 +136,12 @@ pub fn show_file_in_folder(app: AppHandle, path: String) -> Result<(), String> {
 /// Directories whose files `open_file_path` is allowed to launch.
 ///
 /// 安全：不把整个系统 temp 目录列为可信根（否则任何能写 /tmp 的进程都能让本应用
-/// 帮它打开恶意 .app/.exe/.desktop）。仅信任本应用专属子目录：nova-uploads、nova-exports，
-/// 以及 app_data_dir/exports。
+/// 帮它打开恶意 .app/.exe/.desktop）。仅信任本应用专属临时子目录，以及
+/// app_data_dir/uploads、app_data_dir/exports。
 fn allowed_open_roots(app: &AppHandle) -> Vec<PathBuf> {
     let mut roots = Vec::new();
     let temp = std::env::temp_dir();
-    // 本应用上传/导出子目录（与 write_uploaded_blob / write_temp_text_file 写入路径一致）。
+    // 保留旧临时目录作为历史兼容；新的上传文件写入 app_data_dir/uploads。
     for sub in ["nova-uploads", "nova-exports"] {
         let dir = temp.join(sub);
         if let Ok(canonical) = dir.canonicalize() {
@@ -151,11 +151,15 @@ fn allowed_open_roots(app: &AppHandle) -> Vec<PathBuf> {
         }
     }
     if let Ok(data_dir) = app.path().app_data_dir() {
-        let exports = data_dir.join("exports");
-        if let Ok(canonical) = exports.canonicalize() {
-            roots.push(canonical);
-        } else {
-            roots.push(exports);
+        // Uploaded source files are persisted under app data because message
+        // attachments remain actionable after parsing and across restarts.
+        for sub in ["uploads", "exports"] {
+            let dir = data_dir.join(sub);
+            if let Ok(canonical) = dir.canonicalize() {
+                roots.push(canonical);
+            } else {
+                roots.push(dir);
+            }
         }
     }
     roots
@@ -252,8 +256,14 @@ fn sanitize_text_export_extension(extension: &str) -> Result<&'static str, Strin
         .ok_or_else(|| "不支持的文件扩展名。".to_string())
 }
 
-pub fn upload_temp_dir() -> PathBuf {
-    std::env::temp_dir().join("nova-uploads")
+pub fn upload_storage_dir(app: &AppHandle) -> Result<PathBuf, String> {
+    let dir = app
+        .path()
+        .app_data_dir()
+        .map_err(|error| format!("无法定位应用数据目录：{error}"))?
+        .join("uploads");
+    std::fs::create_dir_all(&dir).map_err(|error| format!("创建上传文件目录失败：{error}"))?;
+    Ok(dir)
 }
 
 fn sanitize_pcap_extension(extension: &str) -> Result<&'static str, String> {
@@ -303,18 +313,43 @@ fn sanitize_uploaded_blob_extension(extension: &str) -> Result<(&'static str, us
     }
 }
 
-fn validate_uploaded_pcap_path(path: &str) -> Result<PathBuf, String> {
+fn sanitize_uploaded_file_name(file_name: Option<&str>, extension: &str) -> String {
+    let raw_name = file_name
+        .unwrap_or_default()
+        .rsplit(['/', '\\'])
+        .next()
+        .unwrap_or_default();
+    let raw_stem = raw_name
+        .rsplit_once('.')
+        .map(|(stem, _)| stem)
+        .unwrap_or(raw_name);
+    let stem: String = raw_stem
+        .chars()
+        .map(|character| {
+            if character.is_control() || matches!(character, '<' | '>' | ':' | '"' | '/' | '\\' | '|' | '?' | '*') {
+                '_'
+            } else {
+                character
+            }
+        })
+        .take(120)
+        .collect();
+    let stem = stem.trim_matches(|character: char| character == '.' || character.is_whitespace());
+    let stem = if stem.is_empty() { "upload" } else { stem };
+    format!("{stem}.{extension}")
+}
+
+fn validate_uploaded_pcap_path(app: &AppHandle, path: &str) -> Result<PathBuf, String> {
     let path = Path::new(path);
-    let upload_dir = upload_temp_dir();
-    std::fs::create_dir_all(&upload_dir).map_err(|e| format!("创建临时目录失败：{e}"))?;
+    let upload_dir = upload_storage_dir(app)?;
     let upload_dir = upload_dir
         .canonicalize()
-        .map_err(|e| format!("读取临时目录失败：{e}"))?;
+        .map_err(|e| format!("读取上传文件目录失败：{e}"))?;
     let canonical = path
         .canonicalize()
         .map_err(|e| format!("读取上传文件失败：{e}"))?;
     if !canonical.starts_with(&upload_dir) {
-        return Err("只能解析本应用上传的临时 PCAP 文件".to_string());
+        return Err("只能解析本应用接收的 PCAP 文件".to_string());
     }
     let extension = canonical
         .extension()
@@ -324,18 +359,17 @@ fn validate_uploaded_pcap_path(path: &str) -> Result<PathBuf, String> {
     Ok(canonical)
 }
 
-fn validate_uploaded_alert_image_path(path: &str) -> Result<PathBuf, String> {
+fn validate_uploaded_alert_image_path(app: &AppHandle, path: &str) -> Result<PathBuf, String> {
     let path = Path::new(path);
-    let upload_dir = upload_temp_dir();
-    std::fs::create_dir_all(&upload_dir).map_err(|e| format!("创建临时目录失败：{e}"))?;
+    let upload_dir = upload_storage_dir(app)?;
     let upload_dir = upload_dir
         .canonicalize()
-        .map_err(|e| format!("读取临时目录失败：{e}"))?;
+        .map_err(|e| format!("读取上传文件目录失败：{e}"))?;
     let canonical = path
         .canonicalize()
         .map_err(|e| format!("读取上传图片失败：{e}"))?;
     if !canonical.starts_with(&upload_dir) {
-        return Err("只能识别本应用上传的临时告警截图".to_string());
+        return Err("只能识别本应用接收的告警截图".to_string());
     }
     let extension = canonical
         .extension()
@@ -345,9 +379,14 @@ fn validate_uploaded_alert_image_path(path: &str) -> Result<PathBuf, String> {
     Ok(canonical)
 }
 
-/// 将 base64 编码的文件数据写入临时文件，返回文件路径（供 PCAP 解析等使用）
+/// 将 base64 编码的文件数据写入应用持久化上传目录，返回文件路径。
 #[tauri::command]
-pub fn write_uploaded_blob(base64_data: String, extension: String) -> Result<String, String> {
+pub fn write_uploaded_blob(
+    app: AppHandle,
+    base64_data: String,
+    extension: String,
+    file_name: Option<String>,
+) -> Result<String, String> {
     use base64::Engine as _;
     let (extension, max_bytes) = sanitize_uploaded_blob_extension(&extension)?;
     if base64_data.len() > max_bytes * 2 {
@@ -365,13 +404,14 @@ pub fn write_uploaded_blob(base64_data: String, extension: String) -> Result<Str
             max_bytes / 1024 / 1024
         ));
     }
-    let dir = upload_temp_dir();
-    std::fs::create_dir_all(&dir).map_err(|e| format!("创建临时目录失败：{e}"))?;
+    let upload_root = upload_storage_dir(&app)?;
     let ts = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
         .unwrap_or_default()
         .as_nanos();
-    let file_name = format!("nova-upload-{ts}.{extension}");
+    let dir = upload_root.join(format!("upload-{ts}"));
+    std::fs::create_dir_all(&dir).map_err(|e| format!("创建上传批次目录失败：{e}"))?;
+    let file_name = sanitize_uploaded_file_name(file_name.as_deref(), extension);
     let path = dir.join(&file_name);
     std::fs::write(&path, &bytes).map_err(|e| format!("写入临时文件失败：{e}"))?;
     Ok(path.to_string_lossy().to_string())
@@ -380,20 +420,25 @@ pub fn write_uploaded_blob(base64_data: String, extension: String) -> Result<Str
 /// 解析 PCAP/PCAPNG 文件：经 sidecar 调用 alert-analysis-mcp 的 parse_pcap_file 工具。
 #[tauri::command]
 pub async fn parse_pcap_file_cmd(app: AppHandle, path: String) -> Result<String, String> {
-    let canonical = validate_uploaded_pcap_path(&path)?;
+    let canonical = validate_uploaded_pcap_path(&app, &path)?;
     let normalized = strip_extended_path_prefix(canonical.to_string_lossy().as_ref());
-    let result = call_alert_mcp_tool(&app, "parse_pcap_file", &json!({ "path": normalized }), 600).await;
-    let _ = std::fs::remove_file(&canonical);
+    let result =
+        call_alert_mcp_tool(&app, "parse_pcap_file", &json!({ "path": normalized }), 600).await;
     result.and_then(|value| extract_text_result(value, "PCAP 解析"))
 }
 
 /// 识别告警截图：经 sidecar 调用 alert-analysis-mcp 的 extract_alert_image 工具。
 #[tauri::command]
 pub async fn extract_alert_image_text_cmd(app: AppHandle, path: String) -> Result<String, String> {
-    let canonical = validate_uploaded_alert_image_path(&path)?;
+    let canonical = validate_uploaded_alert_image_path(&app, &path)?;
     let normalized = strip_extended_path_prefix(canonical.to_string_lossy().as_ref());
-    let result = call_alert_mcp_tool(&app, "extract_alert_image", &json!({ "path": normalized }), 600).await;
-    let _ = std::fs::remove_file(&canonical);
+    let result = call_alert_mcp_tool(
+        &app,
+        "extract_alert_image",
+        &json!({ "path": normalized }),
+        600,
+    )
+    .await;
     result.and_then(|value| extract_text_result(value, "告警截图识别"))
 }
 
@@ -448,4 +493,30 @@ fn extract_text_result(value: serde_json::Value, operation: &str) -> Result<Stri
         return Ok(text.to_string());
     }
     Err(format!("威胁研判 MCP 返回的{operation}结果中没有文本内容。"))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::sanitize_uploaded_file_name;
+
+    #[test]
+    fn uploaded_file_name_preserves_user_visible_name() {
+        assert_eq!(
+            sanitize_uploaded_file_name(Some("test5.pcap"), "pcap"),
+            "test5.pcap"
+        );
+        assert_eq!(
+            sanitize_uploaded_file_name(Some("告警截图.png"), "png"),
+            "告警截图.png"
+        );
+    }
+
+    #[test]
+    fn uploaded_file_name_removes_path_and_unsafe_characters() {
+        assert_eq!(
+            sanitize_uploaded_file_name(Some("..\\evil:name.exe"), "pcap"),
+            "evil_name.pcap"
+        );
+        assert_eq!(sanitize_uploaded_file_name(None, "zip"), "upload.zip");
+    }
 }

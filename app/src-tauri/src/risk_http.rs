@@ -133,12 +133,10 @@ pub async fn upload_risk_assessment_material(
 ) -> Result<RemoteMaterialUpload, String> {
     let settings = load_http_settings(&app, service_id.trim())?;
     let source = if let Some(path) = source_path.filter(|value| !value.trim().is_empty()) {
-        let upload_root = crate::files::upload_temp_dir();
-        std::fs::create_dir_all(&upload_root)
-            .map_err(|error| format!("创建临时上传目录失败：{error}"))?;
+        let upload_root = crate::files::upload_storage_dir(&app)?;
         let upload_root = upload_root
             .canonicalize()
-            .map_err(|error| format!("读取临时上传目录失败：{error}"))?;
+            .map_err(|error| format!("读取上传文件目录失败：{error}"))?;
         let source = PathBuf::from(path)
             .canonicalize()
             .map_err(|error| format!("读取待上传材料失败：{error}"))?;

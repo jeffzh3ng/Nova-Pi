@@ -49,6 +49,7 @@ export type RpcCommand =
   | { id?: string; type: "models_list_all" }
   | { id?: string; type: "models_get_default" }
   | { id?: string; type: "models_set_default"; provider: string; model: string }
+  | { id?: string; type: "models_test_provider"; providerId: string; modelId: string }
   | { id?: string; type: "models_upsert_provider"; provider: ModelsProviderInput }
   | { id?: string; type: "models_remove_provider"; providerId: string }
   | { id?: string; type: "models_set_api_key"; providerId: string; apiKey: string }

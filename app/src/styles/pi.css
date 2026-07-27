@@ -1,0 +1,404 @@
+/* Nova-PI specific visual fixes. Keep the migrated Nova baseline in app.css intact. */
+
+html,
+body,
+#root,
+.app-shell,
+.sidebar-shell {
+  height: 100dvh;
+}
+
+.settings-workspace {
+  scrollbar-gutter: stable;
+}
+
+.pi-settings-page,
+.pi-extensions-page {
+  gap: 16px;
+}
+
+.pi-settings-page {
+  flex: 0 0 auto;
+  min-height: auto;
+}
+
+.pi-settings-page .settings-header,
+.pi-extensions-page .settings-header {
+  min-width: 0;
+}
+
+.pi-settings-page .settings-header > div:first-child,
+.pi-extensions-page .settings-header > div:first-child {
+  min-width: 0;
+}
+
+.pi-settings-page .mcp-status-line,
+.pi-extensions-page .mcp-status-line {
+  display: -webkit-box;
+  max-width: min(720px, 62vw);
+  max-height: 3em;
+  overflow: hidden;
+  line-height: 1.5;
+  overflow-wrap: anywhere;
+  -webkit-box-orient: vertical;
+  -webkit-line-clamp: 2;
+}
+
+.pi-feature-card {
+  flex: 0 0 auto;
+  margin: 0;
+}
+
+.pi-feature-actions {
+  margin-top: 8px;
+}
+
+.pi-settings-page .mcp-card-grid,
+.pi-extensions-page .mcp-card-grid {
+  padding-right: 10px;
+  scrollbar-gutter: stable;
+}
+
+.pi-settings-page .mcp-card-grid {
+  flex: 0 0 auto;
+  grid-template-columns: repeat(auto-fill, minmax(230px, 260px));
+  align-items: start;
+  gap: 12px;
+  min-height: auto;
+  overflow: visible;
+}
+
+.pi-extensions-page .mcp-service-card {
+  contain: paint;
+}
+
+.pi-settings-page .mcp-service-card {
+  contain: none;
+}
+
+.pi-settings-page .mcp-service-card.is-default {
+  border-color: #57a8c6;
+  box-shadow: 0 0 0 2px rgba(36, 123, 160, 0.1), 0 10px 24px rgba(30, 82, 106, 0.09);
+}
+
+.pi-provider-card {
+  align-self: start;
+  min-height: 0;
+  padding: 12px 13px 0;
+  border-radius: 11px;
+  text-transform: uppercase;
+}
+
+.pi-provider-card::before {
+  top: -54px;
+  right: -48px;
+  width: 108px;
+  height: 108px;
+}
+
+.pi-provider-card-header {
+  position: relative;
+  z-index: 1;
+  display: grid;
+  grid-template-columns: auto minmax(0, 1fr) auto;
+  align-items: center;
+  gap: 9px;
+}
+
+.pi-provider-card-header .mcp-card-icon {
+  width: 34px;
+  height: 34px;
+  border-radius: 8px;
+}
+
+.pi-provider-card-header .mcp-card-icon svg {
+  width: 20px;
+  height: 20px;
+}
+
+.pi-provider-card-header h2 {
+  min-width: 0;
+  margin: 0;
+  overflow: hidden;
+  color: #182132;
+  font-size: 15px;
+  line-height: 1.4;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.pi-provider-badges {
+  display: inline-flex;
+  flex-wrap: wrap;
+  justify-content: flex-end;
+  gap: 5px;
+}
+
+.pi-provider-badges .mcp-connection-badge {
+  min-height: 21px;
+  padding: 0 7px;
+  font-size: 9px;
+}
+
+.mcp-connection-badge.is-default {
+  color: #176e90;
+  background: #e2f3f9;
+}
+
+.pi-provider-card .mcp-card-footer {
+  justify-content: flex-end;
+  min-height: 34px;
+}
+
+.pi-provider-card .mcp-card-actions {
+  gap: 6px;
+  margin-left: auto;
+}
+
+.pi-provider-card .mcp-edit-button,
+.pi-provider-card .mcp-delete-button {
+  height: 27px;
+  font-size: 11px;
+}
+
+.pi-provider-model {
+  position: relative;
+  z-index: 1;
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
+  align-items: center;
+  gap: 8px;
+  width: 100%;
+  min-height: 28px;
+  margin: 8px 0 6px;
+  padding: 3px 1px;
+  color: #526176;
+  background: transparent;
+  border: 0;
+  border-radius: 0;
+  font-size: 13px;
+  font-weight: 750;
+  text-align: left;
+  transition: color 150ms ease;
+}
+
+.pi-provider-model:hover:not(:disabled),
+.pi-provider-model.is-active {
+  color: #176e90;
+}
+
+.pi-provider-model.is-active {
+  font-weight: 800;
+}
+
+.pi-provider-model:disabled {
+  cursor: not-allowed;
+  opacity: 0.58;
+}
+
+.pi-model-name {
+  overflow: hidden;
+  text-transform: uppercase;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.pi-model-empty {
+  margin: 8px 0;
+  padding: 9px 10px;
+  color: #8a5a18;
+  background: #fff8eb;
+  border: 1px solid #f0d8b3;
+  border-radius: 7px;
+  font-size: 11px;
+  line-height: 1.5;
+}
+
+.pi-model-editor {
+  display: grid;
+  gap: 10px;
+  padding-top: 4px;
+}
+
+.pi-model-editor > header {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 12px;
+}
+
+.pi-model-editor > header > div {
+  display: grid;
+  gap: 3px;
+}
+
+.pi-model-editor > header strong {
+  color: #253245;
+  font-size: 13px;
+}
+
+.pi-model-editor > header span {
+  color: var(--color-muted);
+  font-size: 11px;
+  line-height: 1.5;
+}
+
+.pi-model-editor-item {
+  display: grid;
+  gap: 10px;
+  padding: 12px;
+  background: #f8fafc;
+  border: 1px solid #dde5ec;
+  border-radius: 10px;
+}
+
+.pi-model-field-full {
+  grid-column: 1 / -1;
+}
+
+.pi-model-advanced {
+  min-width: 0;
+}
+
+.pi-model-advanced > summary {
+  width: fit-content;
+  color: #637286;
+  cursor: pointer;
+  font-size: 12px;
+  font-weight: 800;
+  user-select: none;
+}
+
+.pi-model-advanced[open] > summary {
+  margin-bottom: 10px;
+  color: #176e90;
+}
+
+.pi-model-advanced-fields {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 10px;
+  padding-top: 2px;
+}
+
+.mcp-editor-body b {
+  color: #cf4e4e;
+  font: inherit;
+}
+
+.pi-model-reasoning {
+  min-height: 30px;
+  margin: 0;
+  padding: 0;
+  border-bottom: 0;
+}
+
+label.pi-model-reasoning input {
+  width: 18px;
+  height: 18px;
+}
+
+.pi-truncate {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.pi-inline-icon {
+  display: inline;
+  margin-right: 4px;
+  vertical-align: -2px;
+}
+
+.pi-extension-errors ul {
+  display: grid;
+  gap: 6px;
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+
+.pi-extension-errors li {
+  padding: 7px 9px;
+  color: #9a5b14;
+  background: #fff8eb;
+  border: 1px solid #f1d7ad;
+  border-radius: 7px;
+  font-size: 12px;
+  line-height: 1.5;
+  overflow-wrap: anywhere;
+}
+
+.pi-code-input,
+.pi-source-code {
+  font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace !important;
+  font-size: 12px !important;
+}
+
+.pi-editor-note,
+.pi-source-path {
+  margin: 4px 0 0;
+  color: var(--color-muted);
+  font-size: 12px;
+  line-height: 1.6;
+  overflow-wrap: anywhere;
+}
+
+.pi-editor-note a {
+  color: var(--color-accent);
+  text-underline-offset: 2px;
+}
+
+.pi-source-path {
+  margin: 0 0 8px;
+}
+
+.pi-source-code {
+  max-height: 60vh;
+  margin: 0;
+  overflow: auto;
+  padding: 12px;
+  color: #253245;
+  background: var(--color-panel);
+  border: 1px solid var(--color-line);
+  border-radius: 8px;
+  line-height: 1.5;
+  white-space: pre-wrap;
+  word-break: break-word;
+}
+
+@media (max-width: 1080px) {
+  .pi-settings-page .mcp-status-line,
+  .pi-extensions-page .mcp-status-line {
+    max-width: min(620px, 68vw);
+  }
+}
+
+@media (max-width: 760px) {
+  html,
+  body,
+  #root,
+  .app-shell,
+  .sidebar-shell {
+    height: auto;
+    min-height: 100dvh;
+  }
+
+  .pi-settings-page .mcp-status-line,
+  .pi-extensions-page .mcp-status-line {
+    max-width: 100%;
+  }
+
+  .pi-settings-page .mcp-card-grid {
+    grid-template-columns: 1fr;
+  }
+
+  .pi-model-advanced-fields {
+    grid-template-columns: 1fr;
+  }
+
+  .pi-model-field-full {
+    grid-column: auto;
+  }
+
+}

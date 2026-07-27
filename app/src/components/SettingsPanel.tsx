@@ -1,17 +1,17 @@
-import { Bot, CirclePlus, Cpu, Pencil, Save, Search, ShieldCheck, Trash2, X } from "lucide-react";
-import { useEffect, useMemo, useState } from "react";
+import { Bot, CheckCircle2, CirclePlus, Pencil, Save, Search, ShieldCheck, Trash2, X } from "lucide-react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import { ConfirmModal } from "./ConfirmModal";
 import {
   getDefaultModel,
-  listAllModels,
   listProviders,
   removeProvider,
   setDefaultModel,
-  setProviderApiKey,
+  testProviderConnection,
   upsertProvider,
   PI_API_TYPES,
 } from "../services/modelsService";
 import type { DefaultModelInfo, ModelSummary, ProviderSummary } from "../services/hostBridge";
+import { toUserFacingError } from "../services/uiError";
 
 type ProviderDraft = {
   id: string;
@@ -19,9 +19,23 @@ type ProviderDraft = {
   baseUrl: string;
   api: string;
   apiKey: string;
+  model: ModelDraft;
 };
 
-type EditorState = { mode: "add" | "edit"; draft: ProviderDraft };
+type ModelDraft = {
+  id: string;
+  name: string;
+  contextWindow: string;
+  maxTokens: string;
+  reasoning: boolean;
+};
+
+type EditorState = { mode: "add" | "edit"; draft: ProviderDraft; apiKeyDirty: boolean };
+type ProviderTextField = Exclude<keyof ProviderDraft, "model">;
+type ProviderConnectionState = {
+  state: "checking" | "available" | "error" | "unconfigured";
+  message: string;
+};
 
 const EMPTY_DRAFT: ProviderDraft = {
   id: "",
@@ -29,38 +43,109 @@ const EMPTY_DRAFT: ProviderDraft = {
   baseUrl: "",
   api: "openai-completions",
   apiKey: "",
+  model: {
+    id: "",
+    name: "",
+    contextWindow: "128000",
+    maxTokens: "4096",
+    reasoning: false,
+  },
 };
 
-const apiLabel = (api: string) =>
-  PI_API_TYPES.find((item) => item.value === api)?.label ?? api;
+const EMPTY_MODEL_DRAFT: ModelDraft = {
+  id: "",
+  name: "",
+  contextWindow: "128000",
+  maxTokens: "4096",
+  reasoning: false,
+};
+
+const providerSlug = (providerName: string, modelId: string) => {
+  const normalize = (value: string) => value
+    .toLowerCase()
+    .replace(/[^a-z0-9]+/g, "-")
+    .replace(/^-+|-+$/g, "");
+  return normalize(providerName) || normalize(modelId) || "custom-provider";
+};
+
+const uniqueProviderId = (providerName: string, modelId: string, providers: ProviderSummary[]) => {
+  const base = providerSlug(providerName, modelId);
+  const existingIds = new Set(providers.map((provider) => provider.id));
+  if (!existingIds.has(base)) return base;
+  let suffix = 2;
+  while (existingIds.has(`${base}-${suffix}`)) suffix += 1;
+  return `${base}-${suffix}`;
+};
 
 export function SettingsPanel() {
   const [providers, setProviders] = useState<ProviderSummary[]>([]);
-  const [allModels, setAllModels] = useState<ModelSummary[]>([]);
   const [defaultModel, setDefaultModelState] = useState<DefaultModelInfo | null>(null);
   const [editor, setEditor] = useState<EditorState | null>(null);
   const [pendingDelete, setPendingDelete] = useState<ProviderSummary | null>(null);
   const [searchText, setSearchText] = useState("");
-  const [apiKeyDraft, setApiKeyDraft] = useState<Record<string, string>>({});
   const [busy, setBusy] = useState(false);
   const [editorBusy, setEditorBusy] = useState(false);
   const [busyProviderId, setBusyProviderId] = useState<string | null>(null);
+  const [providerConnections, setProviderConnections] = useState<Record<string, ProviderConnectionState>>({});
   const [status, setStatus] = useState("正在读取模型配置...");
+  const connectionCheckRunRef = useRef(0);
+
+  const verifyProviderConnections = (providerList: ProviderSummary[]) => {
+    const runId = ++connectionCheckRunRef.current;
+    const initial = Object.fromEntries(
+      providerList.map((provider) => [
+        provider.id,
+        provider.hasApiKey
+          ? { state: "checking", message: "正在验证模型连接..." }
+          : { state: "unconfigured", message: "尚未配置 API Key。" },
+      ]),
+    ) as Record<string, ProviderConnectionState>;
+    setProviderConnections(initial);
+
+    for (const provider of providerList) {
+      if (!provider.hasApiKey) continue;
+      const model = provider.models[0];
+      if (!model) {
+        initial[provider.id] = { state: "error", message: "尚未配置模型 ID。" };
+        setProviderConnections({ ...initial });
+        continue;
+      }
+      void testProviderConnection(provider.id, model.id)
+        .then(() => {
+          if (connectionCheckRunRef.current !== runId) return;
+          setProviderConnections((current) => ({
+            ...current,
+            [provider.id]: { state: "available", message: "模型连接验证通过。" },
+          }));
+        })
+        .catch((error) => {
+          if (connectionCheckRunRef.current !== runId) return;
+          setProviderConnections((current) => ({
+            ...current,
+            [provider.id]: {
+              state: "error",
+              message: toUserFacingError(error, "模型连接验证失败。"),
+            },
+          }));
+        });
+    }
+  };
 
   const refresh = async () => {
     setBusy(true);
     try {
-      const [providerList, models, def] = await Promise.all([
+      const [providerList, def] = await Promise.all([
         listProviders(),
-        listAllModels(),
         getDefaultModel(),
       ]);
       setProviders(providerList);
-      setAllModels(models);
       setDefaultModelState(def);
       setStatus(`已读取 ${providerList.length} 个供应商配置。`);
+      verifyProviderConnections(providerList);
     } catch (error) {
-      setStatus(error instanceof Error ? error.message : String(error));
+      connectionCheckRunRef.current += 1;
+      setProviderConnections({});
+      setStatus(toUserFacingError(error, "模型服务暂不可用，请确认桌面服务已启动后重试。"));
     } finally {
       setBusy(false);
     }
@@ -68,6 +153,9 @@ export function SettingsPanel() {
 
   useEffect(() => {
     void refresh();
+    return () => {
+      connectionCheckRunRef.current += 1;
+    };
   }, []);
 
   useEffect(() => {
@@ -79,38 +167,115 @@ export function SettingsPanel() {
     return () => window.removeEventListener("keydown", handleKeyDown);
   }, [editor, editorBusy]);
 
-  const updateEditor = (key: keyof ProviderDraft, value: string) => {
+  const updateEditor = (key: ProviderTextField, value: string) => {
     setEditor((current) =>
       current ? { ...current, draft: { ...current.draft, [key]: value } } : current,
     );
   };
 
+  const beginApiKeyEdit = () => {
+    setEditor((current) => {
+      if (!current || current.mode !== "edit" || current.apiKeyDirty) return current;
+      return {
+        ...current,
+        apiKeyDirty: true,
+        draft: { ...current.draft, apiKey: "" },
+      };
+    });
+  };
+
+  const updateApiKey = (value: string) => {
+    setEditor((current) =>
+      current
+        ? {
+            ...current,
+            apiKeyDirty: true,
+            draft: { ...current.draft, apiKey: value },
+          }
+        : current,
+    );
+  };
+
+  const updateEditorModel = (key: keyof ModelDraft, value: string | boolean) => {
+    setEditor((current) =>
+      current
+        ? {
+            ...current,
+            draft: {
+              ...current.draft,
+              model: { ...current.draft.model, [key]: value },
+            },
+          }
+        : current,
+    );
+  };
+
   const saveEditor = async () => {
     if (!editor) return;
-    const id = editor.draft.id.trim();
-    if (!id) {
-      setStatus("请填写供应商 ID。");
+    const providerName = editor.draft.name.trim();
+    if (!providerName) {
+      setStatus("请填写供应商名称。");
       return;
     }
-    if (editor.mode === "add" && providers.some((p) => p.id === id)) {
-      setStatus(`供应商 ID ${id} 已存在。`);
+    const baseUrl = editor.draft.baseUrl.trim();
+    if (!baseUrl) {
+      setStatus("请填写 Base URL。");
       return;
     }
+    try {
+      const parsedUrl = new URL(baseUrl);
+      if (parsedUrl.protocol !== "http:" && parsedUrl.protocol !== "https:") throw new Error();
+    } catch {
+      setStatus("Base URL 必须是有效的 http 或 https 地址。");
+      return;
+    }
+    if (editor.mode === "add" && !editor.draft.apiKey.trim()) {
+      setStatus("请填写 API Key。");
+      return;
+    }
+    const modelId = editor.draft.model.id.trim();
+    if (!modelId) {
+      setStatus("请填写模型 ID。");
+      return;
+    }
+    const contextWindow = Number(editor.draft.model.contextWindow);
+    const maxTokens = Number(editor.draft.model.maxTokens);
+    if (!Number.isInteger(contextWindow) || contextWindow <= 0 || !Number.isInteger(maxTokens) || maxTokens <= 0) {
+      setStatus("上下文长度和最大输出 Token 必须是大于 0 的整数。");
+      return;
+    }
+    const id = editor.mode === "edit"
+      ? editor.draft.id.trim()
+      : uniqueProviderId(providerName, modelId, providers);
     setEditorBusy(true);
     setStatus("正在保存供应商配置...");
     try {
       await upsertProvider({
         id,
-        name: editor.draft.name.trim() || id,
-        baseUrl: editor.draft.baseUrl.trim(),
+        name: providerName,
+        baseUrl,
         api: editor.draft.api,
-        apiKey: editor.draft.apiKey.trim() || undefined,
+        apiKey:
+          editor.mode === "edit" && !editor.apiKeyDirty
+            ? undefined
+            : editor.draft.apiKey.trim() || undefined,
+        models: [{
+          id: modelId,
+          name: editor.draft.model.name.trim() || undefined,
+          contextWindow,
+          maxTokens,
+          reasoning: editor.draft.model.reasoning,
+        }],
       });
+      if (defaultModel?.provider === id) {
+        await setDefaultModel(id, modelId);
+        setDefaultModelState({ provider: id, model: modelId });
+      }
       setEditor(null);
       setStatus(`已保存供应商 ${id} 配置。`);
       await refresh();
     } catch (error) {
-      setStatus(error instanceof Error ? error.message : String(error));
+      setStatus(toUserFacingError(error, "供应商配置保存失败，请稍后重试。"));
     } finally {
       setEditorBusy(false);
     }
@@ -118,39 +283,15 @@ export function SettingsPanel() {
 
   const handleSetDefault = async (model: ModelSummary) => {
     setBusy(true);
-    setStatus(`正在设置默认模型：${model.provider}/${model.id}...`);
+    setStatus(`正在设置默认模型：${model.provider.toUpperCase()}/${model.id.toUpperCase()}...`);
     try {
       await setDefaultModel(model.provider, model.id);
       setDefaultModelState({ provider: model.provider, model: model.id });
-      setStatus(`已设为默认模型：${model.name}`);
+      setStatus(`已设为默认模型：${model.name.toUpperCase()}`);
     } catch (error) {
-      setStatus(error instanceof Error ? error.message : String(error));
+      setStatus(toUserFacingError(error, "默认模型设置失败，请检查配置后重试。"));
     } finally {
       setBusy(false);
-    }
-  };
-
-  const handleSaveApiKey = async (providerId: string) => {
-    const key = (apiKeyDraft[providerId] ?? "").trim();
-    if (!key) {
-      setStatus("API Key 不能为空。");
-      return;
-    }
-    setBusyProviderId(providerId);
-    setStatus(`正在更新 ${providerId} 的 API Key...`);
-    try {
-      await setProviderApiKey(providerId, key);
-      setApiKeyDraft((draft) => {
-        const next = { ...draft };
-        delete next[providerId];
-        return next;
-      });
-      setStatus(`已更新 ${providerId} 的 API Key。`);
-      await refresh();
-    } catch (error) {
-      setStatus(error instanceof Error ? error.message : String(error));
-    } finally {
-      setBusyProviderId(null);
     }
   };
 
@@ -165,7 +306,7 @@ export function SettingsPanel() {
       setStatus(`已删除供应商 ${target.name}。`);
       await refresh();
     } catch (error) {
-      setStatus(error instanceof Error ? error.message : String(error));
+      setStatus(toUserFacingError(error, "供应商删除失败，请稍后重试。"));
     } finally {
       setBusyProviderId(null);
     }
@@ -179,29 +320,27 @@ export function SettingsPanel() {
     );
   }, [providers, searchText]);
 
-  // 默认模型下拉选项：全部可用模型（pi 内置 + 自定义）
-  const defaultModelOptions = useMemo(() => {
-    const seen = new Set<string>();
-    return allModels.filter((m) => {
-      const key = `${m.provider}/${m.id}`;
-      if (seen.has(key)) return false;
-      seen.add(key);
-      return true;
-    });
-  }, [allModels]);
-
   return (
-    <section className="settings-page mcp-square-page" aria-label="模型配置">
+    <section className="settings-page mcp-square-page pi-settings-page" aria-label="模型配置">
       <header className="settings-header">
         <div>
           <span>系统设置</span>
           <h1>模型配置</h1>
-          {status ? <p className="mcp-status-line">{status}</p> : null}
+          {status ? <p className="mcp-status-line" title={status}>{status}</p> : null}
         </div>
         <div className="settings-actions">
           <button
             type="button"
-            onClick={() => setEditor({ mode: "add", draft: { ...EMPTY_DRAFT } })}
+            onClick={() =>
+              setEditor({
+                mode: "add",
+                apiKeyDirty: false,
+                draft: {
+                  ...EMPTY_DRAFT,
+                  model: { ...EMPTY_DRAFT.model },
+                },
+              })
+            }
             disabled={busy || editorBusy}
           >
             <CirclePlus size={17} />
@@ -209,44 +348,6 @@ export function SettingsPanel() {
           </button>
         </div>
       </header>
-
-      {/* 默认模型选择 */}
-      <section className="settings-card settings-card-wide" style={{ margin: "0 24px 16px" }}>
-        <div className="settings-card-title">
-          <Cpu size={20} />
-          <div>
-            <h2>默认模型</h2>
-            <p>对话时使用的默认模型。pi 会按此配置选择模型（可在会话中临时切换）。</p>
-          </div>
-        </div>
-        <div className="settings-form-grid">
-          <label className="settings-form-full">
-            <span>当前默认</span>
-            <select
-              value={defaultModel ? `${defaultModel.provider}/${defaultModel.model}` : ""}
-              onChange={(event) => {
-                const value = event.target.value;
-                const [provider, ...modelParts] = value.split("/");
-                const model = modelParts.join("/");
-                const found = allModels.find((m) => m.provider === provider && m.id === model);
-                if (found) void handleSetDefault(found);
-              }}
-              disabled={busy || defaultModelOptions.length === 0}
-            >
-              <option value="">{defaultModelOptions.length ? "未选择" : "无可用模型"}</option>
-              {defaultModelOptions.map((m) => (
-                <option
-                  key={`${m.provider}/${m.id}`}
-                  value={`${m.provider}/${m.id}`}
-                  disabled={!m.available}
-                >
-                  {m.provider}/{m.id}{m.available ? "" : "（缺 API Key）"}
-                </option>
-              ))}
-            </select>
-          </label>
-        </div>
-      </section>
 
       <div className="mcp-catalog-toolbar">
         <label className="mcp-search-box">
@@ -263,108 +364,90 @@ export function SettingsPanel() {
       <div className="mcp-card-grid">
         {visibleProviders.map((provider) => {
           const isBusy = busyProviderId === provider.id;
+          const currentProviderModel = provider.models.find(
+            (model) => model.id === defaultModel?.model && model.provider === defaultModel?.provider,
+          );
+          const configuredModel = currentProviderModel ?? provider.models[0];
+          const isDefaultProvider = Boolean(currentProviderModel);
+          const connection = providerConnections[provider.id] ?? (
+            provider.hasApiKey
+              ? { state: "checking", message: "正在验证模型连接..." }
+              : { state: "unconfigured", message: "尚未配置 API Key。" }
+          );
+          const isAvailable = connection.state === "available";
+          const connectionBadge = {
+            checking: { className: "checking", label: "检测中" },
+            available: { className: "connected", label: "可用" },
+            error: { className: "error", label: "不可用" },
+            unconfigured: { className: "pending", label: "待配置" },
+          }[connection.state];
           return (
             <article
-              className={`mcp-service-card ${provider.available ? "" : "is-disabled"}`}
+              className={`mcp-service-card pi-provider-card ${isAvailable ? "" : "is-disabled"} ${
+                isDefaultProvider ? "is-default" : ""
+              }`}
               key={provider.id}
+              aria-label={`${provider.name}，${connectionBadge.label}`}
             >
-              <div className="mcp-card-top">
+              <div className="pi-provider-card-header">
                 <span className="mcp-card-icon" aria-hidden="true">
                   <Bot size={24} />
                 </span>
-                <span
-                  className={`mcp-connection-badge is-${provider.available ? "connected" : "pending"}`}
-                  title={provider.available ? "已配置 API Key，可用" : "缺少 API Key"}
-                >
-                  {provider.available ? "可用" : "待配置"}
+                <h2>{provider.name}</h2>
+                <span className="pi-provider-badges">
+                  {isDefaultProvider ? (
+                    <span className="mcp-connection-badge is-default">使用中</span>
+                  ) : null}
+                  <span
+                    className={`mcp-connection-badge is-${connectionBadge.className}`}
+                    title={connection.message}
+                  >
+                    {connectionBadge.label}
+                  </span>
                 </span>
               </div>
-              <div className="mcp-card-copy">
-                <h2>{provider.name}</h2>
-                <p>{apiLabel(provider.api)} · {provider.modelCount} 个模型</p>
-              </div>
-              <dl className="mcp-card-meta">
-                <div>
-                  <dt>供应商 ID</dt>
-                  <dd title={provider.id}>{provider.id}</dd>
-                </div>
-                <div>
-                  <dt>Base URL</dt>
-                  <dd title={provider.baseUrl}>{provider.baseUrl || "未配置"}</dd>
-                </div>
-                <div>
-                  <dt>API Key</dt>
-                  <dd>{provider.hasApiKey ? provider.apiKeyHint : "未配置"}</dd>
-                </div>
-              </dl>
 
-              {/* API Key 快速更新 */}
-              <div className="mcp-card-endpoint" style={{ flexDirection: "column", alignItems: "stretch", gap: 6 }}>
-                <input
-                  type="password"
-                  placeholder={provider.hasApiKey ? `当前：${provider.apiKeyHint}（输入新值替换）` : "输入 API Key"}
-                  value={apiKeyDraft[provider.id] ?? ""}
-                  onChange={(event) =>
-                    setApiKeyDraft((draft) => ({ ...draft, [provider.id]: event.target.value }))
-                  }
-                  disabled={isBusy}
-                />
+              {/* 每个供应商只展示一个模型，点击模型切换当前供应商。 */}
+              {configuredModel ? (
                 <button
                   type="button"
-                  className="mcp-edit-button"
-                  style={{ alignSelf: "flex-end" }}
-                  disabled={isBusy || !(apiKeyDraft[provider.id] ?? "").trim()}
-                  onClick={() => void handleSaveApiKey(provider.id)}
+                  className={`pi-provider-model ${isDefaultProvider ? "is-active" : ""}`}
+                  disabled={busy || !isAvailable}
+                  title={isAvailable ? `切换到 ${configuredModel.name}` : connection.message}
+                  onClick={() => void handleSetDefault(configuredModel)}
                 >
-                  <Save size={14} /> 保存 Key
+                  <span className="pi-model-name">{configuredModel.name}</span>
+                  {isDefaultProvider ? <CheckCircle2 size={15} aria-label="当前模型" /> : null}
                 </button>
-              </div>
-
-              {/* 模型列表 */}
-              {provider.models.length > 0 ? (
-                <details className="alert-raw-output" style={{ marginTop: 8 }}>
-                  <summary>模型（{provider.models.length}）</summary>
-                  <ul style={{ margin: "8px 0 0", padding: 0, listStyle: "none" }}>
-                    {provider.models.map((model) => (
-                      <li
-                        key={model.id}
-                        style={{
-                          display: "flex",
-                          justifyContent: "space-between",
-                          padding: "4px 0",
-                          fontSize: 13,
-                          color: "var(--color-text)",
-                        }}
-                      >
-                        <span>{model.name}</span>
-                        <span style={{ color: "var(--color-muted)" }}>
-                          {model.reasoning ? "推理 · " : ""}
-                          {Math.round(model.contextWindow / 1000)}K
-                        </span>
-                      </li>
-                    ))}
-                  </ul>
-                </details>
-              ) : null}
+              ) : (
+                <div className="pi-model-empty">尚未配置模型，请点击“编辑”添加。</div>
+              )}
 
               <footer className="mcp-card-footer">
-                <span style={{ fontSize: 12, color: "var(--color-muted)" }}>
-                  {isBusy ? "处理中..." : `来源：models.json`}
-                </span>
                 <div className="mcp-card-actions">
                   <button
                     type="button"
                     className="mcp-edit-button"
-                    disabled={busy}
+                    disabled={busy || isBusy}
                     onClick={() =>
                       setEditor({
                         mode: "edit",
+                        apiKeyDirty: false,
                         draft: {
                           id: provider.id,
                           name: provider.name,
                           baseUrl: provider.baseUrl,
                           api: provider.api,
-                          apiKey: "",
+                          apiKey: provider.apiKeyHint,
+                          model: configuredModel
+                            ? {
+                                id: configuredModel.id,
+                                name: configuredModel.name,
+                                contextWindow: String(configuredModel.contextWindow),
+                                maxTokens: String(configuredModel.maxTokens),
+                                reasoning: configuredModel.reasoning,
+                              }
+                            : { ...EMPTY_MODEL_DRAFT },
                         },
                       })
                     }
@@ -375,7 +458,7 @@ export function SettingsPanel() {
                   <button
                     type="button"
                     className="mcp-delete-button"
-                    disabled={busy}
+                    disabled={busy || isBusy}
                     onClick={() => setPendingDelete(provider)}
                   >
                     <Trash2 size={15} />
@@ -411,7 +494,7 @@ export function SettingsPanel() {
                 </span>
                 <div>
                   <span>{editor.mode === "add" ? "新增供应商" : "编辑供应商"}</span>
-                  <h2>{editor.mode === "add" ? "添加模型供应商" : editor.draft.id}</h2>
+                  <h2>{editor.mode === "add" ? "添加模型供应商" : editor.draft.name || "供应商配置"}</h2>
                 </div>
               </div>
               <button type="button" aria-label="关闭" onClick={() => setEditor(null)} disabled={editorBusy}>
@@ -421,24 +504,15 @@ export function SettingsPanel() {
 
             <div className="mcp-editor-body">
               <label>
-                <span>供应商 ID（唯一标识，如 my-deepseek）</span>
-                <input
-                  value={editor.draft.id}
-                  disabled={editor.mode === "edit"}
-                  placeholder="my-provider"
-                  onChange={(event) => updateEditor("id", event.target.value)}
-                />
-              </label>
-              <label>
-                <span>显示名称</span>
+                <span>供应商名称 <b>*</b></span>
                 <input
                   value={editor.draft.name}
-                  placeholder="我的 DeepSeek"
+                  placeholder="例如：DeepSeek"
                   onChange={(event) => updateEditor("name", event.target.value)}
                 />
               </label>
               <label>
-                <span>API 类型</span>
+                <span>API 类型 <b>*</b></span>
                 <select value={editor.draft.api} onChange={(event) => updateEditor("api", event.target.value)}>
                   {PI_API_TYPES.map((item) => (
                     <option key={item.value} value={item.value}>
@@ -448,7 +522,7 @@ export function SettingsPanel() {
                 </select>
               </label>
               <label>
-                <span>Base URL</span>
+                <span>Base URL <b>*</b></span>
                 <input
                   value={editor.draft.baseUrl}
                   placeholder="https://api.deepseek.com"
@@ -456,18 +530,74 @@ export function SettingsPanel() {
                 />
               </label>
               <label>
-                <span>API Key{editor.mode === "edit" ? "（留空保留原值）" : ""}</span>
+                <span>API Key <b>{editor.mode === "add" ? "*" : ""}</b>{editor.mode === "edit" ? "（留空保留原值）" : ""}</span>
                 <input
-                  type="password"
+                  type={editor.mode === "edit" && !editor.apiKeyDirty ? "text" : "password"}
                   value={editor.draft.apiKey}
-                  placeholder="sk-..."
-                  onChange={(event) => updateEditor("apiKey", event.target.value)}
+                  placeholder={editor.mode === "edit" ? "点击输入新的 API Key" : "sk-..."}
+                  onFocus={beginApiKeyEdit}
+                  onChange={(event) => updateApiKey(event.target.value)}
                 />
               </label>
-              <p style={{ fontSize: 12, color: "var(--color-muted)", margin: "4px 0 0" }}>
-                模型列表可在保存后通过编辑 models.json 扩展，或在会话中由 pi 按需发现。
-                配置写入 <code>~/.pi/agent/models.json</code>，pi 每次 /model 自动重载。
-              </p>
+              <section className="pi-model-editor" aria-label="模型配置">
+                <header>
+                  <div>
+                    <strong>模型 <b>*</b></strong>
+                    <span>每个供应商配置一个模型，需要更换时直接修改模型 ID。</span>
+                  </div>
+                </header>
+                <article className="pi-model-editor-item">
+                  <label>
+                    <span>模型 ID <b>*</b></span>
+                    <input
+                      value={editor.draft.model.id}
+                      placeholder="例如：deepseek-chat"
+                      onChange={(event) => updateEditorModel("id", event.target.value)}
+                    />
+                  </label>
+                  <details className="pi-model-advanced">
+                    <summary>高级参数</summary>
+                    <div className="pi-model-advanced-fields">
+                      <label className="pi-model-field-full">
+                        <span>模型显示名称（可选）</span>
+                        <input
+                          value={editor.draft.model.name}
+                          placeholder="默认使用模型 ID"
+                          onChange={(event) => updateEditorModel("name", event.target.value)}
+                        />
+                      </label>
+                      <label>
+                        <span>上下文长度</span>
+                        <input
+                          type="number"
+                          min="1"
+                          step="1"
+                          value={editor.draft.model.contextWindow}
+                          onChange={(event) => updateEditorModel("contextWindow", event.target.value)}
+                        />
+                      </label>
+                      <label>
+                        <span>最大输出 Token</span>
+                        <input
+                          type="number"
+                          min="1"
+                          step="1"
+                          value={editor.draft.model.maxTokens}
+                          onChange={(event) => updateEditorModel("maxTokens", event.target.value)}
+                        />
+                      </label>
+                      <label className="settings-toggle pi-model-reasoning">
+                        <input
+                          type="checkbox"
+                          checked={editor.draft.model.reasoning}
+                          onChange={(event) => updateEditorModel("reasoning", event.target.checked)}
+                        />
+                        <span>推理模型</span>
+                      </label>
+                    </div>
+                  </details>
+                </article>
+              </section>
             </div>
 
             <footer className="mcp-editor-footer">

@@ -31,7 +31,6 @@ export type McpConnectionSettingsCatalog = {
 
 export const ALERT_ANALYSIS_MCP_SERVICE = "alert-analysis-mcp";
 export const DATA_CLASSIFICATION_MCP_SERVICE = "data-classification-mcp";
-export const NETWORK_RISK_ASSESSMENT_MCP_SERVICE = "network-risk-assessment-mcp";
 export const DATA_RISK_ASSESSMENT_MCP_SERVICE = "data-security-risk-assessment-mcp";
 /// 列出评估矩阵的工具名（上传 zip 后调用，让用户选择评估矩阵）。
 export const DATA_RISK_LIST_MATRICES_TOOL = "list_assessment_matrices";
@@ -39,22 +38,8 @@ export const DATA_RISK_UPLOAD_TOOL = "upload_materials";
 export const DATA_RISK_SUBMIT_TOOL = "submit_evaluation";
 export const DATA_RISK_GET_STATUS_TOOL = "get_task_status";
 export const DATA_RISK_CANCEL_TOOL = "cancel_evaluation";
-export const GO_LIVE_SECURITY_ASSESSMENT_MCP_SERVICE = "go-live-security-assessment-mcp";
-export const DUAL_NEW_ASSESSMENT_MCP_SERVICE = "dual-new-assessment-mcp";
-export const INCIDENT_RESPONSE_MCP_SERVICE = "incident-response-mcp";
-export const INCIDENT_DRILL_MCP_SERVICE = "incident-drill-mcp";
-export const SECURITY_TRAINING_MCP_SERVICE = "security-training-mcp";
-export const SECURITY_BULLETIN_MCP_SERVICE = "security-bulletin-mcp";
-
 export const DIGITAL_EMPLOYEE_MCP_SERVICE_IDS = [
-  NETWORK_RISK_ASSESSMENT_MCP_SERVICE,
   DATA_RISK_ASSESSMENT_MCP_SERVICE,
-  GO_LIVE_SECURITY_ASSESSMENT_MCP_SERVICE,
-  DUAL_NEW_ASSESSMENT_MCP_SERVICE,
-  INCIDENT_RESPONSE_MCP_SERVICE,
-  INCIDENT_DRILL_MCP_SERVICE,
-  SECURITY_TRAINING_MCP_SERVICE,
-  SECURITY_BULLETIN_MCP_SERVICE,
   ALERT_ANALYSIS_MCP_SERVICE,
 ] as const;
 
@@ -70,44 +55,9 @@ type McpEmployeeDefaults = {
 };
 
 const BUILT_IN_MCP_EMPLOYEE_DEFAULTS: Record<string, McpEmployeeDefaults> = {
-  [NETWORK_RISK_ASSESSMENT_MCP_SERVICE]: {
-    name: "网安风评数字员工",
-    role: "网络安全风险评估",
-    showInEmployeeList: true,
-  },
   [DATA_RISK_ASSESSMENT_MCP_SERVICE]: {
     name: "数安风评数字员工",
     role: "数据安全风险评估",
-    showInEmployeeList: true,
-  },
-  [GO_LIVE_SECURITY_ASSESSMENT_MCP_SERVICE]: {
-    name: "上线安评数字员工",
-    role: "新系统上线安全评估",
-    showInEmployeeList: true,
-  },
-  [DUAL_NEW_ASSESSMENT_MCP_SERVICE]: {
-    name: "双新安评数字员工",
-    role: "新技术新业务评估",
-    showInEmployeeList: true,
-  },
-  [INCIDENT_RESPONSE_MCP_SERVICE]: {
-    name: "应急响应数字员工",
-    role: "安全事件应急响应",
-    showInEmployeeList: true,
-  },
-  [INCIDENT_DRILL_MCP_SERVICE]: {
-    name: "应急演练数字员工",
-    role: "安全应急演练",
-    showInEmployeeList: true,
-  },
-  [SECURITY_TRAINING_MCP_SERVICE]: {
-    name: "安全培训数字员工",
-    role: "安全培训服务",
-    showInEmployeeList: true,
-  },
-  [SECURITY_BULLETIN_MCP_SERVICE]: {
-    name: "安全通告数字员工",
-    role: "安全通告服务",
     showInEmployeeList: true,
   },
   [ALERT_ANALYSIS_MCP_SERVICE]: {

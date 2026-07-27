@@ -11,16 +11,19 @@ pub const ALERT_ANALYSIS_SERVICE_ID: &str = "alert-analysis-mcp";
 pub const DATA_CLASSIFICATION_SERVICE_ID: &str = "data-classification-mcp";
 pub const DATA_RISK_ASSESSMENT_SERVICE_ID: &str = "data-security-risk-assessment-mcp";
 pub const BUILTIN_MCP_SERVICE_IDS: &[&str] = &[
-    "network-risk-assessment-mcp",
     DATA_RISK_ASSESSMENT_SERVICE_ID,
+    ALERT_ANALYSIS_SERVICE_ID,
+    DATA_CLASSIFICATION_SERVICE_ID,
+];
+
+const REMOVED_BUILTIN_MCP_SERVICE_IDS: &[&str] = &[
+    "network-risk-assessment-mcp",
     "go-live-security-assessment-mcp",
     "dual-new-assessment-mcp",
     "incident-response-mcp",
     "incident-drill-mcp",
     "security-training-mcp",
     "security-bulletin-mcp",
-    ALERT_ANALYSIS_SERVICE_ID,
-    DATA_CLASSIFICATION_SERVICE_ID,
 ];
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -262,6 +265,19 @@ fn initialize_mcp_db(connection: &Connection) -> Result<(), String> {
          SET service_id = 'data-security-risk-assessment-mcp' \
          WHERE service_id = 'data-risk-assessment-mcp';",
     );
+    retire_removed_builtin_mcp_connection_settings(connection)?;
+    Ok(())
+}
+
+fn retire_removed_builtin_mcp_connection_settings(connection: &Connection) -> Result<(), String> {
+    for service_id in REMOVED_BUILTIN_MCP_SERVICE_IDS {
+        connection
+            .execute(
+                "UPDATE mcp_connection_settings SET deleted = 1, enabled = 0 WHERE service_id = ?1",
+                params![service_id],
+            )
+            .map_err(|error| format!("清理已移除的数字员工配置失败：{error}"))?;
+    }
     Ok(())
 }
 
@@ -329,17 +345,10 @@ fn list_mcp_connection_settings_from_db(
              WHERE deleted = 0
              ORDER BY
                 CASE service_id
-                    WHEN 'network-risk-assessment-mcp' THEN 0
-                    WHEN 'data-security-risk-assessment-mcp' THEN 1
-                    WHEN 'go-live-security-assessment-mcp' THEN 2
-                    WHEN 'dual-new-assessment-mcp' THEN 3
-                    WHEN 'incident-response-mcp' THEN 4
-                    WHEN 'incident-drill-mcp' THEN 5
-                    WHEN 'security-training-mcp' THEN 6
-                    WHEN 'security-bulletin-mcp' THEN 7
-                    WHEN 'alert-analysis-mcp' THEN 8
-                    WHEN 'data-classification-mcp' THEN 9
-                    ELSE 10
+                    WHEN 'data-security-risk-assessment-mcp' THEN 0
+                    WHEN 'alert-analysis-mcp' THEN 1
+                    WHEN 'data-classification-mcp' THEN 2
+                    ELSE 3
                 END,
                 service_id COLLATE NOCASE
             "#,
@@ -500,14 +509,7 @@ fn normalize_employee_name(value: &str, service_id: &str) -> String {
 
 fn default_employee_name(service_id: &str) -> String {
     match service_id {
-        "network-risk-assessment-mcp" => "网安风评数字员工".to_string(),
         "data-security-risk-assessment-mcp" => "数安风评数字员工".to_string(),
-        "go-live-security-assessment-mcp" => "上线安评数字员工".to_string(),
-        "dual-new-assessment-mcp" => "双新安评数字员工".to_string(),
-        "incident-response-mcp" => "应急响应数字员工".to_string(),
-        "incident-drill-mcp" => "应急演练数字员工".to_string(),
-        "security-training-mcp" => "安全培训数字员工".to_string(),
-        "security-bulletin-mcp" => "安全通告数字员工".to_string(),
         ALERT_ANALYSIS_SERVICE_ID => "威胁研判数字员工".to_string(),
         DATA_CLASSIFICATION_SERVICE_ID => "分类分级工具".to_string(),
         _ => format!(
@@ -519,14 +521,7 @@ fn default_employee_name(service_id: &str) -> String {
 
 fn default_employee_role(service_id: &str) -> String {
     match service_id {
-        "network-risk-assessment-mcp" => "网络安全风险评估".to_string(),
         "data-security-risk-assessment-mcp" => "数据安全风险评估".to_string(),
-        "go-live-security-assessment-mcp" => "新系统上线安全评估".to_string(),
-        "dual-new-assessment-mcp" => "新技术新业务评估".to_string(),
-        "incident-response-mcp" => "安全事件应急响应".to_string(),
-        "incident-drill-mcp" => "安全应急演练".to_string(),
-        "security-training-mcp" => "安全培训服务".to_string(),
-        "security-bulletin-mcp" => "安全通告服务".to_string(),
         ALERT_ANALYSIS_SERVICE_ID => "安全告警威胁研判".to_string(),
         DATA_CLASSIFICATION_SERVICE_ID => "数据资产分类分级".to_string(),
         _ => "自定义 MCP 服务".to_string(),
@@ -661,6 +656,40 @@ mod tests {
     fn data_risk_assessment_default_uses_its_own_http_port() {
         let settings = default_mcp_connection_settings(DATA_RISK_ASSESSMENT_SERVICE_ID);
         assert_eq!(settings.http_url, "http://127.0.0.1:8767/mcp");
+    }
+
+    #[test]
+    fn removed_builtin_mcp_services_are_retired() {
+        let db_path = std::env::temp_dir().join(format!(
+            "nova-mcp-settings-retired-{}.sqlite3",
+            Local::now().timestamp_nanos_opt().unwrap_or_default()
+        ));
+        let connection =
+            app_database::open_database_at(&db_path, initialize_mcp_db).expect("db should open");
+        let removed_service_id = REMOVED_BUILTIN_MCP_SERVICE_IDS[0];
+        let mut settings = default_mcp_connection_settings(removed_service_id);
+        settings.enabled = true;
+        settings.show_in_employee_list = true;
+        save_mcp_connection_settings_to_db(&connection, &settings)
+            .expect("removed service should save before migration");
+
+        initialize_mcp_db(&connection).expect("cleanup migration should run");
+        let listed =
+            list_mcp_connection_settings_from_db(&connection).expect("settings list should load");
+        assert!(!listed
+            .iter()
+            .any(|settings| settings.service_id == removed_service_id));
+
+        let flags: (i64, i64) = connection
+            .query_row(
+                "SELECT deleted, enabled FROM mcp_connection_settings WHERE service_id = ?1",
+                params![removed_service_id],
+                |row| Ok((row.get(0)?, row.get(1)?)),
+            )
+            .expect("retired service row should remain recoverable");
+        assert_eq!(flags, (1, 0));
+
+        let _ = fs::remove_file(db_path);
     }
 
     #[test]

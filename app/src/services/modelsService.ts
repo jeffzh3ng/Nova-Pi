@@ -11,7 +11,6 @@ import type {
   ModelsProviderInput,
   ModelsModelInput,
   ProviderSummary,
-  ModelSummary,
   DefaultModelInfo,
 } from "./hostBridge";
 
@@ -30,11 +29,6 @@ export async function listProviders(): Promise<ProviderSummary[]> {
   return await sendRpc<ProviderSummary[]>({ type: "models_list_providers" });
 }
 
-/** 列出 runtime 中所有可用模型（pi 内置 + 自定义），供默认模型下拉选择。 */
-export async function listAllModels(): Promise<ModelSummary[]> {
-  return await sendRpc<ModelSummary[]>({ type: "models_list_all" });
-}
-
 /** 读取当前默认 provider + model。 */
 export async function getDefaultModel(): Promise<DefaultModelInfo | null> {
   return await sendRpc<DefaultModelInfo | null>({ type: "models_get_default" });
@@ -43,6 +37,14 @@ export async function getDefaultModel(): Promise<DefaultModelInfo | null> {
 /** 设置默认 provider + model（写入 settings.json）。 */
 export async function setDefaultModel(provider: string, model: string): Promise<void> {
   await sendRpc({ type: "models_set_default", provider, model });
+  window.dispatchEvent(new CustomEvent("nova-model-settings-changed", {
+    detail: { provider, model },
+  }));
+}
+
+/** 通过一次极小的真实模型请求验证 Key、Base URL 和模型 ID。 */
+export async function testProviderConnection(providerId: string, modelId: string): Promise<void> {
+  await sendRpc({ type: "models_test_provider", providerId, modelId });
 }
 
 /** 新增或覆盖一个 provider（含模型列表）。 */

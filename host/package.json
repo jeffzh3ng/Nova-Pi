@@ -11,7 +11,8 @@
     "dev": "tsx watch src/main.ts",
     "build": "tsup src/main.ts --format esm --target node22 --clean --sourcemap",
     "start": "node dist/main.js",
-    "typecheck": "tsc --noEmit"
+    "typecheck": "tsc --noEmit",
+    "test": "tsx --test --test-concurrency=1 src/mcp/client.test.ts src/mcp/client.integration.test.ts src/mcp/extension.integration.test.ts src/mcp/payload.test.ts"
   },
   "dependencies": {
     "@earendil-works/pi-ai": "^0.82.1",

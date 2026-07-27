@@ -1,15 +1,8 @@
-import { Activity, Bot, CheckCircle2, DatabaseZap, GraduationCap, Megaphone, Rocket, ShieldCheck, Siren, Sparkles, Workflow } from "lucide-react";
+import { Activity, Bot, CheckCircle2, DatabaseZap } from "lucide-react";
 import type { DigitalHuman } from "../types";
 
 const humanIcons = {
-  "network-security-risk-assessment": ShieldCheck,
   "data-security-risk-assessment": DatabaseZap,
-  "system-go-live-security-assessment": Rocket,
-  "dual-new-assessment": Sparkles,
-  "incident-response": Siren,
-  "incident-drill": Workflow,
-  "training-service": GraduationCap,
-  "security-bulletin-service": Megaphone,
   "alert-analysis": Activity,
 };
 

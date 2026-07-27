@@ -25,7 +25,9 @@ import {
   listProviders,
   listAllModels,
   getDefaultModel,
+  getProviderModelSettings,
   setDefaultModel,
+  testProviderConnection,
   upsertProvider,
   removeProvider,
   setProviderApiKey,
@@ -59,6 +61,16 @@ async function bootstrap(): Promise<void> {
   initExtensionsManagerPaths(agentDir);
   await initBaseResourceLoader(agentDir);
   pool = new SessionPool();
+  try {
+    const defaultModel = await getDefaultModel();
+    if (defaultModel) {
+      await pool.setModelSettings(
+        await getProviderModelSettings(defaultModel.provider, defaultModel.model),
+      );
+    }
+  } catch (error) {
+    stderrLog(`[nova-pi-host] 默认模型加载失败：${error instanceof Error ? error.message : String(error)}`);
+  }
   stderrLog("[nova-pi-host] pi runtime ready");
 }
 
@@ -121,7 +133,7 @@ async function handleCommand(command: RpcCommand): Promise<void> {
       }
       case "set_model": {
         // Rust 已把 ModelSettings 存 SQLite；这里 host 收到 set_model 时同步到 pool
-        pool?.setModelSettings({
+        await pool?.setModelSettings({
           provider: command.provider,
           apiKey: command.apiKey ?? "",
           baseUrl: command.baseUrl ?? "",
@@ -154,37 +166,26 @@ async function handleCommand(command: RpcCommand): Promise<void> {
       }
       case "configure_mcp": {
         const results = await mcpRegistry.configure(command.servers as McpServerConfig[]);
-        pool?.refreshTools();
         writeResponse(id, true, results);
         return;
       }
       case "list_mcp_tools": {
-        const server = mcpRegistry.get(command.serviceId);
-        if (!server) {
-          writeResponse(id, false, `MCP 服务未连接：${command.serviceId}`);
-          return;
-        }
+        const server = await mcpRegistry.getOrConnect(command.serviceId);
         writeResponse(id, true, server.tools);
         return;
       }
       case "test_mcp": {
-        // configure 已完成握手，这里复用已连接的 client 做 ping
-        const server = mcpRegistry.get(command.serviceId);
-        if (!server) {
-          writeResponse(id, false, `MCP 服务未连接：${command.serviceId}`);
-          return;
-        }
+        const server = await mcpRegistry.getOrConnect(command.serviceId);
         writeResponse(id, true, { toolCount: server.tools.length });
         return;
       }
       case "mcp_call": {
-        const server = mcpRegistry.get(command.serviceId);
-        if (!server) {
-          writeResponse(id, false, `MCP 服务未连接：${command.serviceId}`);
-          return;
-        }
-        const { callMcpToolWithTimeout } = await import("./mcp/client.js");
-        const result = await callMcpToolWithTimeout(server, command.toolName, command.args, command.timeoutSecs);
+        const result = await mcpRegistry.callTool(
+          command.serviceId,
+          command.toolName,
+          command.args,
+          command.timeoutSecs,
+        );
         writeResponse(id, true, result);
         return;
       }
@@ -214,8 +215,15 @@ async function handleCommand(command: RpcCommand): Promise<void> {
         return;
       }
       case "models_set_default": {
+        const settings = await getProviderModelSettings(command.provider, command.model);
         await setDefaultModel(command.provider, command.model);
+        await pool?.setModelSettings(settings);
         writeResponse(id, true);
+        return;
+      }
+      case "models_test_provider": {
+        await testProviderConnection(command.providerId, command.modelId);
+        writeResponse(id, true, "连接成功");
         return;
       }
       case "models_upsert_provider": {
@@ -288,24 +296,29 @@ async function handleCommand(command: RpcCommand): Promise<void> {
 
 // ── stdin/stdout 读写 ────────────────────────────────────────────────────────
 
-const rl = createInterface({ input: process.stdin, terminal: false });
+function startRpcLoop(): void {
+  // Only start consuming stdin after bootstrap has completed. Commands written
+  // by Rust during startup remain buffered by the pipe, so model/MCP requests
+  // cannot observe half-initialized manager paths or an empty session pool.
+  const rl = createInterface({ input: process.stdin, terminal: false });
 
-rl.on("line", (line: string) => {
-  const trimmed = line.trim();
-  if (!trimmed) return;
-  let command: RpcCommand;
-  try {
-    command = JSON.parse(trimmed) as RpcCommand;
-  } catch (error) {
-    stderrLog(`[nova-pi-host] 无效 JSON：${error instanceof Error ? error.message : String(error)}`);
-    return;
-  }
-  void handleCommand(command);
-});
+  rl.on("line", (line: string) => {
+    const trimmed = line.trim();
+    if (!trimmed) return;
+    let command: RpcCommand;
+    try {
+      command = JSON.parse(trimmed) as RpcCommand;
+    } catch (error) {
+      stderrLog(`[nova-pi-host] 无效 JSON：${error instanceof Error ? error.message : String(error)}`);
+      return;
+    }
+    void handleCommand(command);
+  });
 
-rl.on("close", () => {
-  void gracefulShutdown();
-});
+  rl.on("close", () => {
+    void gracefulShutdown();
+  });
+}
 
 // ── 关闭 ─────────────────────────────────────────────────────────────────────
 
@@ -337,7 +350,9 @@ function stderrLog(message: string): void {
 
 // ── 启动 ─────────────────────────────────────────────────────────────────────
 
-void bootstrap().catch((error) => {
-  stderrLog(`[nova-pi-host] bootstrap failed: ${error instanceof Error ? error.stack ?? error.message : error}`);
-  process.exit(1);
-});
+void bootstrap()
+  .then(() => startRpcLoop())
+  .catch((error) => {
+    stderrLog(`[nova-pi-host] bootstrap failed: ${error instanceof Error ? error.stack ?? error.message : error}`);
+    process.exit(1);
+  });

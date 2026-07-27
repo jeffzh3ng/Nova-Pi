@@ -339,6 +339,23 @@ export function TaskConversation({
   const threadRef = useRef<HTMLDivElement>(null);
   const [showAllRelatedFiles, setShowAllRelatedFiles] = useState(false);
   const [fileContextMenu, setFileContextMenu] = useState<FileContextMenuState>(null);
+  const visibleMessages = useMemo(
+    () => messages.filter((message) => Boolean(
+      message.content.trim()
+      || message.title?.trim()
+      || message.detail?.trim()
+      || message.attachments?.length
+      || message.steps?.some((step) => step.trim())
+      || message.suggestions?.some((suggestion) => suggestion.trim())
+      || message.alertAnalysisResult
+      || message.riskAssessmentResult
+      || message.riskAssessmentJob
+      || message.usedSkill
+      || message.pendingSkillExecution
+      || message.exportedFile,
+    )),
+    [messages],
+  );
   const conversationRounds = useMemo(
     () => messages.filter((message) => message.role === "user").length,
     [messages],
@@ -493,7 +510,7 @@ export function TaskConversation({
       </div>
 
       <div className="conversation-thread" ref={threadRef}>
-        {messages.length === 0 ? (
+        {visibleMessages.length === 0 ? (
           <div className="conversation-empty">
             <span className="conversation-empty-icon">
               <Sparkles size={24} />
@@ -502,7 +519,7 @@ export function TaskConversation({
             <p>在下方输入任务信息，数字员工会继续完成当前任务。</p>
           </div>
         ) : (
-          messages.map((message) => {
+          visibleMessages.map((message) => {
             const displaySteps = displayStepsForMessage(message);
             return (
             <article className={`message-row ${message.role}`} key={message.id}>

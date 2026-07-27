@@ -29,6 +29,14 @@ export function extractMcpPayload(raw: unknown): { data: unknown; text: string }
     if (isObject(sc.result)) {
       return { data: sc.result, text: stringifyData(sc.result) };
     }
+    // FastMCP 的 structuredContent 也可能包装 JSON 字符串。
+    if (typeof sc.result === "string") {
+      try {
+        return extractMcpPayload(JSON.parse(sc.result));
+      } catch {
+        return { data: sc.result, text: sc.result };
+      }
+    }
     return { data: sc, text: stringifyData(sc) };
   }
 
@@ -89,4 +97,9 @@ export function extractMcpError(data: unknown): string | undefined {
     return data.error.trim();
   }
   return undefined;
+}
+
+/** MCP 协议级失败标记；pi 工具必须通过 throw 才会进入错误结果路径。 */
+export function isMcpCallError(raw: unknown): boolean {
+  return isObject(raw) && raw.isError === true;
 }

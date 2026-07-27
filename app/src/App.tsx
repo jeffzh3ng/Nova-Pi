@@ -167,6 +167,41 @@ const loadRecentlyUsedHumanIds = (): string[] => {
 const makeLocalId = () =>
   globalThis.crypto?.randomUUID?.() ?? `local-${Date.now()}-${Math.random().toString(16).slice(2)}`;
 
+const isRenderableChatMessage = (message: ChatMessage) => Boolean(
+  message.content.trim()
+  || message.title?.trim()
+  || message.detail?.trim()
+  || message.attachments?.length
+  || message.steps?.some((step) => step.trim())
+  || message.suggestions?.some((suggestion) => suggestion.trim())
+  || message.alertAnalysisResult
+  || message.riskAssessmentResult
+  || message.riskAssessmentJob
+  || message.usedSkill
+  || message.pendingSkillExecution
+  || message.exportedFile,
+);
+
+const isAssistantPiMessage = (message: unknown): boolean => (
+  typeof message === "object"
+  && message !== null
+  && (message as { role?: unknown }).role === "assistant"
+);
+
+const assistantTextFromPiMessage = (message: unknown): string => {
+  if (!isAssistantPiMessage(message)) return "";
+  const content = (message as { content?: unknown }).content;
+  if (typeof content === "string") return content;
+  if (!Array.isArray(content)) return "";
+  return content
+    .map((block) => {
+      if (typeof block !== "object" || block === null) return "";
+      const item = block as { type?: unknown; text?: unknown };
+      return item.type === "text" && typeof item.text === "string" ? item.text : "";
+    })
+    .join("");
+};
+
 const formatMessageTime = () =>
   new Intl.DateTimeFormat("zh-CN", {
     hour: "2-digit",
@@ -415,38 +450,6 @@ export default function App() {
   const deletedConversationIdsRef = useRef<Set<string>>(new Set());
   const titleGenerationInFlightRef = useRef<Set<string>>(new Set());
   const titleGenerationTimersRef = useRef<Record<string, ReturnType<typeof setTimeout>>>({});
-
-  useEffect(() => {
-    let alive = true;
-    let retryTimer: ReturnType<typeof setTimeout> | undefined;
-    // 自检带重试：deepseek 偶发慢响应（数十秒）或网络抖动时，启动瞬间的单次自检
-    // 可能失败并让模型标签永久停在红色。失败后延迟重试，最多尝试 4 次。
-    const MAX_RETRIES = 4;
-    const RETRY_DELAY_MS = 12_000;
-    const runCheck = (attempt: number) => {
-      if (!alive) return;
-      sendRpc<string>({ type: "test_model", provider: "deepseek", modelId: "" })
-        .then(() => {
-          if (!alive) return;
-          setModelStatus("ok");
-          setModelError("");
-        })
-        .catch((error) => {
-          if (!alive) return;
-          const message = String(error);
-          setModelStatus("error");
-          setModelError(message);
-          if (attempt < MAX_RETRIES) {
-            retryTimer = setTimeout(() => runCheck(attempt + 1), RETRY_DELAY_MS);
-          }
-        });
-    };
-    runCheck(0);
-    return () => {
-      alive = false;
-      if (retryTimer) clearTimeout(retryTimer);
-    };
-  }, []);
 
   useEffect(() => {
     let alive = true;
@@ -787,23 +790,64 @@ export default function App() {
 
   useEffect(() => {
     let alive = true;
+    let refreshSequence = 0;
+    let retryTimer: number | undefined;
+    let unlistenSidecarRestart: (() => void) | undefined;
 
     // 从 pi 的 settings.json 读取默认模型名（与新的模型管理面板一致）。
-    const refreshModelName = async () => {
+    const refreshModelName = async (retryAttempt = 0) => {
+      if (retryTimer !== undefined) {
+        window.clearTimeout(retryTimer);
+        retryTimer = undefined;
+      }
+      const sequence = ++refreshSequence;
+      setModelStatus("idle");
+      setModelError("");
       try {
         const def = await sendRpc<{ provider: string; model: string } | null>({ type: "models_get_default" });
-        if (!alive) return;
+        if (!alive || sequence !== refreshSequence) return;
         if (def) {
           setCurrentModelName(def.model || def.provider || "未配置模型");
+          setModelStatus("idle");
+          setModelError("");
+          try {
+            await sendRpc({
+              type: "models_test_provider",
+              providerId: def.provider,
+              modelId: def.model,
+            });
+            if (!alive || sequence !== refreshSequence) return;
+            setModelStatus("ok");
+          } catch (error) {
+            if (!alive || sequence !== refreshSequence) return;
+            setModelStatus("error");
+            setModelError(error instanceof Error ? error.message : String(error));
+          }
         } else {
           // 没有默认模型时，尝试列举可用模型取第一个
           const models = await sendRpc<Array<{ id: string; provider: string; available: boolean }>>({ type: "models_list_all" });
-          if (!alive) return;
+          if (!alive || sequence !== refreshSequence) return;
           const first = models.find((m) => m.available) ?? models[0];
           setCurrentModelName(first ? `${first.id}` : "未配置模型");
+          setModelStatus(first?.available ? "ok" : "error");
+          setModelError(first?.available ? "" : "未检测到可用模型。");
         }
-      } catch {
-        if (alive) setCurrentModelName("未配置模型");
+      } catch (error) {
+        if (!alive || sequence !== refreshSequence) return;
+        // The WebView can mount before the Node sidecar has completed bootstrap.
+        // Retry startup transport/read failures, but do not retry a real model
+        // validation failure handled above (for example an invalid API key).
+        if (retryAttempt < 5) {
+          const delayMs = Math.min(300 * (2 ** retryAttempt), 2_000);
+          retryTimer = window.setTimeout(() => {
+            retryTimer = undefined;
+            void refreshModelName(retryAttempt + 1);
+          }, delayMs);
+          return;
+        }
+        setCurrentModelName("未配置模型");
+        setModelStatus("error");
+        setModelError(error instanceof Error ? error.message : "模型配置读取失败。");
       }
     };
 
@@ -814,9 +858,20 @@ export default function App() {
 
     void refreshModelName();
     window.addEventListener("nova-model-settings-changed", handleModelSettingsChanged);
+    void listen("pi-sidecar-restarted", () => {
+      void refreshModelName();
+    }).then((unlisten) => {
+      if (alive) {
+        unlistenSidecarRestart = unlisten;
+      } else {
+        unlisten();
+      }
+    });
 
     return () => {
       alive = false;
+      if (retryTimer !== undefined) window.clearTimeout(retryTimer);
+      unlistenSidecarRestart?.();
       window.removeEventListener("nova-model-settings-changed", handleModelSettingsChanged);
     };
   }, []);
@@ -856,13 +911,15 @@ export default function App() {
     fallbackTitle = "新任务",
   ): ConversationSnapshot => {
     const metadata = getConversationMetadata(conversationId);
+    const renderableMessages = messages.filter(isRenderableChatMessage);
     return {
       id: conversationId,
-      title: buildConversationTitle(messages, fallbackTitle),
+      title: buildConversationTitle(renderableMessages, fallbackTitle),
       agentId: metadata.agentId,
       agentName: metadata.agentName,
       status,
-      messages,
+      // Drop legacy empty assistant placeholders on the next snapshot save.
+      messages: renderableMessages,
     };
   };
 
@@ -1102,18 +1159,23 @@ export default function App() {
       snapshotStatus,
     );
 
-    const optimisticSummary: ConversationSummary = {
-      id: snapshot.id,
-      title: snapshot.title,
-      titleSource: "pending",
-      agentId: snapshot.agentId,
-      agentName: snapshot.agentName,
-      status: snapshot.status,
-      lastMessage: buildLastMessage(conversationMessages),
-      createdAt: "",
-      updatedAt: new Date().toISOString(),
-    };
+    const optimisticUpdatedAt = new Date().toISOString();
     setRecentTasks((items) => {
+      const existing = items.find((item) => item.id === snapshot.id);
+      const optimisticSummary: ConversationSummary = {
+        id: snapshot.id,
+        title: snapshot.title,
+        titleSource: existing?.titleSource ?? "pending",
+        agentId: snapshot.agentId,
+        agentName: snapshot.agentName,
+        status: snapshot.status,
+        lastMessage: buildLastMessage(conversationMessages),
+        // Streaming deltas trigger repeated optimistic saves. Preserve the
+        // original creation time so the task card cannot alternate between
+        // "刚刚" and the persisted absolute timestamp on every delta.
+        createdAt: existing?.createdAt || optimisticUpdatedAt,
+        updatedAt: optimisticUpdatedAt,
+      };
       const next = [summaryToRecentTask(optimisticSummary), ...items.filter((item) => item.id !== optimisticSummary.id)];
       return next.slice(0, 80);
     });
@@ -1643,33 +1705,74 @@ export default function App() {
 
       switch (event.type) {
         case "message_start": {
-          // 新的 assistant 消息开始：登记一个 streaming 消息 id，后续 text_delta 拼到这里。
+          // pi emits message_start for user prompts and tool results too. Only
+          // assistant messages participate in the visible response stream, and
+          // the bubble is created lazily on the first final-text delta so a
+          // thinking-only phase cannot leave an empty card behind.
+          if (!isAssistantPiMessage(event.message)) break;
           const messageId = makeLocalId();
           streamingMessageIdRef.current[conversationId] = messageId;
-          appendMessageToConversation(
-            conversationId,
-            { id: messageId, role: "assistant", content: "", time: formatMessageTime() },
-            "running",
-          );
           break;
         }
         case "message_update": {
-          const delta = event.assistantMessageEvent?.delta ?? event.assistantMessageEvent?.text ?? "";
+          // Do not expose thinking_delta/reasoning content in the conversation.
+          if (event.assistantMessageEvent?.type !== "text_delta") break;
+          const delta = event.assistantMessageEvent.delta ?? event.assistantMessageEvent.text ?? "";
           if (!delta) break;
-          const messageId = streamingMessageIdRef.current[conversationId];
-          if (!messageId) break;
-          updateMessageInConversation(
-            conversationId,
-            messageId,
-            (message) => ({ ...message, content: message.content + delta }),
-            "running",
-          );
+          let messageId = streamingMessageIdRef.current[conversationId];
+          if (!messageId) {
+            messageId = makeLocalId();
+            streamingMessageIdRef.current[conversationId] = messageId;
+          }
+          const exists = (conversationMessageBuffersRef.current[conversationId] ?? [])
+            .some((message) => message.id === messageId);
+          if (exists) {
+            updateMessageInConversation(
+              conversationId,
+              messageId,
+              (message) => ({ ...message, content: message.content + delta }),
+              "running",
+            );
+          } else {
+            appendMessageToConversation(
+              conversationId,
+              { id: messageId, role: "assistant", content: delta, time: formatMessageTime() },
+              "running",
+            );
+          }
           break;
         }
         case "message_end": {
-          // 单条 assistant 消息流式结束：清理 streaming id，防止下一轮 message_start 复用旧 id。
-          // agent_end 会再清一次（兜底），但若中途有多条 message（如工具调用后继续回复），
-          // 这里逐条清理更准确。
+          if (!isAssistantPiMessage(event.message)) break;
+          const messageId = streamingMessageIdRef.current[conversationId];
+          const finalText = assistantTextFromPiMessage(event.message);
+          const exists = messageId
+            ? (conversationMessageBuffersRef.current[conversationId] ?? [])
+              .some((message) => message.id === messageId)
+            : false;
+          // Some providers do not emit text_delta consistently. Reconcile from
+          // the finalized assistant message, still excluding thinking blocks.
+          if (finalText.trim()) {
+            if (messageId && exists) {
+              updateMessageInConversation(
+                conversationId,
+                messageId,
+                (message) => ({ ...message, content: finalText }),
+                "running",
+              );
+            } else {
+              appendMessageToConversation(
+                conversationId,
+                {
+                  id: messageId ?? makeLocalId(),
+                  role: "assistant",
+                  content: finalText,
+                  time: formatMessageTime(),
+                },
+                "running",
+              );
+            }
+          }
           delete streamingMessageIdRef.current[conversationId];
           break;
         }
@@ -2166,6 +2269,7 @@ export default function App() {
           const tmpPath = await invoke<string>("write_uploaded_blob", {
             base64Data: base64,
             extension: ext,
+            fileName: pcapFile.name,
           });
           pcapAttachments.push({ kind: "file", name: pcapFile.name, path: tmpPath, ext });
           pcapJobs.push({ name: pcapFile.name, tmpPath });
@@ -2216,6 +2320,7 @@ export default function App() {
           const tmpPath = await invoke<string>("write_uploaded_blob", {
             base64Data: base64,
             extension: "zip",
+            fileName: zipFile.name,
           });
           const uploaded = riskAssessmentTransport === "http"
             ? await pickAndUploadRemoteRiskMaterial(tmpPath)
@@ -2258,6 +2363,7 @@ export default function App() {
           const tmpPath = await invoke<string>("write_uploaded_blob", {
             base64Data: base64,
             extension: ext,
+            fileName: imageFile.name,
           });
           const mime = IMAGE_MIME_BY_EXT[ext] ?? "image/png";
           imageAttachments.push({

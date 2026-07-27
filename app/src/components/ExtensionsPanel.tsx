@@ -11,6 +11,7 @@ import {
   setExtensionEnabled,
 } from "../services/extensionsService";
 import type { ExtensionSummary } from "../services/hostBridge";
+import { toUserFacingError } from "../services/uiError";
 
 type CreateDraft = {
   name: string;
@@ -48,7 +49,7 @@ export function ExtensionsPanel() {
           : "未发现扩展。可添加本地 .ts 文件或新建扩展。",
       );
     } catch (error) {
-      setStatus(error instanceof Error ? error.message : String(error));
+      setStatus(toUserFacingError(error, "扩展服务暂不可用，请确认桌面服务已启动后重试。"));
     } finally {
       setBusy(false);
     }
@@ -72,7 +73,7 @@ export function ExtensionsPanel() {
       setStatus(`已添加扩展：${path}`);
       await refresh();
     } catch (error) {
-      setStatus(error instanceof Error ? error.message : String(error));
+      setStatus(toUserFacingError(error, "扩展添加失败，请检查路径后重试。"));
     } finally {
       setBusy(false);
     }
@@ -93,7 +94,7 @@ export function ExtensionsPanel() {
       setStatus(`已创建扩展：${name}（位于全局扩展目录，已自动启用）`);
       await refresh();
     } catch (error) {
-      setStatus(error instanceof Error ? error.message : String(error));
+      setStatus(toUserFacingError(error, "扩展创建失败，请检查名称和代码后重试。"));
     } finally {
       setBusy(false);
     }
@@ -108,7 +109,7 @@ export function ExtensionsPanel() {
       );
       setStatus(`${extension.name} 已${enabled ? "启用" : "禁用"}。`);
     } catch (error) {
-      setStatus(error instanceof Error ? error.message : String(error));
+      setStatus(toUserFacingError(error, "扩展状态更新失败，请稍后重试。"));
     } finally {
       setBusyId(null);
     }
@@ -125,7 +126,7 @@ export function ExtensionsPanel() {
       setStatus(`已从 settings.json 移除：${target.name}（磁盘文件保留）。`);
       await refresh();
     } catch (error) {
-      setStatus(error instanceof Error ? error.message : String(error));
+      setStatus(toUserFacingError(error, "扩展移除失败，请稍后重试。"));
     } finally {
       setBusyId(null);
     }
@@ -138,7 +139,7 @@ export function ExtensionsPanel() {
       const content = await readExtensionContent(extension.id);
       setViewContent(content);
     } catch (error) {
-      setViewContent(error instanceof Error ? error.message : String(error));
+      setViewContent(toUserFacingError(error, "扩展源码读取失败，请稍后重试。"));
     }
   };
 
@@ -151,12 +152,12 @@ export function ExtensionsPanel() {
   }, [extensions, searchText]);
 
   return (
-    <section className="settings-page mcp-square-page" aria-label="Pi 扩展管理">
+    <section className="settings-page mcp-square-page pi-extensions-page" aria-label="Pi 扩展管理">
       <header className="settings-header">
         <div>
           <span>Pi 扩展</span>
           <h1>扩展管理</h1>
-          {status ? <p className="mcp-status-line">{status}</p> : null}
+          {status ? <p className="mcp-status-line" title={status}>{status}</p> : null}
         </div>
         <div className="settings-actions">
           <button type="button" onClick={() => setCreateDraft({ name: "", template: DEFAULT_EXTENSION_TEMPLATE })} disabled={busy}>
@@ -171,7 +172,7 @@ export function ExtensionsPanel() {
       </header>
 
       {/* 添加本地扩展路径 */}
-      <section className="settings-card settings-card-wide" style={{ margin: "0 24px 16px" }}>
+      <section className="settings-card settings-card-wide pi-feature-card">
         <div className="settings-card-title">
           <CirclePlus size={20} />
           <div>
@@ -192,7 +193,7 @@ export function ExtensionsPanel() {
             />
           </label>
         </div>
-        <div className="settings-actions" style={{ marginTop: 8 }}>
+        <div className="settings-actions pi-feature-actions">
           <button className="primary" type="button" onClick={() => void handleAdd()} disabled={busy || !addPath.trim()}>
             <CirclePlus size={16} />
             添加
@@ -243,11 +244,11 @@ export function ExtensionsPanel() {
                 </div>
                 <div>
                   <dt>路径</dt>
-                  <dd title={extension.path} style={{ overflow: "hidden", textOverflow: "ellipsis" }}>{extension.path}</dd>
+                  <dd className="pi-truncate" title={extension.path}>{extension.path}</dd>
                 </div>
               </dl>
               <p className={`mcp-card-endpoint ${extension.exists ? "" : "is-empty"}`} title={extension.path}>
-                <SourceIcon size={13} style={{ display: "inline", verticalAlign: "middle", marginRight: 4 }} />
+                <SourceIcon className="pi-inline-icon" size={13} />
                 {extension.exists ? extension.path : "文件不存在"}
               </p>
 
@@ -297,7 +298,7 @@ export function ExtensionsPanel() {
       </div>
 
       {errors.length > 0 ? (
-        <section className="settings-card settings-card-wide" style={{ margin: "0 24px" }}>
+        <section className="settings-card settings-card-wide pi-feature-card pi-extension-errors">
           <div className="settings-card-title">
             <Puzzle size={20} />
             <div>
@@ -305,9 +306,9 @@ export function ExtensionsPanel() {
               <p>以下扩展在加载时出错（不影响其他扩展）。</p>
             </div>
           </div>
-          <ul style={{ margin: 0, padding: 0, listStyle: "none" }}>
+          <ul>
             {errors.map((error, index) => (
-              <li key={index} style={{ padding: "6px 0", color: "var(--color-notice)", fontSize: 13 }}>
+              <li key={index}>
                 {error}
               </li>
             ))}
@@ -352,13 +353,13 @@ export function ExtensionsPanel() {
                 <textarea
                   value={createDraft.template}
                   rows={14}
-                  style={{ fontFamily: "ui-monospace, SFMono-Regular, Menlo, monospace", fontSize: 12 }}
+                  className="pi-code-input"
                   onChange={(event) => setCreateDraft((d) => (d ? { ...d, template: event.target.value } : d))}
                 />
               </label>
-              <p style={{ fontSize: 12, color: "var(--color-muted)", margin: "4px 0 0" }}>
+              <p className="pi-editor-note">
                 扩展文件创建在全局扩展目录，并自动加入 settings.json。文档：
-                <a href="https://pi.dev/docs/latest/extensions" target="_blank" rel="noreferrer" style={{ color: "var(--color-accent)" }}>
+                <a href="https://pi.dev/docs/latest/extensions" target="_blank" rel="noreferrer">
                   pi.dev/docs/extensions
                 </a>
               </p>
@@ -400,22 +401,8 @@ export function ExtensionsPanel() {
               </button>
             </header>
             <div className="mcp-editor-body">
-              <p style={{ fontSize: 12, color: "var(--color-muted)", margin: "0 0 8px" }}>{viewing.path}</p>
-              <pre
-                style={{
-                  margin: 0,
-                  padding: 12,
-                  background: "var(--color-panel)",
-                  borderRadius: 8,
-                  maxHeight: "60vh",
-                  overflow: "auto",
-                  fontFamily: "ui-monospace, SFMono-Regular, Menlo, monospace",
-                  fontSize: 12,
-                  lineHeight: 1.5,
-                  whiteSpace: "pre-wrap",
-                  wordBreak: "break-word",
-                }}
-              >
+              <p className="pi-source-path">{viewing.path}</p>
+              <pre className="pi-source-code">
                 {viewContent}
               </pre>
             </div>

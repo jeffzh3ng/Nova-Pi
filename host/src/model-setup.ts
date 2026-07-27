@@ -42,6 +42,11 @@ export function getModelRuntime(): ModelRuntime {
 /** 解析模型：优先用 provider/modelId 匹配 pi 内置目录，否则按 baseUrl 构造 OpenAI 兼容模型。 */
 export function resolveModel(settings: HostModelSettings): Model<any> {
   const runtime = getModelRuntime();
+  const configuredModelId = settings.model || "default";
+  const runtimeModel = runtime.getModel(settings.provider, configuredModelId);
+  if (runtimeModel) {
+    return settings.baseUrl ? { ...runtimeModel, baseUrl: settings.baseUrl } : runtimeModel;
+  }
 
   // DeepSeek：pi 内置 provider，按 id 匹配
   if (settings.provider === "deepseek") {

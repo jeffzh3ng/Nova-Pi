@@ -3,7 +3,6 @@ import type { CSSProperties, PointerEvent as ReactPointerEvent, MouseEvent as Re
 import {
   Activity,
   Archive,
-  BarChart3,
   Blocks,
   Bot,
   CheckCircle2,
@@ -11,32 +10,17 @@ import {
   CircleDot,
   ClipboardList,
   DatabaseZap,
-  GraduationCap,
   History,
-  Megaphone,
   Pencil,
-  Puzzle,
-  Rocket,
   Settings,
-  ShieldCheck,
-  Siren,
-  Sparkles,
   Store,
   Trash2,
-  Workflow,
   XCircle,
 } from "lucide-react";
 import type { QuickAction, RecentTask, SidebarNavId } from "../types";
 
 const quickIcons = {
-  "network-security-risk-assessment": ShieldCheck,
   "data-security-risk-assessment": DatabaseZap,
-  "system-go-live-security-assessment": Rocket,
-  "dual-new-assessment": Sparkles,
-  "incident-response": Siren,
-  "incident-drill": Workflow,
-  "training-service": GraduationCap,
-  "security-bulletin-service": Megaphone,
   "alert-analysis": Activity,
 };
 
@@ -168,14 +152,6 @@ export function Sidebar({
         </button>
         <div className="rail-spacer" />
         <button
-          className={`rail-tool ${activeNav === "skill" ? "active" : ""}`}
-          aria-label="SKILL 中心"
-          data-tooltip="SKILL 中心"
-          onClick={() => onSelectNav("skill")}
-        >
-          <Puzzle size={22} />
-        </button>
-        <button
           className={`rail-tool ${activeNav === "mcp" ? "active" : ""}`}
           aria-label="数字员工管理"
           data-tooltip="数字员工管理"
@@ -190,14 +166,6 @@ export function Sidebar({
           onClick={() => onSelectNav("extensions")}
         >
           <Blocks size={22} />
-        </button>
-        <button
-          className={`rail-tool ${activeNav === "usage" ? "active" : ""}`}
-          aria-label="用量"
-          data-tooltip="用量"
-          onClick={() => onSelectNav("usage")}
-        >
-          <BarChart3 size={22} />
         </button>
         <button
           className={`rail-tool ${activeNav === "settings" ? "active" : ""}`}

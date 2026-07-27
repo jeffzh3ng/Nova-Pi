@@ -13,8 +13,8 @@ React UI ──invoke──► Rust ──spawn──► Node sidecar(nova-pi-ho
    ▲                   │                 │
    └─ Tauri events ────┘   stdin/stdout RPC (JSON-line)
                                      │
-                          pi SDK (createAgentSession, noTools:"all")
-                          + MCP 工具动态注册为 pi customTool
+                          pi SDK (createAgentSession, noTools:"builtin")
+                          + MCP 工具由 pi inline extension 动态注册
                           + Skills (pi ResourceLoader)
                           + Session JSONL 持久化
                                      │
@@ -25,7 +25,7 @@ React UI ──invoke──► Rust ──spawn──► Node sidecar(nova-pi-ho
 ### 关键设计
 
 - **pi 是纯 Node SDK**（依赖 `node:fs`/`jiti`），不能跑在 webview → 用 Tauri sidecar 子进程嵌入。
-- **pi 无原生 MCP 支持** → 用 `@modelcontextprotocol/sdk` JS 自建桥接，每个 MCP 工具动态注册为 pi 的 `customTool`，让 LLM 原生按需调用（取代原 Nova 的 `agentRuntime.ts` 路由）。
+- **pi 无原生 MCP 支持** → 用 `@modelcontextprotocol/sdk` JS 自建桥接，通过 `DefaultResourceLoader.extensionFactories` 把每个 MCP 工具注册为 pi 扩展工具，让 LLM 原生按需调用（取代原 Nova 的 `agentRuntime.ts` 路由）。
 - **pi 内置 DeepSeek provider**（`api.deepseek.com`），与原 Nova 默认 LLM 一致。
 - **Rust 退化为薄壳**：窗口、文件对话框、sidecar 进程管理、RPC 编排、SQLite 会话索引、大文件 HTTP（风评 zip/xlsx）。
 - **混合传输**：风评大文件走 Rust 直连 HTTP（`/mcp`→`/api` 推导），其余走 MCP。
@@ -54,7 +54,7 @@ Nova-PI/
 │   ├── src/                     # React 前端
 │   │   ├── main.tsx / App.tsx
 │   │   ├── types.ts
-│   │   ├── config/appContent.ts # 9 数字员工定义
+│   │   ├── config/appContent.ts # 2 个内置数字员工定义
 │   │   ├── components/          # UI 组件
 │   │   ├── services/            # hostBridge + CRUD 封装
 │   │   └── styles/              # tokens/base/app/index.css
@@ -81,7 +81,7 @@ Nova-PI/
 │       ├── models-manager.ts    # pi models.json CRUD
 │       ├── extensions-manager.ts # pi settings.json extensions CRUD
 │       ├── digital-human.ts     # 9 员工 system prompt + MCP 白名单
-│       ├── mcp/                 # MCP 桥接（registry/client/schema-convert/payload）
+│       ├── mcp/                 # MCP 桥接（extension/registry/client/payload）
 │       └── skills/              # pi ResourceLoader 配置
 ├── services/                    # 外部 MCP 服务（Python FastMCP）
 └── skills/                      # 内置技能包
@@ -122,26 +122,19 @@ JSON-line over stdin/stdout。详见 `host/src/rpc-protocol.ts`。
 
 **重要**：命令名为 snake_case（匹配 Rust 函数名）。Tauri v2 不做 camelCase 转换。
 
-## 数字员工（9 个）
+## 数字员工（2 个）
 
 | id | name | mcpService |
 |---|---|---|
-| `network-security-risk-assessment` | 网安风评数字员工 | `network-risk-assessment-mcp` |
 | `data-security-risk-assessment` | 数安风评数字员工 | `data-security-risk-assessment-mcp` |
-| `system-go-live-security-assessment` | 上线安评数字员工 | `go-live-security-assessment-mcp` |
-| `dual-new-assessment` | 双新安评数字员工 | `dual-new-assessment-mcp` |
-| `incident-response` | 应急响应数字员工 | `incident-response-mcp` |
-| `incident-drill` | 应急演练数字员工 | `incident-drill-mcp` |
-| `training-service` | 安全培训数字员工 | `security-training-mcp` |
-| `security-bulletin-service` | 安全通告数字员工 | `security-bulletin-mcp` |
 | `alert-analysis` | 威胁研判数字员工 | `alert-analysis-mcp` |
 
 每个员工在 `host/src/digital-human.ts` 配置：system prompt + 允许的 MCP 服务集 + 内置工具。
 
 ## Key Design Decisions & Caveats
 
-1. **pi 用 `noTools: "all"` 起步**：禁用 pi 内置的 read/bash/edit/write（桌面工作台不需要文件操作 agent），所有能力通过 `customTools` 注入：MCP 工具 + 内置工具（风评上传/下载、PCAP 解析、OCR、公文格式化）。
-2. **路由简化**：原 Nova 的 `agentRuntime.ts` 三分支路由（skill/alert/workbench）被 pi 的 LLM 工具调用决策取代。system prompt 承载角色，customTools 描述能力，LLM 自行决定。
+1. **pi 用 `noTools: "builtin"` 起步**：只禁用 pi 内置的 read/bash/edit/write；MCP 作为 inline extension 注入并保持可用。禁止使用 `noTools: "all"`，它会同时屏蔽 MCP 扩展工具。
+2. **路由简化**：原 Nova 的 `agentRuntime.ts` 三分支路由（skill/alert/workbench）被 pi 的 LLM 工具调用决策取代。system prompt 承载角色，扩展工具描述能力，LLM 自行决定。
 3. **会话持久化双轨**：pi 的 `SessionManager` 写 JSONL（完整历史，host 内部）；Rust SQLite 存索引+消息快照（侧栏列表+重启恢复）。
 4. **title 保护**：只在 INSERT 时设 title，UPDATE 不覆盖。`title_source` 三态（pending/manual/auto）。手动重命名设 `manual`，LLM 生成设 `auto`，条件 UPDATE（`WHERE title_source='pending' AND archived=0`）防竞态。
 5. **归档独立**：`archived` 列隔离，归档会话不自动保存、不出现在历史、有独立列表。ReadOnly 守卫。点首页/任务/归档清空当前会话视图。

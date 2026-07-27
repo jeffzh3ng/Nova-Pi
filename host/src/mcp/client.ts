@@ -1,13 +1,18 @@
 /**
- * MCP 客户端封装：基于 @modelcontextprotocol/sdk 连接外部 MCP 服务。
+ * MCP transport layer shared by pi extensions and imperative RPC calls.
  *
- * 支持 stdio（spawn 子进程）和 Streamable HTTP 两种传输，与原 Nova 的
- * external_mcp_client.rs 行为对齐（initialize → tools/list → tools/call）。
+ * The implementation follows the compatibility model used by pi-mcp-adapter:
+ * stdio is spawned without a shell, Streamable HTTP falls back to legacy SSE,
+ * and MCP JSON Schemas/results pass through without provider-specific rewriting.
  */
 
+import { existsSync, statSync } from "node:fs";
+import path from "node:path";
 import { Client } from "@modelcontextprotocol/sdk/client/index.js";
+import { SSEClientTransport } from "@modelcontextprotocol/sdk/client/sse.js";
 import { StdioClientTransport } from "@modelcontextprotocol/sdk/client/stdio.js";
 import { StreamableHTTPClientTransport } from "@modelcontextprotocol/sdk/client/streamableHttp.js";
+import type { Transport } from "@modelcontextprotocol/sdk/shared/transport.js";
 import type { McpServerConfig } from "../rpc-protocol.js";
 
 export type McpToolInfo = {
@@ -20,40 +25,180 @@ export type ConnectedMcpServer = {
   config: McpServerConfig;
   client: Client;
   tools: McpToolInfo[];
+  transportKind: "stdio" | "streamable-http" | "sse";
 };
 
-/** 解析 stdio 启动命令：script 模式直接跑脚本路径，module 模式 python -m <模块>。 */
-function resolveStdioCommand(config: McpServerConfig): { command: string; args: string[]; env?: Record<string, string> } {
-  if (config.launchMode === "module") {
-    // module 模式：commandPath = 项目根目录，commandArgs = 模块名
-    const moduleName = config.commandArgs.trim() || "server";
-    return {
-      command: process.platform === "win32" ? "python" : "python3",
-      args: ["-m", moduleName],
-      env: config.env,
-    };
+export type StdioCommandSpec = {
+  command: string;
+  args: string[];
+  cwd?: string;
+  env?: Record<string, string>;
+};
+
+const HANDSHAKE_TIMEOUT_MS = 30_000;
+const BLOCKED_PROGRAMS = new Set([
+  "cmd",
+  "cmd.exe",
+  "powershell",
+  "powershell.exe",
+  "pwsh",
+  "pwsh.exe",
+  "bash",
+  "sh",
+  "zsh",
+  "ksh",
+  "csh",
+  "tcsh",
+]);
+
+/** Parse a settings text field into argv without invoking a shell. */
+export function splitCommandArgs(input: string): string[] {
+  const args: string[] = [];
+  let current = "";
+  let quote: '"' | "'" | null = null;
+
+  for (let index = 0; index < input.length; index += 1) {
+    const char = input[index];
+    if (quote) {
+      if (char === quote) {
+        quote = null;
+      } else if (char === "\\" && input[index + 1] === quote) {
+        current += quote;
+        index += 1;
+      } else {
+        current += char;
+      }
+      continue;
+    }
+    if (char === '"' || char === "'") {
+      quote = char;
+    } else if (/\s/.test(char)) {
+      if (current) {
+        args.push(current);
+        current = "";
+      }
+    } else {
+      current += char;
+    }
   }
-  // script 模式：commandPath = server.py 路径，commandArgs = 额外参数
-  const scriptPath = config.commandPath.trim();
-  const extraArgs = config.commandArgs
-    .trim()
-    .split(/\s+/)
-    .filter(Boolean);
-  return {
-    command: scriptPath,
-    args: extraArgs,
-    env: config.env,
-  };
+  if (quote) throw new Error("MCP 启动参数中的引号未闭合。");
+  if (current) args.push(current);
+  return args;
 }
 
-/** 阻塞 shell 作为 MCP 命令（防 SSRF/提权），与原 Nova is_blocked_mcp_program 对齐。 */
-const BLOCKED_PROGRAMS = new Set(["cmd", "cmd.exe", "powershell", "powershell.exe", "bash", "sh", "zsh", "ksh", "csh", "tcsh"]);
+function stripOuterQuotes(value: string): string {
+  const trimmed = value.trim();
+  if (trimmed.length >= 2) {
+    const first = trimmed[0];
+    const last = trimmed[trimmed.length - 1];
+    if ((first === '"' && last === '"') || (first === "'" && last === "'")) {
+      return trimmed.slice(1, -1);
+    }
+  }
+  return trimmed;
+}
+
+function isDirectory(value: string): boolean {
+  try {
+    return existsSync(value) && statSync(value).isDirectory();
+  } catch {
+    return false;
+  }
+}
+
+function existingPythonCandidates(projectDir: string): Array<{ command: string; prefixArgs: string[] }> {
+  const localCandidates = process.platform === "win32"
+    ? [
+        path.join(projectDir, ".venv", "Scripts", "python.exe"),
+        path.join(projectDir, "venv", "Scripts", "python.exe"),
+      ]
+    : [
+        path.join(projectDir, ".venv", "bin", "python"),
+        path.join(projectDir, "venv", "bin", "python"),
+      ];
+  const candidates = localCandidates
+    .filter((candidate) => existsSync(candidate))
+    .map((command) => ({ command, prefixArgs: [] as string[] }));
+
+  if (process.platform === "win32") {
+    candidates.push(
+      { command: "py.exe", prefixArgs: ["-3"] },
+      { command: "python.exe", prefixArgs: [] },
+      { command: "python", prefixArgs: [] },
+    );
+  } else {
+    candidates.push(
+      { command: "python3", prefixArgs: [] },
+      { command: "python", prefixArgs: [] },
+    );
+  }
+  return candidates;
+}
+
+function safeChildEnvironment(overrides?: Record<string, string>, pythonPath?: string): Record<string, string> {
+  const env: Record<string, string> = {
+    PATH: process.env.PATH ?? "",
+    ...(process.platform === "win32" ? { SYSTEMROOT: process.env.SYSTEMROOT ?? "" } : {}),
+    ...(process.env.LANG ? { LANG: process.env.LANG } : {}),
+    ...(overrides ?? {}),
+  };
+  if (pythonPath) {
+    const previous = env.PYTHONPATH?.trim();
+    env.PYTHONPATH = previous ? `${pythonPath}${path.delimiter}${previous}` : pythonPath;
+  }
+  return env;
+}
+
+/**
+ * Resolve legacy Nova settings into shell-free stdio spawn candidates.
+ * Python scripts/modules prefer the service-local virtual environment, then
+ * fall back to the platform Python launchers.
+ */
+export function resolveStdioCommandSpecs(config: McpServerConfig): StdioCommandSpec[] {
+  const commandPath = stripOuterQuotes(config.commandPath);
+  const configuredArgs = splitCommandArgs(config.commandArgs.trim());
+
+  if (config.launchMode === "module") {
+    if (!commandPath) throw new Error("MCP 模块模式缺少项目目录。");
+    const projectDir = path.resolve(commandPath);
+    if (!isDirectory(projectDir)) throw new Error(`MCP 项目目录不存在：${projectDir}`);
+    const moduleName = configuredArgs[0] || "server";
+    const extraArgs = configuredArgs.slice(1);
+    return existingPythonCandidates(projectDir).map(({ command, prefixArgs }) => ({
+      command,
+      args: [...prefixArgs, "-m", moduleName, ...extraArgs],
+      cwd: projectDir,
+      env: safeChildEnvironment(config.env, [projectDir, path.join(projectDir, "src")].join(path.delimiter)),
+    }));
+  }
+
+  if (!commandPath) throw new Error("MCP 脚本模式缺少启动文件。");
+  const resolvedPath = path.resolve(commandPath);
+  if (!existsSync(resolvedPath)) throw new Error(`MCP 启动文件不存在：${resolvedPath}`);
+  const cwd = path.dirname(resolvedPath);
+
+  if (path.extname(resolvedPath).toLowerCase() === ".py") {
+    return existingPythonCandidates(cwd).map(({ command, prefixArgs }) => ({
+      command,
+      args: [...prefixArgs, resolvedPath, ...configuredArgs],
+      cwd,
+      env: safeChildEnvironment(config.env, [cwd, path.join(cwd, "src")].join(path.delimiter)),
+    }));
+  }
+
+  return [{
+    command: resolvedPath,
+    args: configuredArgs,
+    cwd,
+    env: safeChildEnvironment(config.env),
+  }];
+}
+
 function isBlockedProgram(command: string): boolean {
   const base = command.split(/[\\/]/).pop()?.toLowerCase() ?? command.toLowerCase();
   return BLOCKED_PROGRAMS.has(base);
 }
 
-/** 校验 HTTP URL scheme（防 SSRF）。 */
 function validateHttpUrl(url: string): URL {
   let parsed: URL;
   try {
@@ -67,112 +212,106 @@ function validateHttpUrl(url: string): URL {
   return parsed;
 }
 
-/** MCP 握手超时（毫秒）。子进程卡死或 HTTP 慢时避免永久阻塞（registry 串行连接会让后续全部饿死）。 */
-const HANDSHAKE_TIMEOUT_MS = 30_000;
-
-/** 连接一个 MCP 服务，完成 initialize + tools/list 握手（带超时）。 */
-export async function connectMcpServer(config: McpServerConfig): Promise<ConnectedMcpServer> {
-  // 整个握手包一层超时：子进程卡死或 HTTP 慢时避免永久阻塞。
-  const handshakePromise = connectMcpServerNoTimeout(config);
-  const timeoutPromise = new Promise<never>((_, reject) => {
-    setTimeout(
-      () => reject(new Error(`MCP 服务握手超时（${HANDSHAKE_TIMEOUT_MS / 1000}s）：${config.serviceId}`)),
-      HANDSHAKE_TIMEOUT_MS,
-    );
-  });
-  try {
-    return await Promise.race([handshakePromise, timeoutPromise]);
-  } catch (error) {
-    // 握手失败：尽力清理半连接的 client，避免子进程残留。
-    try {
-      const result = await handshakePromise.catch(() => null);
-      if (result) await disconnectMcpServer(result);
-    } catch {
-      // ignore
-    }
-    throw error;
-  }
+function makeClient(): Client {
+  return new Client({ name: "nova-pi-host", version: "0.1.0" }, { capabilities: {} });
 }
 
-async function connectMcpServerNoTimeout(config: McpServerConfig): Promise<ConnectedMcpServer> {
-  if (config.transport === "http") {
-    const url = validateHttpUrl(config.url);
-    const transport = new StreamableHTTPClientTransport(url);
-    const client = new Client(
-      { name: "nova-pi-host", version: "0.1.0" },
-      { capabilities: {} },
-    );
-    await client.connect(transport);
-    const toolsList = await client.listTools();
+async function connectTransport(
+  config: McpServerConfig,
+  transport: Transport,
+  transportKind: ConnectedMcpServer["transportKind"],
+): Promise<ConnectedMcpServer> {
+  const client = makeClient();
+  try {
+    await client.connect(transport, { timeout: HANDSHAKE_TIMEOUT_MS });
+    const toolsList = await client.listTools(undefined, { timeout: HANDSHAKE_TIMEOUT_MS });
     const tools: McpToolInfo[] = (toolsList.tools ?? []).map((tool) => ({
       name: tool.name,
       description: tool.description,
       inputSchema: tool.inputSchema ?? { type: "object", properties: {} },
     }));
-    return { config, client, tools };
+    return { config, client, tools, transportKind };
+  } catch (error) {
+    await client.close().catch(() => {});
+    throw error;
   }
-
-  // stdio
-  const { command, args, env } = resolveStdioCommand(config);
-  if (isBlockedProgram(command)) {
-    throw new Error(`不允许使用 ${command} 作为 MCP 启动命令。`);
-  }
-  // 安全：不继承全部 process.env。Node sidecar 持有所有 LLM API key，
-  // 若把 ...process.env 透传给 MCP 子进程（含第三方 Python server），密钥会泄漏。
-  // 仅传显式声明的 env + 必要的 PATH/系统变量，让子进程能找到可执行文件。
-  const safeEnv: Record<string, string> = {
-    PATH: process.env.PATH ?? "",
-    ...(process.platform === "win32" ? { SYSTEMROOT: process.env.SYSTEMROOT ?? "" } : {}),
-    ...(process.env.LANG ? { LANG: process.env.LANG } : {}),
-    ...(env ?? {}),
-  };
-  const transport = new StdioClientTransport({ command, args, env: safeEnv });
-  const client = new Client(
-    { name: "nova-pi-host", version: "0.1.0" },
-    { capabilities: {} },
-  );
-  await client.connect(transport);
-  const toolsList = await client.listTools();
-  const tools: McpToolInfo[] = (toolsList.tools ?? []).map((tool) => ({
-    name: tool.name,
-    description: tool.description,
-    inputSchema: tool.inputSchema ?? { type: "object", properties: {} },
-  }));
-  return { config, client, tools };
 }
 
-/** 带超时地调用一个 MCP 工具。超时后关闭连接（牺牲连接换取取消，避免子进程持续占用）。 */
+function errorMessage(error: unknown): string {
+  return error instanceof Error ? error.message : String(error);
+}
+
+/** Connect and complete initialize + tools/list, with transport compatibility fallbacks. */
+export async function connectMcpServer(config: McpServerConfig): Promise<ConnectedMcpServer> {
+  if (config.transport === "http") {
+    const url = validateHttpUrl(config.url);
+    const streamableError = await connectTransport(
+      config,
+      new StreamableHTTPClientTransport(url),
+      "streamable-http",
+    ).then((server) => ({ server }), (error: unknown) => ({ error }));
+    if ("server" in streamableError) return streamableError.server;
+
+    try {
+      return await connectTransport(config, new SSEClientTransport(url), "sse");
+    } catch (sseError) {
+      throw new Error(
+        `MCP HTTP 连接失败（Streamable HTTP：${errorMessage(streamableError.error)}；SSE：${errorMessage(sseError)}）`,
+      );
+    }
+  }
+
+  const candidates = resolveStdioCommandSpecs(config);
+  const errors: string[] = [];
+  for (const candidate of candidates) {
+    if (isBlockedProgram(candidate.command)) {
+      errors.push(`${candidate.command}: 不允许把命令解释器作为 MCP 启动程序`);
+      continue;
+    }
+
+    const transport = new StdioClientTransport({
+      command: candidate.command,
+      args: candidate.args,
+      cwd: candidate.cwd,
+      env: candidate.env,
+      stderr: "pipe",
+    });
+    let stderrTail = "";
+    transport.stderr?.on("data", (chunk) => {
+      stderrTail = `${stderrTail}${String(chunk)}`.slice(-4_000);
+    });
+    try {
+      return await connectTransport(config, transport, "stdio");
+    } catch (error) {
+      const detail = stderrTail.trim();
+      errors.push(`${candidate.command}: ${errorMessage(error)}${detail ? `；服务日志：${detail}` : ""}`);
+    }
+  }
+  throw new Error(`MCP stdio 连接失败：${config.serviceId}\n${errors.join("\n")}`);
+}
+
+/** Invoke a tool using the SDK request timeout and abort support. */
 export async function callMcpToolWithTimeout(
   server: ConnectedMcpServer,
   toolName: string,
   args: Record<string, unknown>,
   timeoutSecs?: number,
+  signal?: AbortSignal,
 ): Promise<unknown> {
-  const callPromise = server.client.callTool({ name: toolName, arguments: args });
-  if (!timeoutSecs) return await callPromise;
-  const timeoutMs = timeoutSecs * 1000;
-  let timer: NodeJS.Timeout | undefined;
-  const timeoutPromise = new Promise<never>((_, reject) => {
-    timer = setTimeout(() => reject(new Error(`MCP 工具调用超时（${timeoutSecs}s）：${toolName}`)), timeoutMs);
-  });
-  try {
-    return await Promise.race([callPromise, timeoutPromise]);
-  } catch (error) {
-    // MCP SDK 的 callTool 不支持 abort signal，超时后底层调用仍在跑。
-    // 关闭连接以终止子进程/HTTP，避免长任务（如分类分级 4h）持续烧资源。
-    // 下次调用时 registry 会按需重连。
-    await disconnectMcpServer(server).catch(() => {});
-    throw error;
-  } finally {
-    if (timer) clearTimeout(timer);
-  }
+  const timeoutMs = Math.max(1, timeoutSecs ?? 14_400) * 1_000;
+  return await server.client.callTool(
+    { name: toolName, arguments: args },
+    undefined,
+    {
+      signal,
+      timeout: timeoutMs,
+      resetTimeoutOnProgress: true,
+      maxTotalTimeout: timeoutMs,
+    },
+  );
 }
 
-/** 关闭连接（stdio 会终止子进程）。 */
+/** Close a connection; stdio transports terminate their child process here. */
 export async function disconnectMcpServer(server: ConnectedMcpServer): Promise<void> {
-  try {
-    await server.client.close();
-  } catch {
-    // 关闭失败忽略
-  }
+  await server.client.close().catch(() => {});
 }
