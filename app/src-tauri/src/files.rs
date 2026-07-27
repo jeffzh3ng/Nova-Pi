@@ -15,11 +15,16 @@ use crate::rpc::send_rpc_blocking_with_timeout;
 const MAX_UPLOADED_PCAP_BYTES: usize = 25 * 1024 * 1024;
 const MAX_UPLOADED_ALERT_IMAGE_BYTES: usize = 10 * 1024 * 1024;
 const MAX_UPLOADED_RISK_ZIP_BYTES: usize = 200 * 1024 * 1024;
+const MAX_UPLOADED_DOC_BYTES: usize = 25 * 1024 * 1024;
 const ALLOWED_RISK_ZIP_EXTENSIONS: &[&str] = &["zip"];
 const ALLOWED_PCAP_EXTENSIONS: &[&str] = &["pcap", "pcapng", "cap"];
 const ALLOWED_ALERT_IMAGE_EXTENSIONS: &[&str] =
     &["png", "jpg", "jpeg", "bmp", "webp", "tif", "tiff"];
 const ALLOWED_TEXT_EXPORT_EXTENSIONS: &[&str] = &["md", "txt", "csv", "json", "log", "html"];
+/// write_uploaded_blob 接受的普通文档/文本扩展名（与前端 PromptComposer accept 对齐）。
+/// 这些文件走通用附件通道：存临时文件 → 作为 attachment → host 读取内容注入。
+const ALLOWED_UPLOADED_DOC_EXTENSIONS: &[&str] =
+    &["txt", "log", "md", "csv", "tsv", "json", "xml", "yaml", "yml"];
 
 const ALERT_ANALYSIS_MCP_SERVICE: &str = "alert-analysis-mcp";
 
@@ -302,13 +307,28 @@ fn sanitize_risk_zip_extension(extension: &str) -> Result<&'static str, String> 
         .ok_or_else(|| "仅支持 zip 压缩包".to_string())
 }
 
+fn sanitize_uploaded_doc_extension(extension: &str) -> Result<&'static str, String> {
+    let normalized = extension
+        .trim()
+        .trim_start_matches('.')
+        .to_ascii_lowercase();
+    ALLOWED_UPLOADED_DOC_EXTENSIONS
+        .iter()
+        .copied()
+        .find(|candidate| *candidate == normalized)
+        .ok_or_else(|| "仅支持 txt/log/md/csv/tsv/json/xml/yaml/yml 文档".to_string())
+}
+
 fn sanitize_uploaded_blob_extension(extension: &str) -> Result<(&'static str, usize), String> {
     match sanitize_pcap_extension(extension) {
         Ok(extension) => Ok((extension, MAX_UPLOADED_PCAP_BYTES)),
         Err(_) => match sanitize_alert_image_extension(extension) {
             Ok(extension) => Ok((extension, MAX_UPLOADED_ALERT_IMAGE_BYTES)),
-            Err(_) => sanitize_risk_zip_extension(extension)
-                .map(|extension| (extension, MAX_UPLOADED_RISK_ZIP_BYTES)),
+            Err(_) => match sanitize_uploaded_doc_extension(extension) {
+                Ok(extension) => Ok((extension, MAX_UPLOADED_DOC_BYTES)),
+                Err(_) => sanitize_risk_zip_extension(extension)
+                    .map(|extension| (extension, MAX_UPLOADED_RISK_ZIP_BYTES)),
+            },
         },
     }
 }

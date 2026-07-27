@@ -140,6 +140,25 @@ export class McpRegistry {
     return await connection;
   }
 
+  /**
+   * 强制断开某 MCP 服务的现有连接并重新建立（kill 旧子进程后重新 spawn）。
+   *
+   * 与 {@link getOrConnect} 不同，这里无条件丢弃缓存连接。用于在 Python 侧
+   * ``config.local.json`` 等进程内配置变化、但 host 侧 ``McpServerConfig`` 未变
+   * （因此 ``configure`` 不会触发重连）时，让用户手动强制重启子进程。
+   *
+   * 注意：``this.configs`` 不能清空——``getOrConnect`` 重建时仍需要这份配置来 spawn。
+   */
+  async reconnect(serviceId: string): Promise<ConnectedMcpServer> {
+    const existing = this.servers.get(serviceId);
+    if (existing) {
+      this.servers.delete(serviceId);
+      await disconnectMcpServer(existing).catch(() => undefined);
+      this.notifyChanged();
+    }
+    return await this.getOrConnect(serviceId);
+  }
+
   async callTool(
     serviceId: string,
     toolName: string,

@@ -139,6 +139,47 @@ def load_config(path: str | None = None) -> dict[str, Any]:
     return deep_merge(config, {k: v for k, v in clean_overrides.items() if v})
 
 
+def start_config_watcher(config: dict[str, Any], path: Path | None, interval: float = 2.0) -> None:
+    """后台守护线程：监测 config 文件 mtime 变化，变化时原地刷新 config dict。
+
+    工具函数通过闭包捕获 ``config`` 对象（create_mcp_server(config)），这里用
+    ``config.clear() + config.update(...)`` 原地替换内容，让所有持有该引用的工具
+    自动看到新值，无需重启进程或改 create_mcp_server 签名。
+
+    - 文件被删除/不存在：跳过本次，等待重新出现。
+    - 解析失败：打印告警并保留旧 config，避免坏配置把服务打挂。
+    - 原子写（编辑器先写临时文件再 rename）：mtime 会更新，正常触发。
+    """
+    if path is None or not path.exists():
+        return
+    last_mtime = path.stat().st_mtime
+
+    def watch() -> None:
+        nonlocal last_mtime
+        while True:
+            time.sleep(interval)
+            try:
+                if not path.exists():
+                    continue
+                current_mtime = path.stat().st_mtime
+            except OSError:
+                continue
+            if current_mtime == last_mtime:
+                continue
+            last_mtime = current_mtime
+            try:
+                fresh = load_config(str(path))
+            except Exception as exc:  # noqa: BLE001
+                print(f"[config-watcher] 重载 {path} 失败，保留旧配置：{exc}", file=sys.stderr)
+                continue
+            config.clear()
+            config.update(fresh)
+            print(f"[config-watcher] 已重载 {path.name}", file=sys.stderr)
+
+    thread = threading.Thread(target=watch, name="config-watcher", daemon=True)
+    thread.start()
+
+
 def now_text() -> str:
     return datetime.now().strftime("%Y-%m-%d %H:%M:%S")
 
@@ -1429,6 +1470,12 @@ def main() -> int:
         server_cfg["host"] = args.host
     if args.port:
         server_cfg["port"] = args.port
+
+    # 监测 config 文件变化并原地热重载，让工具闭包自动看到新值。
+    watch_path_str = (args.config or os.environ.get("DATA_CLASSIFICATION_MCP_CONFIG", "")).strip()
+    watch_path = Path(watch_path_str) if watch_path_str else LOCAL_CONFIG_PATH
+    start_config_watcher(config, watch_path)
+
     mcp = create_mcp_server(config)
 
     if hasattr(mcp, "settings"):

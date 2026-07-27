@@ -1,4 +1,4 @@
-import { Bot, CirclePlus, Pencil, RotateCcw, Save, Search, Trash2, X } from "lucide-react";
+import { Bot, CirclePlus, Pencil, RefreshCw, RotateCcw, Save, Search, Trash2, X } from "lucide-react";
 import { useEffect, useMemo, useState } from "react";
 import { ConfirmModal } from "./ConfirmModal";
 import type { McpConnectionSettings, McpLaunchMode, McpTransport } from "../services/mcpSettings";
@@ -12,6 +12,7 @@ import {
   getMcpWelcomeDefaults,
   listMcpConnectionSettings,
   makeDefaultMcpSettings,
+  reconnectMcpConnection,
   saveMcpConnectionSettings,
   testMcpConnection,
 } from "../services/mcpSettings";
@@ -270,6 +271,38 @@ export function McpSquarePanel() {
     if (initial.kind !== "checking") return;
     const inspected = await inspectMcpConnection(settings);
     setConnectionStates((current) => ({ ...current, [settings.serviceId]: inspected }));
+  };
+
+  /**
+   * 强制重连：断开旧子进程重新 spawn，让 Python 侧 config.local.json 等进程内配置生效。
+   * 重连成功后再做一次握手探测，刷新连接状态徽章。
+   */
+  const handleReconnect = async (settings: McpConnectionSettings) => {
+    if (busyServiceId || pageBusy) return;
+    if (!settings.enabled) {
+      setStatus("请先启用该 MCP 服务再重连。");
+      return;
+    }
+    setBusyServiceId(settings.serviceId);
+    setConnectionStates((current) => ({
+      ...current,
+      [settings.serviceId]: { kind: "checking", label: "重连中", detail: "正在重启 MCP 子进程" },
+    }));
+    try {
+      const toolCount = await reconnectMcpConnection(settings.serviceId);
+      const inspected = await inspectMcpConnection(settings);
+      setConnectionStates((current) => ({ ...current, [settings.serviceId]: inspected }));
+      setStatus(`已重连 ${settings.serviceId}，${toolCount} 个工具就绪。`);
+    } catch (error) {
+      const detail = String(error).replace(/^Error:\s*/i, "").slice(0, 180);
+      setConnectionStates((current) => ({
+        ...current,
+        [settings.serviceId]: { kind: "error", label: "重连失败", detail: detail || "请检查 MCP 服务配置与日志" },
+      }));
+      setStatus(`重连失败：${detail || "请检查 MCP 服务配置"}`);
+    } finally {
+      setBusyServiceId(null);
+    }
   };
 
   const probeAll = async (items: McpConnectionSettings[]) => {
@@ -553,6 +586,18 @@ export function McpSquarePanel() {
                   <em>{serviceBusy ? "处理中" : settings.enabled ? "已启用" : "未启用"}</em>
                 </label>
                 <div className="mcp-card-actions">
+                  {settings.transport === "stdio" && settings.enabled ? (
+                    <button
+                      type="button"
+                      className="mcp-reconnect-button"
+                      disabled={busy}
+                      title="断开并重启 MCP 子进程，让修改后的服务端配置（如 config.local.json）生效"
+                      onClick={() => handleReconnect(settings)}
+                    >
+                      <RefreshCw size={15} className={serviceBusy ? "spin" : ""} />
+                      重连
+                    </button>
+                  ) : null}
                   <button
                     type="button"
                     className="mcp-edit-button"

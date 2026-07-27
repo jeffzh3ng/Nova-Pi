@@ -1,4 +1,5 @@
 import { PromptComposer } from "./PromptComposer";
+import type { DigitalHuman } from "../types";
 
 type HeroProps = {
   prompt: string;
@@ -9,6 +10,8 @@ type HeroProps = {
   disabledReason?: string;
   modelStatus: "ok" | "error" | "idle";
   modelError?: string;
+  mentionHumans: DigitalHuman[];
+  selectedEmployeeName?: string;
   onPromptChange: (value: string) => void;
   onAttachFiles: (files: File[]) => void;
   onPickAttachment?: () => void;
@@ -25,6 +28,8 @@ export function Hero({
   disabledReason,
   modelStatus,
   modelError,
+  mentionHumans,
+  selectedEmployeeName,
   onPromptChange,
   onAttachFiles,
   onPickAttachment,
@@ -49,6 +54,8 @@ export function Hero({
         disabledReason={disabledReason}
         modelStatus={modelStatus}
         modelError={modelError}
+        mentionHumans={mentionHumans}
+        selectedEmployeeName={selectedEmployeeName}
         onChange={onPromptChange}
         onAttachFiles={onAttachFiles}
         onPickAttachment={onPickAttachment}

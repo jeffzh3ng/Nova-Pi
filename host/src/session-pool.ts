@@ -5,6 +5,7 @@
  * + 该员工的 system prompt）。pi 的事件流订阅后转发为 RPC event，由 Rust emit 给前端。
  */
 
+import { readFileSync } from "node:fs";
 import {
   AgentSession,
   SessionManager,
@@ -210,6 +211,24 @@ export class SessionPool {
       if (fieldLines.length) {
         parts.push(`结构化告警字段：\n${fieldLines.join("\n")}`);
       }
+    }
+    if (attachments.files?.length) {
+      // 读取每个文件的临时盘路径内容，拼成哨兵段注入。单个文件截断到 50k 字符
+      // 避免超大文件撑爆 prompt；读取失败时附错误说明而非整段中断。
+      const FILE_CHAR_LIMIT = 50_000;
+      const fileSections = attachments.files.map((file) => {
+        try {
+          const raw = readFileSync(file.path, { encoding: "utf-8" });
+          const clipped = raw.length > FILE_CHAR_LIMIT
+            ? `${raw.slice(0, FILE_CHAR_LIMIT)}\n...(已截断，原始 ${raw.length} 字符)`
+            : raw;
+          return `=== 附件文件：${file.name} ===\n${clipped}`;
+        } catch (error) {
+          const reason = error instanceof Error ? error.message : String(error);
+          return `=== 附件文件：${file.name}（读取失败）===\n${reason}`;
+        }
+      });
+      parts.push(fileSections.join("\n\n"));
     }
     if (parts.length === 0) return message;
     return `${parts.join("\n\n")}\n\n用户请求：${message}`;

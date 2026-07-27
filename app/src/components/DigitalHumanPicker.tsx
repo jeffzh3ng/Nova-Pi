@@ -1,10 +1,6 @@
-import { Activity, Bot, CheckCircle2, DatabaseZap } from "lucide-react";
+import { CheckCircle2 } from "lucide-react";
 import type { DigitalHuman } from "../types";
-
-const humanIcons = {
-  "data-security-risk-assessment": DatabaseZap,
-  "alert-analysis": Activity,
-};
+import { resolveDigitalHumanIcon } from "./digitalHumanIcons";
 
 type DigitalHumanPickerProps = {
   humans: DigitalHuman[];
@@ -17,7 +13,7 @@ export function DigitalHumanPicker({ humans, selectedId, onSelect }: DigitalHuma
     <section className="human-picker" aria-label="选择数字员工">
       <div className="human-grid">
         {humans.map((human) => {
-          const Icon = humanIcons[human.id as keyof typeof humanIcons] ?? Bot;
+          const Icon = resolveDigitalHumanIcon(human.id);
           const selected = human.id === selectedId;
           const disabled = human.status === "pending";
 

@@ -104,6 +104,21 @@ const EMPTY_DIGITAL_HUMAN: DigitalHuman = {
   disabledReason: "正在读取 MCP 服务目录",
 };
 
+/**
+ * 通用对话员工的本地占位对象。后端 host 侧在 digital-human.ts 的 DIGITAL_HUMANS
+ * 字典里有对应的 system prompt（GENERAL_CHAT_HUMAN_ID = "general-chat"），
+ * 不挂任何 MCP 工具，用于首页默认对话的纯 LLM 问答。
+ */
+const GENERAL_CHAT_HUMAN_ID = "general-chat";
+const GENERAL_CHAT_HUMAN: DigitalHuman = {
+  id: GENERAL_CHAT_HUMAN_ID,
+  name: "通用助手",
+  role: "迪普驻场 AI 助手",
+  description: "通用对话助手，可回答日常问题；用 @ 可召唤专业数字员工。",
+  accent: "primary",
+  status: "ready",
+};
+
 const catalogHumanId = (settings: McpConnectionSettings) =>
   DIGITAL_HUMAN_TEMPLATE_BY_MCP.get(settings.serviceId)?.id ?? `mcp-service:${settings.serviceId}`;
 
@@ -237,6 +252,47 @@ const digitalHumanOpeningMessages = (human: DigitalHuman | undefined): ChatMessa
   ];
 };
 
+/**
+ * 从消息文本中解析 `@员工名` 提及，返回该员工的 id 与去掉提及前缀的正文。
+ *
+ * 匹配规则：@ 在文本开头或前面是空白；员工名按 effectiveDigitalHumans 的 name 精确匹配，
+ * 取第一个命中项。无匹配时返回通用对话员工 id（GENERAL_CHAT_HUMAN_ID）+ 原文。
+ *
+ * 注意：员工名可能包含标点（目前都是中文），用 name 长度降序匹配，避免短名前缀误命中长名。
+ */
+const parseMention = (
+  text: string,
+  humans: DigitalHuman[],
+): { humanId: string; cleanRequest: string } => {
+  // 按 name 长度降序，确保「数安风评数字员工」优先于任何前缀匹配。
+  const sorted = [...humans].sort((a, b) => b.name.length - a.name.length);
+  // 找到所有合法的 @ 位置（开头或前面是空白）。
+  const positions: number[] = [];
+  for (let i = 0; i < text.length; i += 1) {
+    if (text[i] === "@") {
+      const prev = text[i - 1];
+      if (i === 0 || /\s/.test(prev)) positions.push(i);
+    }
+  }
+  for (const pos of positions) {
+    const tail = text.slice(pos + 1);
+    for (const human of sorted) {
+      if (tail.startsWith(human.name)) {
+        // 员工名后必须是空白或文本结尾，否则可能是 @数安风评数字员工xxx 这种粘连。
+        const after = tail.slice(human.name.length);
+        if (after.length === 0 || /^\s/.test(after)) {
+          // cleanRequest = 去掉 @员工名（及紧随其后的一个空白）。
+          const before = text.slice(0, pos);
+          const rest = after.replace(/^\s/, "");
+          const remaining = `${before}${rest}`.trim();
+          return { humanId: human.id, cleanRequest: remaining };
+        }
+      }
+    }
+  }
+  return { humanId: GENERAL_CHAT_HUMAN_ID, cleanRequest: text.trim() };
+};
+
 /** 累计多少轮 user+assistant 对话后立即触发大模型提炼任务名。 */
 const TITLE_GENERATION_TURN_THRESHOLD = 3;
 /** 不足阈值轮次时，对话静默超过该时长（毫秒）后兜底提炼任务名。
@@ -341,21 +397,6 @@ const fileToBase64 = async (file: File) => {
   return btoa(chunks.join(""));
 };
 
-const readTextFiles = async (files: File[]) =>
-  Promise.all(
-    files.map(async (file) => {
-      const text = await file.text();
-      if (!text.trim()) {
-        throw new Error(`文件「${file.name}」没有可读取的文本内容。`);
-      }
-      return {
-        name: file.name,
-        text,
-        preview: text.slice(0, 1200),
-      };
-    }),
-  );
-
 const formatPcapSection = (fileName: string, pcapText: string) =>
   `=== PCAP 文件：${fileName} ===\n${pcapText}`;
 
@@ -424,9 +465,6 @@ export default function App() {
   const [currentConversationId, setCurrentConversationId] = useState<string | undefined>();
   const [selectedTaskId, setSelectedTaskId] = useState<string | undefined>();
   const [selectedQuickActionId, setSelectedQuickActionId] = useState<string | undefined>();
-  const [selectedHumanId, setSelectedHumanId] = useState(
-    loadRecentlyUsedHumanIds()[0] ?? "",
-  );
   const [recentlyUsedHumanIds, setRecentlyUsedHumanIds] = useState<string[]>(loadRecentlyUsedHumanIds);
   const [activeNav, setActiveNav] = useState<SidebarNavId>("home");
   const [sidebarPanelWidth, setSidebarPanelWidth] = useState(getInitialSidebarWidth);
@@ -456,6 +494,8 @@ export default function App() {
   const conversationMetadataRef = useRef<Record<string, ConversationMetadata>>({});
   const conversationSaveQueuesRef = useRef<Record<string, Promise<unknown>>>({});
   const alertAttachmentContextsRef = useRef<Record<string, AlertAttachmentContext>>({});
+  /** 每个会话累积的普通文件附件（write_uploaded_blob 后的临时路径），发送时收集传给 host。 */
+  const fileAttachmentContextsRef = useRef<Record<string, ChatMessageAttachment[]>>({});
   const riskAssessmentContextsRef = useRef<Partial<Record<string, RiskAssessmentContext>>>({});
   const riskAssessmentPollTokensRef = useRef<Record<string, number>>({});
   const loadedConversationFingerprintRef = useRef<{ id: string; fingerprint: string } | null>(null);
@@ -613,24 +653,54 @@ export default function App() {
     [catalogDigitalHumans, mcpAvailability],
   );
 
+  // @ 召唤可选的员工列表：effectiveDigitalHumans 即真正的数字员工（不含 general-chat），
+  // 直接传给 PromptComposer 的 EmployeeMentionPicker。
+  const mentionableHumans = effectiveDigitalHumans;
+
   const selectedQuickActionHuman = useMemo(
     () => (selectedQuickActionId ? effectiveDigitalHumans.find((human) => human.id === selectedQuickActionId) : undefined),
     [selectedQuickActionId, effectiveDigitalHumans],
   );
+  // 从当前输入框 prompt 实时解析 @ 提及：有 @ 返回对应员工，否则 undefined。
+  // 用于首页默认走通用对话、附件处理基线、以及 submitPrompt 的员工决策。
+  const mentionedHuman = useMemo(
+    () => {
+      const parsed = parseMention(prompt, effectiveDigitalHumans);
+      if (parsed.humanId === GENERAL_CHAT_HUMAN_ID) return undefined;
+      return effectiveDigitalHumans.find((human) => human.id === parsed.humanId);
+    },
+    [prompt, effectiveDigitalHumans],
+  );
+  // selectedHuman 语义（优先级从高到低）：
+  // 1. 侧栏快捷动作选中的员工（直接进专业环境的入口）
+  // 2. 输入框 @ 提及的员工（首页和对话内通用）
+  // 3. 任务页会话绑定的员工（从 metadata 取，保证 header 名稳定）
+  // 4. 通用助手（首页默认，纯 LLM 对话）
+  // 5. EMPTY_DIGITAL_HUMAN（MCP 目录还在加载）
+  const conversationBoundHuman = useMemo(
+    () => {
+      if (!currentConversationId) return undefined;
+      const metadata = conversationMetadataRef.current[currentConversationId];
+      if (!metadata?.agentId || metadata.agentId === GENERAL_CHAT_HUMAN_ID) return undefined;
+      return effectiveDigitalHumans.find((human) => human.id === metadata.agentId);
+    },
+    [currentConversationId, effectiveDigitalHumans, conversationMessages],
+  );
   const selectedHuman = useMemo(
     () =>
       selectedQuickActionHuman
-      ?? effectiveDigitalHumans.find((human) => human.id === selectedHumanId)
-      ?? effectiveDigitalHumans[0]
+      ?? mentionedHuman
+      ?? conversationBoundHuman
+      ?? GENERAL_CHAT_HUMAN
       ?? EMPTY_DIGITAL_HUMAN,
-    [selectedHumanId, selectedQuickActionHuman, effectiveDigitalHumans],
+    [selectedQuickActionHuman, mentionedHuman, conversationBoundHuman],
   );
-  useEffect(() => {
-    if (effectiveDigitalHumans.length === 0) return;
-    if (!effectiveDigitalHumans.some((human) => human.id === selectedHumanId)) {
-      setSelectedHumanId(effectiveDigitalHumans[0].id);
-    }
-  }, [effectiveDigitalHumans, selectedHumanId]);
+  // 已选中的「专业数字员工」名（@ 提及或会话绑定），通用助手时为 undefined。
+  // 用于让 PromptComposer 的 placeholder 不再提示「@ 召唤」。
+  const selectedEmployeeName = useMemo(() => {
+    const human = selectedQuickActionHuman ?? mentionedHuman ?? conversationBoundHuman;
+    return human?.name;
+  }, [selectedQuickActionHuman, mentionedHuman, conversationBoundHuman]);
 
   const recordHumanUsage = (humanId: string) => {
     if (!humanId) return;
@@ -1943,7 +2013,11 @@ export default function App() {
       skipUserMessage?: boolean;
     },
   ) => {
-    const request = (override?.request ?? prompt).trim();
+    // override 是程序化调用（如风评卡片），request 已指定，不再走 @ 解析。
+    // 普通发送时：从输入框文本解析 @ 提及，去掉 @员工名 前缀得到真正要发给 agent 的正文。
+    const rawRequest = (override?.request ?? prompt).trim();
+    const parsed = override ? { humanId: selectedHuman.id, cleanRequest: rawRequest } : parseMention(rawRequest, effectiveDigitalHumans);
+    const request = parsed.cleanRequest;
     if (!request) return;
     if (!override && selectedHuman.status !== "ready") return;
     if (!override && currentConversationRunning) return;
@@ -1963,7 +2037,10 @@ export default function App() {
       }
     }
 
-    recordHumanUsage(selectedHuman.id);
+    // 通用对话（general-chat）不计入「最近使用」，只有真正的数字员工才记。
+    if (selectedHuman.id !== GENERAL_CHAT_HUMAN_ID) {
+      recordHumanUsage(selectedHuman.id);
+    }
     const runId = activeRunIdRef.current + 1;
     activeRunIdRef.current = runId;
 
@@ -2012,9 +2089,15 @@ export default function App() {
         conversationPiSessionRef.current[conversationId] = piSessionId;
       }
 
+      // 收集本会话累积的普通文件附件（write_uploaded_blob 后的临时路径），交给 host 读取注入。
+      const fileAttachments = fileAttachmentContextsRef.current[conversationId] ?? [];
+      const filePayload = fileAttachments
+        .filter((item) => item.path && item.ext)
+        .map((item) => ({ name: item.name, path: item.path!, ext: item.ext! }));
       const attachments: ConversationAttachments = {
         pcapSections: pcapData ? [pcapData] : undefined,
         alertFields: alertFields as Record<string, string> | undefined,
+        files: filePayload.length > 0 ? filePayload : undefined,
       };
       await sendRpc({
         type: "prompt",
@@ -2022,6 +2105,8 @@ export default function App() {
         message: requestForAgent,
         attachments,
       });
+      // 文件附件已随本次 prompt 发送给 host，清空避免下一轮重复发送。
+      delete fileAttachmentContextsRef.current[conversationId];
 
       if (!isCurrentRun(runId)) return;
       if (currentConversationIdRef.current === conversationId) {
@@ -2083,7 +2168,6 @@ export default function App() {
     currentConversationIdRef.current = conversationId;
     setConversationReadOnly(false);
     conversationReadOnlyRef.current = false;
-    setSelectedHumanId("alert-analysis");
     setPrompt("");
     deletedConversationIdsRef.current.delete(conversationId);
     rememberConversationMetadata(conversationId, metadataForHumanId("alert-analysis"));
@@ -2111,7 +2195,6 @@ export default function App() {
     setSelectedTaskId(conversationId);
     setCurrentConversationId(conversationId);
     currentConversationIdRef.current = conversationId;
-    setSelectedHumanId(action.id);
     setConversationReadOnly(false);
     conversationReadOnlyRef.current = false;
     setPrompt(action.prompt);
@@ -2129,29 +2212,20 @@ export default function App() {
     setActiveNav(returnToArchive ? "projects" : "tasks");
   };
 
+  /**
+   * 首页「最近使用」卡片点击：不再立即跳转任务页/建会话，
+   * 而是把 `@员工名 ` 注入输入框（与输入框内 @ 选择语义一致）。
+   * 若输入框已有 @ 提及则替换之，避免重复。
+   */
   const handleSelectHuman = (humanId: string) => {
     const human = effectiveDigitalHumans.find((item) => item.id === humanId);
     if (!human || human.status === "pending") return;
     recordHumanUsage(human.id);
-    if (human.id === "alert-analysis") {
-      startAlertAnalysisConversation();
-      return;
-    }
-    const conversationId = makeLocalId();
-    setActiveNav("tasks");
-    setSelectedQuickActionId(human.id);
-    setSelectedTaskId(conversationId);
-    setCurrentConversationId(conversationId);
-    currentConversationIdRef.current = conversationId;
-    setSelectedHumanId(human.id);
-    setConversationReadOnly(false);
-    conversationReadOnlyRef.current = false;
-    setPrompt("");
-    deletedConversationIdsRef.current.delete(conversationId);
-    rememberConversationMetadata(conversationId, metadataForHumanId(human.id));
-    const openingMessages = digitalHumanOpeningMessages(human);
-    conversationMessageBuffersRef.current[conversationId] = openingMessages;
-    setConversationMessages(openingMessages);
+    setPrompt((current) => {
+      // 移除已有的 @员工名 前缀（任意员工），再前置新的 @员工名。
+      const stripped = current.replace(/(^|\s)@[^\s@]+\s?/g, "").trimStart();
+      return `@${human.name} ${stripped}`;
+    });
   };
 
   const handleSelectTask = async (task: RecentTask) => {
@@ -2173,7 +2247,6 @@ export default function App() {
     conversationReadOnlyRef.current = isArchived;
     loadedConversationFingerprintRef.current = null;
     if (task.agentId && task.agentName) {
-      setSelectedHumanId(task.agentId);
       rememberConversationMetadata(task.id, {
         agentId: task.agentId,
         agentName: task.agentName,
@@ -2207,7 +2280,6 @@ export default function App() {
       });
       setConversationMessages(loaded.messages);
       conversationMessageBuffersRef.current[task.id] = loaded.messages;
-      setSelectedHumanId(loaded.summary.agentId);
       const riskContext = hydrateRiskAssessmentContext(task.id, loaded.messages);
       if (
         !isArchived
@@ -2287,10 +2359,6 @@ export default function App() {
 
       if (zipFiles.length > 0 && selectedHuman.id !== "data-security-risk-assessment") {
         throw new Error("仅数安风评数字员工支持上传压缩包（.zip）。");
-      }
-
-      if (!imageFiles.length && !pcapFiles.length && !zipFiles.length) {
-        appendUserMessageToConversation(conversationId, `上传文件：${files.map((file) => file.name).join("、")}`);
       }
 
       if (pcapFiles.length > 0 && selectedHuman.id === "alert-analysis") {
@@ -2450,56 +2518,37 @@ export default function App() {
         );
       }
 
-      const parsedFiles = regularFiles.length > 0
-        ? await readTextFiles(regularFiles)
-        : [];
-
-      if (selectedHuman.id === "alert-analysis") {
-        const parsedAlerts = parsedFiles.map((file) => parseAlertFileContent(file.text));
-        const primaryAlert = parsedAlerts[0];
-        if (primaryAlert) {
-          setAlertAttachmentContext(conversationId, { fields: primaryAlert.fields });
-          if (currentConversationIdRef.current === conversationId) {
-            setPrompt(primaryAlert.alertText);
-          }
-          const fieldCount = Object.values(primaryAlert.fields).filter(Boolean).length;
-          appendMessageToConversation(
-            conversationId,
-            progressToMessage({
-              title: "已解析告警文件",
-              content: `已读取「${parsedFiles[0].name}」并提取告警内容${
-                fieldCount > 0
-                  ? `，识别到 ${fieldCount} 个结构化字段`
-                  : ""
-              }。可在输入框中修改或补充后提交。`,
-              steps: fieldCount > 0
-                ? Object.entries(primaryAlert.fields)
-                    .filter(([, v]) => v)
-                    .map(([k, v]) => `${k}: ${v}`)
-                : undefined,
-            }),
-            "paused",
-          );
+      // 普通文本/任意文件：统一走附件通道（write_uploaded_blob 存临时文件 → 作为
+      // ChatMessageAttachment 挂在用户消息上 → 发送时收集进 attachments.files 交给 host）。
+      // 不再把文件内容读进输入框文本（旧逻辑会污染对话框，且大文件撑爆 prompt）。
+      if (regularFiles.length > 0) {
+        const regularAttachments: ChatMessageAttachment[] = [];
+        for (const file of regularFiles) {
+          const base64 = await fileToBase64(file);
+          const ext = fileExt(file.name) || "txt";
+          const tmpPath = await invoke<string>("write_uploaded_blob", {
+            base64Data: base64,
+            extension: ext,
+            fileName: file.name,
+          });
+          regularAttachments.push({ kind: "file", name: file.name, path: tmpPath, ext });
         }
-      } else {
-        if (parsedFiles.length === 0) {
-          // no-op: zip/pcap/图片已有各自的分支处理
-        } else {
-          const fileContext = parsedFiles
-            .map((file) => `附件：${file.name}\n${file.preview || file.text.slice(0, 1200)}`)
-            .join("\n\n");
-          if (currentConversationIdRef.current === conversationId) {
-            setPrompt((value) => (value.trim() ? `${value.trim()}\n\n${fileContext}` : fileContext));
-          }
-          appendMessageToConversation(
-            conversationId,
-            progressToMessage({
-              title: "已读取附件",
-              content: `已读取 ${parsedFiles.length} 个文件，并把预览内容加入输入框。`,
-            }),
-            "paused",
-          );
-        }
+        appendUserMessageToConversation(
+          conversationId,
+          `已上传文件：${regularFiles.map((f) => f.name).join("、")}`,
+          regularAttachments,
+        );
+        // 累积到会话上下文，submitPrompt 时收集传给 host。
+        const previous = fileAttachmentContextsRef.current[conversationId] ?? [];
+        fileAttachmentContextsRef.current[conversationId] = [...previous, ...regularAttachments];
+        appendMessageToConversation(
+          conversationId,
+          progressToMessage({
+            title: "文件已就绪",
+            content: `已上传 ${regularFiles.length} 个文件，内容将在发送时一并交给数字员工。可在输入框补充说明后提交。`,
+          }),
+          "paused",
+        );
       }
     } catch (error) {
       appendMessageToConversation(
@@ -2908,7 +2957,8 @@ export default function App() {
             readOnly={conversationReadOnly}
             mcpReady={selectedHuman.status === "ready"}
             mcpStatusReason={selectedHuman.disabledReason}
-            selectedHumanName={selectedHuman.name}
+            selectedHumanName={selectedTask?.agentName ?? selectedHuman.name}
+            mentionHumans={mentionableHumans}
             taskTitle={selectedTask?.title ?? "新任务"}
             taskStatus={selectedTaskStatus}
             taskStartedAt={selectedTask?.createdAt}
@@ -2932,7 +2982,9 @@ export default function App() {
           <>
             <Hero
               prompt={prompt}
-              introduction={selectedHuman.welcomeMessage?.trim()}
+              introduction={mentionedHuman?.welcomeMessage?.trim()}
+              mentionHumans={mentionableHumans}
+              selectedEmployeeName={selectedEmployeeName}
               modelName={currentModelName}
               busy={currentConversationRunning}
               disabled={selectedHuman.status !== "ready"}
@@ -2952,7 +3004,7 @@ export default function App() {
             />
             <section className="human-picker-section">
               <p className="human-picker-hint">最近使用</p>
-              <DigitalHumanPicker humans={recentHumans} selectedId={selectedHumanId} onSelect={handleSelectHuman} />
+              <DigitalHumanPicker humans={recentHumans} selectedId={mentionedHuman?.id ?? ""} onSelect={handleSelectHuman} />
             </section>
           </>
         )}

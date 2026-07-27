@@ -180,6 +180,12 @@ async function handleCommand(command: RpcCommand): Promise<void> {
         writeResponse(id, true, { toolCount: server.tools.length });
         return;
       }
+      case "reconnect_mcp": {
+        // 强制断开旧子进程后重新 spawn；用于 Python 侧 config.local.json 变化后让用户手动重启。
+        const server = await mcpRegistry.reconnect(command.serviceId);
+        writeResponse(id, true, { toolCount: server.tools.length });
+        return;
+      }
       case "mcp_call": {
         const result = await mcpRegistry.callTool(
           command.serviceId,

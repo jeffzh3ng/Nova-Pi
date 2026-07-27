@@ -340,6 +340,33 @@
   overflow: auto;
   overscroll-behavior: contain;
   padding-right: 3px;
+  /* 与 .task-center-list / .mcp-card-grid 一致的细滚动条约定，
+     否则 WebKit 走系统默认宽滚动条。 */
+  scrollbar-width: thin;
+  scrollbar-color: var(--color-line-strong) transparent;
+}
+
+.history-list::-webkit-scrollbar {
+  width: 10px;
+  height: 10px;
+}
+
+.history-list::-webkit-scrollbar-track {
+  background: transparent;
+}
+
+.history-list::-webkit-scrollbar-thumb {
+  background: var(--color-line-strong);
+  border-radius: 999px;
+  /* 3px 透明边框 + background-clip 让 10px 轨道里只渲染 4px 视觉滑块，
+     与 .mcp-card-grid 滚动条一致。 */
+  border: 3px solid transparent;
+  background-clip: padding-box;
+}
+
+.history-list::-webkit-scrollbar-thumb:hover {
+  background: #8b98a6;
+  background-clip: padding-box;
 }
 
 .history-item {
@@ -1019,23 +1046,6 @@ body.is-resizing-sidebar * {
   box-shadow: 0 6px 18px rgba(18, 24, 38, 0.06);
 }
 
-.prompt-composer textarea {
-  width: 100%;
-  min-height: 87px;
-  padding: 0;
-  color: var(--color-ink);
-  background: transparent;
-  border: 0;
-  outline: 0;
-  line-height: 1.5;
-  resize: none;
-}
-
-.prompt-composer textarea::placeholder {
-  color: #9ca9bb;
-  opacity: 1;
-}
-
 .composer-introduction {
   position: absolute;
   top: 18px;
@@ -1059,6 +1069,153 @@ body.is-resizing-sidebar * {
   align-items: flex-end;
   justify-content: space-between;
   gap: 14px;
+}
+
+/* 输入框包装层：grid 叠放，让高亮覆盖层与 textarea 像素级对齐。
+   覆盖层和 textarea 必须共享完全相同的字号/行高/字距/padding/换行规则，
+   否则高亮文字会和光标错位（这是 mention 高亮的标准对齐约束）。 */
+.composer-input-wrap {
+  position: relative;
+  display: grid;
+}
+
+.composer-highlight-overlay,
+.composer-input-wrap textarea {
+  grid-area: 1 / 1;
+  width: 100%;
+  min-height: 87px;
+  margin: 0;
+  padding: 0;
+  border: 0;
+  font-family: inherit;
+  font-size: inherit;
+  line-height: 1.5;
+  letter-spacing: inherit;
+  white-space: pre-wrap;
+  word-break: break-word;
+  overflow-wrap: break-word;
+}
+
+/* 覆盖层：在 textarea 下方渲染可见文字（含高亮 mention），不可交互、不占布局。
+   textarea 的文字本身透明（仅保留 caret），由本层负责可见呈现。 */
+.composer-highlight-overlay {
+  pointer-events: none;
+  color: var(--color-ink);
+  user-select: none;
+}
+
+/* textarea 文字透明 + caret 可见。caret-color 保留主题色让光标清晰。 */
+.composer-input-wrap textarea {
+  position: relative;
+  color: transparent;
+  caret-color: var(--color-accent, #247ba0);
+  background: transparent;
+  outline: 0;
+  resize: none;
+  z-index: 1;
+}
+
+.composer-input-wrap textarea::placeholder {
+  color: #9ca9bb;
+  opacity: 1;
+}
+
+/* @员工名 高亮 token：用主题强调色 + 浅底，让被召唤的员工名在输入时一眼可辨。
+   关键约束：覆盖层里的 token 绝不能加 padding/margin/border/letter-spacing，
+   也不要改 font-weight——任何改变文字宽度的样式都会让覆盖层与 textarea 后续
+   文字错位，光标就会「插」在字符中间。textarea 透明文字按常规字重渲染来计算
+   宽度，覆盖层必须用完全相同的字重，否则 mention 之后全部错位。 */
+.mention-token {
+  color: #1a6f8e;
+}
+
+/* 「@ 召唤数字员工」浮层：贴在 textarea 上沿外侧弹出。 */
+.mention-picker {
+  position: absolute;
+  bottom: calc(100% + 6px);
+  left: 0;
+  z-index: 30;
+  display: grid;
+  min-width: 240px;
+  max-width: 100%;
+  max-height: 280px;
+  overflow-y: auto;
+  padding: 6px;
+  background: #ffffff;
+  border: 1px solid var(--color-line);
+  border-radius: 8px;
+  box-shadow: 0 12px 32px rgba(18, 24, 38, 0.16);
+  animation: contextMenuIn 120ms ease-out;
+}
+
+.mention-item {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  width: 100%;
+  padding: 7px 8px;
+  color: var(--color-text);
+  background: transparent;
+  border: 0;
+  border-radius: 6px;
+  font-size: 13px;
+  text-align: left;
+  cursor: pointer;
+}
+
+.mention-item.highlighted,
+.mention-item:hover {
+  background: var(--color-panel);
+}
+
+.mention-item-icon {
+  display: inline-flex;
+  flex: 0 0 auto;
+  align-items: center;
+  justify-content: center;
+  width: 26px;
+  height: 26px;
+  color: #ffffff;
+  background: var(--color-accent);
+  border-radius: 6px;
+}
+
+.mention-item-icon.primary { background: #247ba0; }
+.mention-item-icon.blue { background: #2a9d8f; }
+.mention-item-icon.cyan { background: #d9903d; }
+.mention-item-icon.soft { color: #4b5563; background: #e6ebef; }
+.mention-item-icon.emerald { background: var(--color-emerald); }
+.mention-item-icon.indigo { background: var(--color-indigo); }
+.mention-item-icon.crimson { background: var(--color-crimson); }
+.mention-item-icon.teal { background: var(--color-teal); }
+.mention-item-icon.amber { background: var(--color-amber); }
+
+.mention-item-copy {
+  display: grid;
+  flex: 1 1 auto;
+  min-width: 0;
+  gap: 2px;
+}
+
+.mention-item-copy strong {
+  font-size: 13px;
+  font-weight: 600;
+  color: var(--color-ink);
+}
+
+.mention-item-copy span {
+  overflow: hidden;
+  color: var(--color-muted);
+  font-size: 11px;
+  white-space: nowrap;
+  text-overflow: ellipsis;
+}
+
+.mention-item-empty {
+  padding: 10px 12px;
+  color: var(--color-muted);
+  font-size: 12px;
+  text-align: center;
 }
 
 .human-picker-section {
@@ -1338,6 +1495,31 @@ body.is-resizing-sidebar * {
   margin-right: auto;
   overflow-y: auto;
   padding: 10px 14px 14px 4px;
+  /* 与 .history-list / .task-center-list 一致的细滚动条约定，
+     否则 WebKit 走系统默认宽滚动条（归档对话、普通对话共用此容器）。 */
+  scrollbar-width: thin;
+  scrollbar-color: var(--color-line-strong) transparent;
+}
+
+.conversation-thread::-webkit-scrollbar {
+  width: 10px;
+  height: 10px;
+}
+
+.conversation-thread::-webkit-scrollbar-track {
+  background: transparent;
+}
+
+.conversation-thread::-webkit-scrollbar-thumb {
+  background: var(--color-line-strong);
+  border-radius: 999px;
+  border: 3px solid transparent;
+  background-clip: padding-box;
+}
+
+.conversation-thread::-webkit-scrollbar-thumb:hover {
+  background: #8b98a6;
+  background-clip: padding-box;
 }
 
 .conversation-empty {
@@ -1421,6 +1603,9 @@ body.is-resizing-sidebar * {
   gap: 8px;
   max-width: min(840px, 92%);
   padding: 12px 14px;
+  /* 对话消息统一基准字号：user <p> 直接继承，assistant 走 .markdown-body。
+     此前 user 14px / assistant 15px 不一致，现统一为 13px，信息密度更高。 */
+  font-size: 13px;
   background: rgba(255, 255, 255, 0.9);
   border: 1px solid var(--color-line);
   border-radius: 8px;
@@ -1600,8 +1785,8 @@ body.is-resizing-sidebar * {
    覆盖 .message-bubble p / .collapsible-content p 的 white-space: pre-wrap：
    markdown 的换行语义由块级元素决定，保留源码空白会破坏表格/列表结构。 */
 .markdown-body {
-  font-size: 15px;
-  line-height: 1.65;
+  font-size: 13px;
+  line-height: 1.6;
   color: var(--color-text);
   word-break: break-word;
   overflow-wrap: break-word;
@@ -2682,6 +2867,37 @@ body.is-resizing-sidebar * {
   gap: 8px;
 }
 
+.mcp-reconnect-button {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  height: 30px;
+  padding: 0 5px;
+  color: #2a9d8f;
+  background: transparent;
+  border: 0;
+  font-size: 12px;
+  font-weight: 800;
+}
+
+.mcp-reconnect-button:hover:not(:disabled) {
+  color: #21867a;
+}
+
+.mcp-reconnect-button:disabled {
+  cursor: not-allowed;
+  opacity: 0.55;
+}
+
+.mcp-reconnect-button .spin {
+  animation: mcp-reconnect-spin 0.9s linear infinite;
+}
+
+@keyframes mcp-reconnect-spin {
+  from { transform: rotate(0deg); }
+  to { transform: rotate(360deg); }
+}
+
 .mcp-edit-button,
 .mcp-delete-button {
   display: inline-flex;
@@ -2709,7 +2925,8 @@ body.is-resizing-sidebar * {
 }
 
 .mcp-edit-button:disabled,
-.mcp-delete-button:disabled {
+.mcp-delete-button:disabled,
+.mcp-reconnect-button:disabled {
   cursor: not-allowed;
   opacity: 0.55;
 }
@@ -3539,11 +3756,28 @@ label.settings-toggle input {
 }
 
 .composer-actions .stop-button {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
   color: #ffffff;
-  background: #6b7280;
+  background: #9aa6b2;
+  transition: background-color 120ms ease, transform 80ms ease;
 }
 .composer-actions .stop-button:hover {
-  background: #4b5563;
+  background: #c23535;
+}
+.composer-actions .stop-button:active {
+  transform: scale(0.92);
+}
+/* 用 CSS 画固定尺寸方块（而非 lucide 的 Square 图标），确保在按钮里严格居中——
+   SVG 图标的几何中心常与视觉重心有偏差，导致 flex 居中后仍偏。固定尺寸块级元素
+   的居中是确定性的。 */
+.composer-actions .stop-button .stop-button-glyph {
+  display: block;
+  width: 10px;
+  height: 10px;
+  background: currentColor;
+  border-radius: 1.5px;
 }
 
 /* ---------- Context Menu ---------- */

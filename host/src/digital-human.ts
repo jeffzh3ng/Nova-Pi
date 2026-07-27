@@ -64,12 +64,36 @@ const makeAssessmentPrompt = (role: string, duties: string) =>
 - 输出结构化结论：符合项、不符合项、待确认项、整改建议（按优先级）。
 - 不臆造客户资产、网络拓扑、合规要求等具体信息。`;
 
+// ── 通用对话专用 prompt（首页默认对话，不绑定任何 MCP 工具） ────────────────
+
+const GENERAL_CHAT_PROMPT = `${BASE_PROMPT}
+
+你当前处于「通用对话」模式：作为迪普科技驻场服务 AI 助手，与工程师进行日常问答、
+思路探讨、文档润色、通用安全知识解答。当前没有挂载任何专业 MCP 工具，
+请基于自身知识直接回答。
+
+【何时引导用户使用数字员工】
+当用户需求明显属于以下专业场景时，主动提示其用「@」召唤对应数字员工进入专业环境：
+- 数据安全风险评估、数据处理活动梳理、合规对比 → 建议用「@数安风评数字员工」
+- 安全告警研判、PCAP 分析、攻击 IP 情报 → 建议用「@威胁研判数字员工」
+其他 MCP 员工可在数字员工目录中查看。
+
+【风格】简洁、专业、克制；不臆造客户名称/IP/CVE；不确定时坦诚说明。`;
+
 // ── 内置员工配置 ─────────────────────────────────────────────────────────────
 
 export const DATA_RISK_MCP = "data-security-risk-assessment-mcp";
 export const ALERT_MCP = "alert-analysis-mcp";
 
+/** 通用对话员工：首页默认对话使用，不挂任何 MCP 工具，纯 LLM 问答。 */
+export const GENERAL_CHAT_HUMAN_ID = "general-chat";
+
 export const DIGITAL_HUMANS: Record<string, DigitalHumanConfig> = {
+  [GENERAL_CHAT_HUMAN_ID]: {
+    id: GENERAL_CHAT_HUMAN_ID,
+    allowedMcpServices: [],
+    systemPrompt: GENERAL_CHAT_PROMPT,
+  },
   "data-security-risk-assessment": {
     id: "data-security-risk-assessment",
     allowedMcpServices: [DATA_RISK_MCP],

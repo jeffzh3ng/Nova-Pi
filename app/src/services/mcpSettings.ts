@@ -198,3 +198,13 @@ export async function deleteMcpConnectionSettings(serviceId: string): Promise<vo
 export async function testMcpConnection(serviceId: string): Promise<void> {
   await invoke<void>("test_mcp_connection", { serviceId });
 }
+
+/**
+ * 强制重连 MCP 服务：断开 sidecar 缓存的旧子进程后重新 spawn。
+ * 用于 Python 侧 config.local.json 等进程内配置变化后手动重启生效。
+ * 返回重连后探测到的工具数量。
+ */
+export async function reconnectMcpConnection(serviceId: string): Promise<number> {
+  const response = await invoke<{ toolCount?: number }>("reconnect_mcp_connection", { serviceId });
+  return typeof response?.toolCount === "number" ? response.toolCount : 0;
+}

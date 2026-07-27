@@ -67,6 +67,30 @@ async fn test_mcp_connection(app: tauri::AppHandle, service_id: String) -> Resul
     Err("MCP 服务连接握手失败。".to_string())
 }
 
+/// 强制重连 MCP 服务：先断开 sidecar 缓存的旧连接（kill 旧子进程），再用当前配置重新 spawn。
+/// 用于 Python 侧进程内配置（如 config.local.json）变化后，让用户手动重启子进程生效。
+#[tauri::command]
+async fn reconnect_mcp_connection(app: tauri::AppHandle, service_id: String) -> Result<serde_json::Value, String> {
+    let service_id = service_id.trim();
+    if service_id.is_empty() {
+        return Err("MCP 服务 ID 不能为空。".to_string());
+    }
+    let settings = load_mcp_connection_settings(&app, service_id)?;
+    if !settings.enabled {
+        return Err("MCP 服务尚未启用。".to_string());
+    }
+    // 先同步配置（确保 host 侧有该 serviceId 的 McpServerConfig），再发 reconnect。
+    sync_mcp_config_to_sidecar(&app).await?;
+    let command = json!({ "type": "reconnect_mcp", "serviceId": service_id });
+    let response = rpc::send_rpc_blocking(&app, command).await?;
+    if let Some(obj) = response.as_object() {
+        if obj.get("toolCount").is_some() {
+            return Ok(response);
+        }
+    }
+    Err("MCP 服务重连失败，请检查服务配置与日志。".to_string())
+}
+
 /// 列出 MCP 服务声明的工具（调试用）。
 #[tauri::command]
 async fn list_mcp_tools(app: tauri::AppHandle, service_id: String) -> Result<serde_json::Value, String> {
@@ -151,6 +175,7 @@ pub fn run() {
             start_sidecar,
             send_rpc,
             test_mcp_connection,
+            reconnect_mcp_connection,
             list_mcp_tools,
             // 文件
             open_file_path,

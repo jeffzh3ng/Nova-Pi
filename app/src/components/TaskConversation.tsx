@@ -7,7 +7,7 @@ import remarkGfm from "remark-gfm";
 import { AlertAnalysisCard } from "./AlertAnalysisCard";
 import { PromptComposer } from "./PromptComposer";
 import { limitText, MAX_SUGGESTION_TEXT_LENGTH } from "../services/alertAnalysisText";
-import type { ChatMessage, ChatMessageAttachment, PendingSkillExecution } from "../types";
+import type { ChatMessage, ChatMessageAttachment, DigitalHuman, PendingSkillExecution } from "../types";
 
 type TaskConversationProps = {
   messages: ChatMessage[];
@@ -20,6 +20,7 @@ type TaskConversationProps = {
   mcpReady: boolean;
   mcpStatusReason?: string;
   selectedHumanName: string;
+  mentionHumans: DigitalHuman[];
   taskTitle: string;
   taskStatus: "done" | "running" | "paused" | "canceled";
   taskStartedAt?: string;
@@ -322,6 +323,7 @@ export function TaskConversation({
   mcpReady,
   mcpStatusReason,
   selectedHumanName,
+  mentionHumans,
   taskTitle,
   taskStatus,
   taskStartedAt,
@@ -651,6 +653,8 @@ export function TaskConversation({
             disabledReason={mcpStatusReason}
             modelStatus={modelStatus}
             modelError={modelError}
+            mentionHumans={mentionHumans}
+            selectedEmployeeName={selectedHumanName}
             onChange={onPromptChange}
             onAttachFiles={onAttachFiles}
             onPickAttachment={onPickAttachment}

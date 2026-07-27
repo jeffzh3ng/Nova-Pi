@@ -45,6 +45,7 @@ export type RpcCommand =
   | { id?: string; type: "configure_mcp"; servers: McpServerConfig[] }
   | { id?: string; type: "list_mcp_tools"; serviceId: string }
   | { id?: string; type: "test_mcp"; serviceId: string }
+  | { id?: string; type: "reconnect_mcp"; serviceId: string }
   | { id?: string; type: "mcp_call"; serviceId: string; toolName: string; args: Record<string, unknown>; timeoutSecs?: number }
   // 技能
   | { id?: string; type: "list_skills" }
