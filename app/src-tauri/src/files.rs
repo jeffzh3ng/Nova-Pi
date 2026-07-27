@@ -449,6 +449,10 @@ async fn call_alert_mcp_tool(
     args: &serde_json::Value,
     timeout_secs: u64,
 ) -> Result<serde_json::Value, String> {
+    // 确保 sidecar 已收到带 env（含 NOVA_PI_UPLOADS_DIR）的最新 MCP 配置。
+    // 配置未变时 host 的 configEquals 走快速路径不重连，开销仅一次 RPC 往返；
+    // 配置变化（如首次解析、刚启用服务）时 host 自动重连 Python 子进程以使新 env 生效。
+    crate::sync_mcp_config_to_sidecar(app).await?;
     let settings = load_mcp_connection_settings(app, ALERT_ANALYSIS_MCP_SERVICE)?;
     if !settings.enabled {
         return Err("威胁研判 MCP 服务尚未启用。请在数字员工管理中配置并启用。".to_string());
@@ -472,15 +476,35 @@ fn strip_extended_path_prefix(path: &str) -> String {
 }
 
 fn extract_text_result(value: serde_json::Value, operation: &str) -> Result<String, String> {
-    // 兼容 MCP 的 text-content 数组和 structuredContent.text 两种形态
+    // 兼容 MCP 的 text-content 数组和 structuredContent.text 两种形态。
+    // 注意：MCP 协议的「软错误」会把工具内部抛出的异常（如路径越界）包装成
+    // { content:[{type:"text", text:"<错误信息>"}], isError:true } 返回。
+    // 若不检查 isError，会把 Python 的报错文本当成成功结果回传给前端，
+    // 导致「路径越界」之类错误被伪装成 PCAP 解析成功。这里显式检查并转 Err。
+    let is_error = value.get("isError").and_then(|v| v.as_bool()).unwrap_or(false);
+    let collected = collect_mcp_text(&value);
+    if is_error {
+        return Err(match collected {
+            Some(text) if !text.trim().is_empty() => text,
+            _ => format!("威胁研判 MCP 执行{operation}失败。"),
+        });
+    }
+    if let Some(text) = collected {
+        return Ok(text);
+    }
+    Err(format!("威胁研判 MCP 返回的{operation}结果中没有文本内容。"))
+}
+
+/// 从 MCP callTool 响应中提取首个文本块（兼容 text / content[] / structuredContent）。
+fn collect_mcp_text(value: &serde_json::Value) -> Option<String> {
     if let Some(text) = value.get("text").and_then(|v| v.as_str()) {
-        return Ok(text.to_string());
+        return Some(text.to_string());
     }
     if let Some(content) = value.get("content").and_then(|v| v.as_array()) {
         for block in content {
             if block.get("type").and_then(|v| v.as_str()) == Some("text") {
                 if let Some(text) = block.get("text").and_then(|v| v.as_str()) {
-                    return Ok(text.to_string());
+                    return Some(text.to_string());
                 }
             }
         }
@@ -490,14 +514,15 @@ fn extract_text_result(value: serde_json::Value, operation: &str) -> Result<Stri
         .and_then(|v| v.get("text"))
         .and_then(|v| v.as_str())
     {
-        return Ok(text.to_string());
+        return Some(text.to_string());
     }
-    Err(format!("威胁研判 MCP 返回的{operation}结果中没有文本内容。"))
+    None
 }
 
 #[cfg(test)]
 mod tests {
-    use super::sanitize_uploaded_file_name;
+    use super::{collect_mcp_text, extract_text_result, sanitize_uploaded_file_name};
+    use serde_json::json;
 
     #[test]
     fn uploaded_file_name_preserves_user_visible_name() {
@@ -518,5 +543,43 @@ mod tests {
             "evil_name.pcap"
         );
         assert_eq!(sanitize_uploaded_file_name(None, "zip"), "upload.zip");
+    }
+
+    #[test]
+    fn extract_text_result_unwraps_text_content_block() {
+        let value = json!({
+            "content": [{ "type": "text", "text": "包统计：10 条" }]
+        });
+        assert_eq!(
+            extract_text_result(value, "PCAP 解析").unwrap(),
+            "包统计：10 条"
+        );
+    }
+
+    #[test]
+    fn extract_text_result_treats_soft_error_as_err() {
+        // Python safe_resolve 抛 ValueError 时，FastMCP 包成 isError:true 的软错误。
+        // 必须转成 Err，否则前端会把「路径越界」当成解析成功的正文显示。
+        let value = json!({
+            "content": [{ "type": "text", "text": "路径越界，只能访问允许目录内的文件" }],
+            "isError": true,
+        });
+        let result = extract_text_result(value, "PCAP 解析");
+        assert!(result.is_err());
+        assert!(result.unwrap_err().contains("路径越界"));
+    }
+
+    #[test]
+    fn extract_text_result_soft_error_without_text_uses_fallback_message() {
+        let value = json!({ "isError": true });
+        let result = extract_text_result(value, "告警截图识别");
+        assert!(result.is_err());
+        assert!(result.unwrap_err().contains("告警截图识别"));
+    }
+
+    #[test]
+    fn collect_mcp_text_reads_structured_content() {
+        let value = json!({ "structuredContent": { "text": "hello" } });
+        assert_eq!(collect_mcp_text(&value).as_deref(), Some("hello"));
     }
 }

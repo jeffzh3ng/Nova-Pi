@@ -62,6 +62,8 @@ export type RpcCommand =
   | { id?: string; type: "models_set_api_key"; providerId: string; apiKey: string }
   | { id?: string; type: "models_upsert_model"; providerId: string; model: { id: string; name?: string; reasoning?: boolean; contextWindow?: number; maxTokens?: number } }
   | { id?: string; type: "models_remove_model"; providerId: string; modelId: string }
+  // 任务名提炼：用用户配置的默认模型对一段对话文本提炼简短标题
+  | { id?: string; type: "generate_title"; transcript: string }
   // 扩展管理（读写 settings.json extensions 数组）
   | { id?: string; type: "extensions_list" }
   | { id?: string; type: "extensions_add"; path: string }

@@ -144,6 +144,20 @@ pub fn start_sidecar(app: &AppHandle) -> Result<(), String> {
         }
     });
 
+    // sidecar 就绪后，主动把 MCP 配置（含 NOVA_PI_UPLOADS_DIR 等注入 env）同步给新进程。
+    // 必要性：
+    // - pi agent 自主调用 MCP 工具（extension.ts → mcpRegistry.callTool）的路径不会经过
+    //   sync_mcp_config_to_sidecar，若不在此预热，首次自主调用会因 configs 为空而失败，
+    //   或 spawn 出不带 env 的 Python 子进程（导致路径守卫误报「路径越界」）。
+    // - watchdog 重启时 Node 进程被整个替换，mcpRegistry.configs 清空，必须重新同步。
+    // 异步执行不阻塞 start_sidecar 返回；失败仅记日志（后续 parse_pcap_file_cmd 等会再 sync 兜底）。
+    let app_for_sync = app.clone();
+    tauri::async_runtime::spawn(async move {
+        if let Err(error) = crate::sync_mcp_config_to_sidecar(&app_for_sync).await {
+            eprintln!("[sidecar] 启动后同步 MCP 配置失败：{error}");
+        }
+    });
+
     Ok(())
 }
 

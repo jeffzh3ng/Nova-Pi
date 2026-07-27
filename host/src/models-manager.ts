@@ -29,7 +29,7 @@ import { randomUUID } from "node:crypto";
 import { ModelRuntime } from "@earendil-works/pi-coding-agent";
 import { completeSimple } from "@earendil-works/pi-ai/compat";
 import type { Api, Model } from "@earendil-works/pi-ai";
-import type { HostModelSettings } from "./model-setup.js";
+import { resolveModel, applyApiKey, type HostModelSettings } from "./model-setup.js";
 
 /** pi 支持的 API 类型（用于 provider 配置的下拉选择）。 */
 export const PI_API_TYPES = [
@@ -376,6 +376,68 @@ export async function testProviderConnection(providerId: string, modelId?: strin
     }
   } catch (error) {
     if (controller.signal.aborted) throw new Error("模型连接验证超时。");
+    throw error;
+  } finally {
+    clearTimeout(timeout);
+  }
+}
+
+/**
+ * 用用户配置的默认模型提炼任务名。
+ *
+ * 之所以放在 host 而非 Rust：用户实际配置的模型在 pi 的 models.json / ModelRuntime 里，
+ * Rust 的 model_settings 表在新架构下已不被前端设置面板写入（call_llm 路径废弃），
+ * 直接走 Rust call_llm 会因空 API Key 失败、回退到 fallback 标题，导致标题永远不变。
+ * 这里复用 getProviderModelSettings（默认 provider/model + apiKey）+ completeSimple 做单次调用。
+ *
+ * 失败时返回 null，由调用方（Rust）决定回退策略。
+ */
+export async function generateTitleWithLlm(transcript: string): Promise<string | null> {
+  const text = transcript.trim();
+  if (!text) return null;
+
+  const defaultModel = await getDefaultModel();
+  if (!defaultModel) {
+    throw new Error("未配置默认模型，请在设置面板选择默认供应商和模型。");
+  }
+  const settings = await getProviderModelSettings(defaultModel.provider, defaultModel.model);
+  const model = resolveModel(settings);
+  applyApiKey(settings);
+
+  const controller = new AbortController();
+  const timeout = setTimeout(() => controller.abort(), 20_000);
+  try {
+    const response = await completeSimple(
+      model,
+      {
+        systemPrompt:
+          "你是任务命名助手。根据对话内容提炼一个简明扼要的任务名称。" +
+          "要求：8-20 个字，概括核心目标与关键对象，信息要丰富完整；" +
+          "不要包含时间、序号、客套话；" +
+          "不要加引号、书名号或「任务」「标题」等前缀；不要带标点；" +
+          "只输出名称本身，不要任何解释。",
+        messages: [{ role: "user", content: `对话内容：\n${text}`, timestamp: Date.now() }],
+      },
+      {
+        apiKey: settings.apiKey,
+        maxTokens: 32,
+        maxRetries: 0,
+        timeoutMs: 18_000,
+        signal: controller.signal,
+      },
+    );
+    if (response.stopReason === "error" || response.stopReason === "aborted") {
+      throw new Error(response.errorMessage || "模型调用失败。");
+    }
+    // 提取首个 TextContent 的文本（与 models-manager.ts 既有用法一致）
+    const title = response.content
+      .filter((block): block is { type: "text"; text: string } => block.type === "text")
+      .map((block) => block.text)
+      .join("")
+      .trim();
+    return title || null;
+  } catch (error) {
+    if (controller.signal.aborted) throw new Error("提炼任务名超时。");
     throw error;
   } finally {
     clearTimeout(timeout);

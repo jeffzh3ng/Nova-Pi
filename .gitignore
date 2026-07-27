@@ -41,6 +41,9 @@ Thumbs.db
 .idea/
 *.swp
 
+# ZCode agent workspace (session plans, scratch)
+.zcode/
+
 # Python
 __pycache__/
 *.pyc

@@ -38,6 +38,7 @@ use mcp_settings::{
 use risk_http::{download_risk_assessment_result, upload_risk_assessment_material};
 use rpc::send_rpc;
 use serde_json::json;
+use tauri::Manager;
 use skill_registry::{
     delete_user_skill, execute_skill_plan, get_skill, list_skill_catalog, list_skills,
     open_user_skill_dir, pick_and_install_skill, set_skill_enabled,
@@ -77,8 +78,12 @@ async fn list_mcp_tools(app: tauri::AppHandle, service_id: String) -> Result<ser
 
 /// 把 Rust 存的 MCP 配置全量同步给 sidecar（configure_mcp 命令）。
 /// 前端 McpSquarePanel 保存配置后、test/list 调用前都需要 sidecar 已加载最新配置。
-async fn sync_mcp_config_to_sidecar(app: &tauri::AppHandle) -> Result<(), String> {
+pub(crate) async fn sync_mcp_config_to_sidecar(app: &tauri::AppHandle) -> Result<(), String> {
     let catalog = list_mcp_connection_settings(app.clone())?;
+    // 把上传目录路径通过环境变量传给 MCP 子进程。alert-analysis-mcp 的 safe_resolve
+    // 只允许读 $TMPDIR/nova-uploads，但 Rust 把上传文件写到 app_data_dir/uploads，
+    // 这里打通两层路径白名单（详见 services/alert-analysis-mcp/server.py 的 _allowed_read_roots）。
+    let upload_env = upload_dir_env_entry(app);
     let servers: Vec<serde_json::Value> = catalog
         .settings
         .iter()
@@ -91,12 +96,31 @@ async fn sync_mcp_config_to_sidecar(app: &tauri::AppHandle) -> Result<(), String
                 "url": s.http_url,
                 "enabled": s.enabled,
                 "launchMode": s.launch_mode,
+                "env": upload_env,
             })
         })
         .collect();
     let command = json!({ "type": "configure_mcp", "servers": servers });
     let _ = rpc::send_rpc_blocking(app, command).await?;
     Ok(())
+}
+
+/// 构造注入给 MCP 子进程的环境变量条目（当前只有上传目录）。
+///
+/// 返回 `serde_json::Map` 以便直接嵌入 `env` 字段；若 app_data_dir 不可解析则返回空 Map，
+/// 令服务回退到原有的 $TMPDIR/nova-uploads 行为，避免误判。
+fn upload_dir_env_entry(app: &tauri::AppHandle) -> serde_json::Map<String, serde_json::Value> {
+    let mut env = serde_json::Map::new();
+    if let Ok(data_dir) = app.path().app_data_dir() {
+        let uploads = data_dir.join("uploads");
+        if let Some(path) = uploads.to_str() {
+            env.insert(
+                "NOVA_PI_UPLOADS_DIR".to_string(),
+                serde_json::Value::String(path.to_string()),
+            );
+        }
+    }
+    env
 }
 
 /// 启动 sidecar（应用启动时调用一次）。

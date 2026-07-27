@@ -295,6 +295,19 @@ const resolveConversationStatus = (messages: ChatMessage[], busy: boolean): Rece
   return last.role === "assistant" ? "done" : "paused";
 };
 
+/**
+ * 历史会话的 status 字段可能因为上次崩溃/异常强退而停留在 "running"。
+ * 应用启动时内存态 runningConversationIds 必为空，因此库里任何 "running"
+ * 都是脏数据 —— 此处按消息列表重新推导一个静默状态（不返回 running）。
+ *
+ * 注意：风评类会话的 running/pending job 由 hydrateRiskAssessmentContext
+ * 在打开会话时单独恢复，这里只兜底落库的脏 running，不与正在轮询的任务冲突。
+ */
+const sanitizeStaleRunningStatus = (status: RecentTask["status"]): RecentTask["status"] => {
+  if (status !== "running") return status;
+  return "done";
+};
+
 type AlertAttachmentContext = {
   fields?: ParsedAlertFields;
   pcapSections: string[];
@@ -739,7 +752,15 @@ export default function App() {
 
   useEffect(() => {
     listConversationSummaries()
-      .then(setRecentTasks)
+      .then((tasks) => {
+        // 应用启动时内存态 runningConversationIds 必为空，因此库里残留的
+        // status="running" 都是上次崩溃/异常强退留下的脏数据，统一修正。
+        // 真正正在轮询的风评任务会在打开对应会话时由 hydrateRiskAssessmentContext 重新置位。
+        const sanitized = tasks.map((task) =>
+          task.status === "running" ? { ...task, status: sanitizeStaleRunningStatus(task.status) } : task,
+        );
+        setRecentTasks(sanitized);
+      })
       .catch((error) => {
         console.error("读取历史会话失败", error);
       });
@@ -781,7 +802,7 @@ export default function App() {
   );
   const selectedTaskStatus: RecentTask["status"] = currentConversationId && runningConversationIds.has(currentConversationId)
     ? "running"
-    : selectedTask?.status ?? "running";
+    : selectedTask?.status ?? "done";
   const currentConversationRunning =
     !!currentConversationId && runningConversationIds.has(currentConversationId);
   const riskAssessmentTransport =
@@ -1162,9 +1183,14 @@ export default function App() {
     const optimisticUpdatedAt = new Date().toISOString();
     setRecentTasks((items) => {
       const existing = items.find((item) => item.id === snapshot.id);
+      // titleSource 为 auto/manual 时，title 已由 LLM 提炼或用户手改确定，
+      // 后端 save_conversation_snapshot 的 ON CONFLICT 也不会覆盖它。
+      // 此处乐观更新必须同样保留，否则流式 delta 会把 UI 显示的标题盖回成
+      // buildConversationTitle（首条用户消息截断），看起来像自动提炼从未生效。
+      const preserveTitle = !!existing && existing.titleSource !== "pending";
       const optimisticSummary: ConversationSummary = {
         id: snapshot.id,
-        title: snapshot.title,
+        title: preserveTitle ? existing!.title : snapshot.title,
         titleSource: existing?.titleSource ?? "pending",
         agentId: snapshot.agentId,
         agentName: snapshot.agentName,
@@ -2190,6 +2216,13 @@ export default function App() {
       ) {
         setConversationRunning(task.id, true);
         void pollRiskAssessment(task.id, riskContext);
+      } else if (loaded.summary.status === "running") {
+        // 历史会话落库的 status 可能因上次崩溃停留在 "running"。
+        // 这里没有正在轮询的风评任务，也不是内存态 running，按消息推导修正。
+        const correctedStatus = sanitizeStaleRunningStatus(loaded.summary.status);
+        setRecentTasks((items) =>
+          items.map((item) => (item.id === task.id ? { ...item, status: correctedStatus } : item)),
+        );
       }
     } catch (error) {
       if (!isCurrent()) return;

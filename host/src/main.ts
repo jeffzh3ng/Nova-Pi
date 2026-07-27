@@ -33,6 +33,7 @@ import {
   setProviderApiKey,
   upsertModel,
   removeModel,
+  generateTitleWithLlm,
   type ModelsJsonModel,
 } from "./models-manager.js";
 import {
@@ -249,6 +250,17 @@ async function handleCommand(command: RpcCommand): Promise<void> {
       case "models_remove_model": {
         await removeModel(getModelRuntime(), command.providerId, command.modelId);
         writeResponse(id, true);
+        return;
+      }
+      case "generate_title": {
+        // transcript 由 Rust 拼好（取自 SQLite 会话消息）；host 只负责用默认模型调一次 LLM。
+        // 失败时返回 null，Rust 端回退到首条用户消息截断。
+        try {
+          const title = await generateTitleWithLlm(command.transcript);
+          writeResponse(id, true, { title });
+        } catch (error) {
+          writeResponse(id, true, { title: null, error: error instanceof Error ? error.message : String(error) });
+        }
         return;
       }
       // ── 扩展管理 ──

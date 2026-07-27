@@ -237,11 +237,39 @@ def _temp_root() -> Path:
 # Directories the MCP tools are allowed to read from. The `nova-uploads` dir is
 # where the Tauri host writes uploaded PCAP/image blobs; `nova-mcp-work` is the
 # sandbox for MCP-produced outputs.
+#
+# Tauri 桌面壳现在把上传文件持久化到 app_data_dir/uploads（而非 $TMPDIR/nova-uploads），
+# 通过 NOVA_PI_UPLOADS_DIR 环境变量把该路径注入子进程（见 app/src-tauri/src/lib.rs 的
+# sync_mcp_config_to_sidecar）。这里把它追加进允许读根，与 nova-uploads/nova-mcp-work 并存，
+# 避免两层路径白名单不一致导致 safe_resolve 误报「路径越界」。
 def _allowed_read_roots() -> list[Path]:
-    return [
+    roots: list[Path] = [
         (_temp_root() / "nova-uploads").resolve(),
         (_temp_root() / "nova-mcp-work").resolve(),
     ]
+    injected = os.environ.get("NOVA_PI_UPLOADS_DIR", "").strip()
+    if injected:
+        try:
+            resolved = Path(injected).resolve(strict=False)
+        except (OSError, ValueError):
+            resolved = None
+        if resolved is not None and not any(
+            _same_path(resolved, existing) for existing in roots
+        ):
+            roots.append(resolved)
+    return roots
+
+
+def _same_path(left: Path, right: Path) -> bool:
+    try:
+        left.relative_to(right)
+        return True
+    except ValueError:
+        try:
+            right.relative_to(left)
+            return True
+        except ValueError:
+            return False
 
 
 def _allowed_write_root() -> Path:

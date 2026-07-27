@@ -43,9 +43,9 @@ const ALERT_SYSTEM_PROMPT = `${BASE_PROMPT}
 5. 注意事项（riskNotes）
 
 【附件处理】
-- 用户上传的 PCAP 数据包会以「=== PCAP 文件：xxx ===」哨兵格式随消息附带，必要时调用 parse_pcap 工具进一步解析。
+- 用户上传的 PCAP 数据包**已在用户端解析完毕**，解析结果以「=== PCAP 文件：xxx ===」哨兵格式随消息附带。**直接基于该文本进行研判，不要再次调用 parse_pcap_file 工具，也不要给 analyze_security_alert 传 pcapFilePath 参数**——你拿不到原始文件路径，强行调用只会失败。如确需更细粒度的解析，请向用户说明并请其重新上传。
 - 用户上传的告警截图 OCR 结果会以「=== 告警截图 OCR：xxx ===」哨兵格式随消息附带。
-- 结构化告警字段（sourceSystem/sourceDevice/occurredAt/sourceIp/destinationIp/asset/businessContext/currentStatus）会作为工具参数传入。
+- 结构化告警字段（sourceSystem/sourceDevice/occurredAt/sourceIp/destinationIp/asset/businessContext/currentStatus）会作为工具参数传入；调用 analyze_security_alert 时，把上面附带的 PCAP 解析文本通过 pcapData 参数传入（而非 pcapFilePath）。
 
 【severity 约束】只能使用：紧急 / 高 / 中 / 低 / 待确认。证据不足时必须标注「待确认」。
 

@@ -477,7 +477,11 @@ fn build_title_transcript(messages: &[ConversationMessageRecord]) -> String {
     lines.join("\n")
 }
 
-/// 调用统一大模型入口提炼标题；失败或结果不可用则回退到首条用户消息截断。
+/// 调用大模型提炼标题；失败或结果不可用则回退到首条用户消息截断。
+///
+/// 经 host sidecar 的 `generate_title` RPC 调用 pi（completeSimple），
+/// 使用用户在设置面板实际配置的默认模型。Rust 的 model_settings 表在新架构下
+/// 不再被前端写入（call_llm 路径废弃），直接走它会因空 API Key 失败、标题永远不变。
 async fn generate_title_with_llm(
     app: &AppHandle,
     transcript: &str,
@@ -488,35 +492,31 @@ async fn generate_title_with_llm(
         return Ok(fallback_title.to_string());
     }
 
-    let messages = vec![
-        crate::llm_settings::LlmMessage {
-            role: "system".to_string(),
-            content: "你是任务命名助手。根据对话内容提炼一个简洁的任务名称。\
-                      要求：4-12 个字，概括核心目标；不要包含时间、序号、客套话；\
-                      不要加引号、书名号或「任务」「标题」等前缀；不要带标点；\
-                      只输出名称本身，不要任何解释。"
-                .to_string(),
-        },
-        crate::llm_settings::LlmMessage {
-            role: "user".to_string(),
-            content: format!("对话内容：\n{trimmed_transcript}"),
-        },
-    ];
+    let command = serde_json::json!({
+        "type": "generate_title",
+        "transcript": trimmed_transcript,
+    });
+    // host 侧单次 LLM 调用设 18s 超时，这里给 25s 余量（避免 Rust 先超时导致响应被丢弃）。
+    let response = crate::rpc::send_rpc_blocking_with_timeout(
+        app,
+        command,
+        std::time::Duration::from_secs(25),
+    )
+    .await?;
 
-    match crate::llm_settings::call_llm(app, messages, false, "任务命名").await {
-        Ok((raw, _)) => {
-            let cleaned = clean_title_output(&raw);
-            if cleaned.is_empty() {
-                Ok(fallback_title.to_string())
-            } else {
-                Ok(cleaned)
-            }
-        }
-        Err(_) => Ok(fallback_title.to_string()),
+    let raw = response
+        .get("title")
+        .and_then(|value| value.as_str())
+        .unwrap_or("");
+    let cleaned = clean_title_output(raw);
+    if cleaned.is_empty() {
+        Ok(fallback_title.to_string())
+    } else {
+        Ok(cleaned)
     }
 }
 
-/// 清洗大模型返回的标题：去空白、首尾引号/书名号、常见前缀、尾标点，截断到 16 字符。
+/// 清洗大模型返回的标题：去空白、首尾引号/书名号、常见前缀、尾标点，截断到 24 字符。
 fn clean_title_output(raw: &str) -> String {
     let mut value = raw.trim();
     // 反复去引号/书名号成对包裹
@@ -552,7 +552,7 @@ fn clean_title_output(raw: &str) -> String {
     value = value.trim_end_matches(|c: char| {
         matches!(c, '。' | '，' | ',' | '.' | '、' | '；' | ';' | '：' | ':' | '！' | '!' | '？' | '?')
     });
-    clip_chars(value.trim(), 16)
+    clip_chars(value.trim(), 24)
 }
 
 /// 按 Unicode 字符（而非字节）截断，避免把多字节字符切断。
@@ -1026,9 +1026,9 @@ mod tests {
         assert_eq!(clean_title_output("任务名称：数据包分析"), "数据包分析");
         assert_eq!(clean_title_output("标题：异常流量排查。"), "异常流量排查");
         assert_eq!(clean_title_output("  \"PCAP解析\"  "), "PCAP解析");
-        // 超长内容截断到 16 字符
+        // 超长内容截断到 24 字符
         let long = "这是一个非常非常非常非常非常非常非常非常长的任务名称";
         let cleaned = clean_title_output(long);
-        assert_eq!(cleaned.chars().count(), 16);
+        assert_eq!(cleaned.chars().count(), 24);
     }
 }
