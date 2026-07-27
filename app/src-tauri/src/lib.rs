@@ -13,8 +13,10 @@ mod conversation_store;
 mod files;
 mod llm_settings;
 mod mcp_settings;
+mod message_channels;
 mod risk_http;
 mod rpc;
+mod secrets;
 mod sidecar;
 mod skill_registry;
 
@@ -34,6 +36,9 @@ use llm_settings::{
 use mcp_settings::{
     delete_mcp_connection_settings, list_mcp_connection_settings, load_mcp_connection_settings,
     save_mcp_connection_settings,
+};
+use message_channels::{
+    delete_message_channel, get_message_channel, list_message_channels, save_message_channel,
 };
 use risk_http::{download_risk_assessment_result, upload_risk_assessment_material};
 use rpc::send_rpc;
@@ -189,6 +194,11 @@ pub fn run() {
             list_mcp_connection_settings,
             save_mcp_connection_settings,
             delete_mcp_connection_settings,
+            // 消息通道（微信/飞书/...）
+            list_message_channels,
+            get_message_channel,
+            save_message_channel,
+            delete_message_channel,
             // 会话
             list_conversations,
             load_conversation,

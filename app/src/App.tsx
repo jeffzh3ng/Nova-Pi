@@ -7,7 +7,9 @@ import { ConfirmModal } from "./components/ConfirmModal";
 import { DigitalHumanPicker } from "./components/DigitalHumanPicker";
 import { Hero } from "./components/Hero";
 import { McpSquarePanel } from "./components/McpSquarePanel";
-import { ExtensionsPanel } from "./components/ExtensionsPanel";
+import { MessageChannelsPanel } from "./components/MessageChannelsPanel";
+// Pi 扩展入口暂时隐藏（组件保留，便于以后恢复）
+// import { ExtensionsPanel } from "./components/ExtensionsPanel";
 import { SettingsPanel } from "./components/SettingsPanel";
 import { Sidebar } from "./components/Sidebar";
 import { SkillCenterPanel } from "./components/SkillCenterPanel";
@@ -33,6 +35,8 @@ import { executeSkillPlan } from "./services/skillExecution";
 import { parseAlertFileContent } from "./services/alertFileParser";
 import type { ParsedAlertFields } from "./services/alertFileParser";
 import { sendRpc, subscribePiEvents } from "./services/hostBridge";
+import { listMessageChannels } from "./services/messageChannels";
+import { startWeixinBot, loginWeixinBot } from "./services/wechatBot";
 import type { ConversationAttachments, PiEvent } from "./services/hostBridge";
 import {
   cancelRiskAssessment,
@@ -834,6 +838,72 @@ export default function App() {
       .catch((error) => {
         console.error("读取历史会话失败", error);
       });
+  }, []);
+
+  // 应用启动时自动启动配置了 autoStart 的消息渠道（微信 + Telegram）。
+  // 等 sidecar ready（轮询 get_state 真正成功），失败静默——用户进面板可手动重试。
+  useEffect(() => {
+    let cancelled = false;
+    let retryTimer: ReturnType<typeof setTimeout> | null = null;
+
+    // H5 修复：之前用 get_state + weixin_status 双探针且吞错，weixin_status 是业务命令
+    // 不该用于探活基础设施，且 .catch(()=>null) 把成功响应当失败。改为仅用 get_state，
+    // 成功响应即说明 host pool 已就绪（pool 为 null 时 host 会抛错）。
+    const waitSidecarReady = async (attempts = 30, intervalMs = 500): Promise<boolean> => {
+      for (let i = 0; i < attempts; i++) {
+        if (cancelled) return false;
+        try {
+          await sendRpc({ type: "get_state", sessionId: "probe" });
+          return true; // get_state 成功响应 = host ready
+        } catch {
+          // pool 为 null（host 尚未 bootstrap 完）会抛错，重试
+          await new Promise((r) => (retryTimer = setTimeout(r, intervalMs)));
+        }
+      }
+      return false;
+    };
+
+    const autoStartChannels = async () => {
+      try {
+        const channels = await listMessageChannels();
+        const ready = await waitSidecarReady();
+        if (!ready || cancelled) return;
+
+        // 微信：创建后台会话 + 触发登录（token 缓存命中则秒连，否则需扫码）
+        const wechat = channels.find((c) => c.channelId === "wechat" && c.enabled && c.autoStart);
+        if (wechat && !cancelled) {
+          try {
+            await startWeixinBot(wechat.humanId);
+            await loginWeixinBot();
+          } catch (error) {
+            console.error("[消息通道] 微信自动启动失败", error);
+          }
+        }
+
+        // Telegram：需 config_json 里有 botToken 才自动启动
+        const telegram = channels.find((c) => c.channelId === "telegram" && c.enabled && c.autoStart);
+        if (telegram && !cancelled) {
+          try {
+            const cfg = JSON.parse(telegram.configJson || "{}");
+            if (cfg.botToken) {
+              const { startTelegramBot } = await import("./services/telegramBot");
+              await startTelegramBot(telegram.humanId, { botToken: cfg.botToken, allowedUserId: cfg.allowedUserId });
+            }
+          } catch (error) {
+            console.error("[消息通道] Telegram 自动启动失败", error);
+          }
+        }
+      } catch (error) {
+        // 自动启动失败不影响应用正常使用，用户可手动进面板重试
+        console.error("[消息通道] 自动启动失败", error);
+      }
+    };
+
+    void autoStartChannels();
+    return () => {
+      cancelled = true;
+      if (retryTimer) clearTimeout(retryTimer);
+    };
   }, []);
 
   useEffect(() => {
@@ -2912,7 +2982,7 @@ export default function App() {
         onRestoreTask={handleRestoreTask}
       />
       <main
-        className={`workspace ${activeNav === "settings" || activeNav === "mcp" || activeNav === "skill" || activeNav === "extensions" ? "settings-workspace" : ""} ${
+        className={`workspace ${activeNav === "settings" || activeNav === "mcp" || activeNav === "skill" || activeNav === "wechat" ? "settings-workspace" : ""} ${
           activeNav === "tasks" || (activeNav === "projects" && selectedTaskId) ? "tasks-workspace" : ""
         }`}
       >
@@ -2922,8 +2992,8 @@ export default function App() {
           <SkillCenterPanel />
         ) : activeNav === "mcp" ? (
           <McpSquarePanel />
-        ) : activeNav === "extensions" ? (
-          <ExtensionsPanel />
+        ) : activeNav === "wechat" ? (
+          <MessageChannelsPanel />
         ) : activeNav === "usage" ? (
           <TokenUsagePanel />
         ) : activeNav === "projects" && !selectedTaskId ? (

@@ -63,6 +63,19 @@ export type RpcCommand =
   | { id?: string; type: "extensions_set_enabled"; extensionId: string; enabled: boolean }
   | { id?: string; type: "extensions_read_content"; extensionId: string }
   | { id?: string; type: "extensions_create"; name: string; template?: string }
+  // 微信机器人
+  | { id?: string; type: "weixin_start"; humanId: string }
+  | { id?: string; type: "weixin_stop" }
+  | { id?: string; type: "weixin_login" }
+  | { id?: string; type: "weixin_status" }
+  | { id?: string; type: "weixin_switch_human"; humanId: string }
+  // Telegram 机器人
+  | { id?: string; type: "telegram_start"; humanId: string; config: Record<string, unknown> }
+  | { id?: string; type: "telegram_stop" }
+  | { id?: string; type: "telegram_dispose" }
+  | { id?: string; type: "telegram_status" }
+  | { id?: string; type: "telegram_reset_pair" }
+  | { id?: string; type: "telegram_update_config"; config: Record<string, unknown> }
   // 公文
   | { id?: string; type: "shutdown" };
 
@@ -165,6 +178,13 @@ export type PiEvent =
   | { type: "usage"; sessionId?: string; promptTokens: number; completionTokens: number; totalTokens: number; cacheRead?: number; cacheWrite?: number; model: string; agentName?: string }
   | { type: "risk_job_update"; sessionId: string; job: unknown }
   | { type: "session_saved"; conversationId: string; title?: string }
+  // 微信机器人事件（MessageChannelsPanel 微信卡片订阅）
+  | { type: "wechat_qrcode"; qrUrl: string }
+  | { type: "wechat_status"; status: "offline" | "awaiting_scan" | "online" | "error"; account?: string; accountName?: string; detail?: string }
+  | { type: "wechat_message"; role: "incoming" | "assistant"; reqId?: string; text: string; fromUser?: string }
+  // Telegram 机器人事件（telegram 卡片订阅）
+  | { type: "telegram_status"; status: "offline" | "awaiting_pair" | "online" | "error"; botUsername?: string; allowedUserId?: string; detail?: string }
+  | { type: "telegram_message"; role: "incoming" | "assistant"; reqId?: string; text: string; fromUser?: string }
   | { type: "error"; sessionId?: string; message: string; recoverable?: boolean };
 
 // ─────────────────────────────────────────────────────────────────────────────

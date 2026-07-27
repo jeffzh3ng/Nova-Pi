@@ -4703,3 +4703,812 @@ label.settings-toggle input {
   background: #f1f5f9;
   border-color: #94a3b8;
 }
+
+/* ── 微信机器人面板 ── */
+
+.wechat-bot-page {
+  /* 复用 settings-page 的内边距和最大宽度，但内部用分栏布局 */
+}
+
+.wechat-bot-body {
+  display: grid;
+  grid-template-columns: 320px 1fr;
+  gap: 16px;
+  flex: 1;
+  min-height: 0;
+  margin-top: 16px;
+}
+
+.wechat-bot-sidebar {
+  display: flex;
+  flex-direction: column;
+  gap: 14px;
+  padding: 16px;
+  background: #fff;
+  border: 1px solid #e2e8f0;
+  border-radius: 12px;
+}
+
+.wechat-bot-sidebar .mcp-connection-badge.is-offline {
+  color: #475569;
+  background: #f1f5f9;
+}
+
+.wechat-bot-sidebar .mcp-connection-badge.is-online {
+  color: #087867;
+  background: #e6f7f3;
+}
+
+.wechat-status-card {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+
+.wechat-status-row {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex-wrap: wrap;
+}
+
+.wechat-account {
+  font-size: 12px;
+  color: #475569;
+  font-family: var(--font-mono, monospace);
+}
+
+.wechat-detail {
+  font-size: 12px;
+  color: #475569;
+  display: flex;
+  align-items: center;
+  gap: 6px;
+}
+
+.wechat-detail-error {
+  color: #b33d49;
+}
+
+.wechat-config-block {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+
+.wechat-config-label {
+  font-size: 12px;
+  font-weight: 600;
+  color: #334155;
+}
+
+.wechat-config-block select {
+  padding: 8px 10px;
+  border: 1px solid #cbd5e1;
+  border-radius: 8px;
+  font-size: 13px;
+  background: #fff;
+  color: #0f172a;
+}
+
+.wechat-config-block select:disabled {
+  background: #f8fafc;
+  color: #94a3b8;
+}
+
+.wechat-config-hint {
+  font-size: 11px;
+  color: #94a3b8;
+}
+
+.wechat-qrcode-block {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 8px;
+  padding: 12px;
+  background: #f8fafc;
+  border: 1px dashed #cbd5e1;
+  border-radius: 10px;
+}
+
+.wechat-qrcode-frame {
+  width: 200px;
+  height: 200px;
+  background: #fff;
+  border-radius: 8px;
+  overflow: hidden;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+}
+
+.wechat-qrcode-frame img {
+  width: 100%;
+  height: 100%;
+  object-fit: contain;
+}
+
+.wechat-qrcode-tip {
+  font-size: 12px;
+  color: #475569;
+  display: flex;
+  align-items: center;
+  gap: 4px;
+}
+
+.wechat-warning-block {
+  display: flex;
+  align-items: flex-start;
+  gap: 6px;
+  padding: 10px;
+  background: #fffbeb;
+  border: 1px solid #fde68a;
+  border-radius: 8px;
+  font-size: 11px;
+  color: #92400e;
+  line-height: 1.5;
+}
+
+.wechat-warning-block svg {
+  flex-shrink: 0;
+  margin-top: 1px;
+}
+
+.wechat-chat-area {
+  display: flex;
+  flex-direction: column;
+  background: #fff;
+  border: 1px solid #e2e8f0;
+  border-radius: 12px;
+  overflow: hidden;
+  min-height: 0;
+}
+
+.wechat-chat-header {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 12px 16px;
+  border-bottom: 1px solid #e2e8f0;
+  font-size: 13px;
+  font-weight: 600;
+  color: #334155;
+}
+
+.wechat-chat-count {
+  margin-left: auto;
+  padding: 2px 8px;
+  background: #f1f5f9;
+  border-radius: 999px;
+  font-size: 11px;
+  color: #64748b;
+}
+
+.wechat-chat-list {
+  flex: 1;
+  overflow-y: auto;
+  padding: 16px;
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+}
+
+.wechat-chat-empty {
+  flex: 1;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: 10px;
+  color: #cbd5e1;
+  font-size: 13px;
+}
+
+.wechat-chat-item {
+  max-width: 80%;
+  padding: 10px 12px;
+  border-radius: 12px;
+  font-size: 13px;
+  line-height: 1.5;
+}
+
+.wechat-chat-incoming {
+  align-self: flex-start;
+  background: #f1f5f9;
+  color: #0f172a;
+  border-bottom-left-radius: 4px;
+}
+
+.wechat-chat-assistant {
+  align-self: flex-end;
+  background: #e6f7f3;
+  color: #08403a;
+  border-bottom-right-radius: 4px;
+}
+
+.wechat-chat-meta {
+  font-size: 10px;
+  color: #94a3b8;
+  margin-bottom: 4px;
+  display: flex;
+  align-items: center;
+  gap: 4px;
+}
+
+.wechat-chat-text {
+  white-space: pre-wrap;
+  word-break: break-word;
+}
+
+.wechat-bot-page .spin {
+  animation: attachment-upload-spin 0.9s linear infinite;
+}
+
+/* ── 消息通道：渠道 Tab 栏 ── */
+
+.channel-tabs {
+  display: flex;
+  gap: 4px;
+  padding: 0;
+  margin-top: 16px;
+  border-bottom: 1px solid #e2e8f0;
+}
+
+.channel-tab {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  padding: 10px 16px;
+  background: transparent;
+  border: none;
+  border-bottom: 2px solid transparent;
+  color: #64748b;
+  font-size: 13px;
+  font-weight: 500;
+  cursor: pointer;
+  transition: color 0.15s, border-color 0.15s;
+  position: relative;
+}
+
+.channel-tab:hover {
+  color: #0f172a;
+}
+
+.channel-tab.is-active {
+  color: #0f172a;
+  border-bottom-color: #087867;
+  font-weight: 600;
+}
+
+.channel-tab-dot {
+  width: 7px;
+  height: 7px;
+  border-radius: 50%;
+  background: #cbd5e1;
+}
+
+.channel-tab-dot.is-online {
+  background: #087867;
+  box-shadow: 0 0 0 2px #e6f7f3;
+}
+
+.channel-tab-soon {
+  font-size: 10px;
+  padding: 1px 6px;
+  background: #f1f5f9;
+  color: #94a3b8;
+  border-radius: 999px;
+  font-weight: 500;
+}
+
+/* ── 消息通道：折叠对话区 ── */
+
+.wechat-chat-area.is-collapsed {
+  /* 折叠时只显示 toggle 按钮，列表区不渲染（由 JS 控制） */
+  align-items: stretch;
+}
+
+.wechat-chat-toggle {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  width: 100%;
+  padding: 12px 16px;
+  background: #f8fafc;
+  border: none;
+  border-bottom: 1px solid #e2e8f0;
+  color: #334155;
+  font-size: 13px;
+  font-weight: 600;
+  cursor: pointer;
+  transition: background 0.15s;
+}
+
+.wechat-chat-toggle:hover {
+  background: #f1f5f9;
+}
+
+/* ── 消息通道：操作按钮行 ── */
+
+.wechat-actions-row {
+  display: flex;
+  gap: 8px;
+  flex-wrap: wrap;
+}
+
+.wechat-actions-row button {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  padding: 8px 14px;
+  background: #fff;
+  border: 1px solid #cbd5e1;
+  border-radius: 8px;
+  color: #334155;
+  font-size: 13px;
+  cursor: pointer;
+  transition: background 0.15s, border-color 0.15s;
+}
+
+.wechat-actions-row button:hover:not(:disabled) {
+  background: #f8fafc;
+  border-color: #94a3b8;
+}
+
+.wechat-actions-row button:disabled {
+  opacity: 0.5;
+  cursor: not-allowed;
+}
+
+.wechat-actions-row .wechat-btn-primary {
+  background: #087867;
+  color: #fff;
+  border-color: #087867;
+}
+
+.wechat-actions-row .wechat-btn-primary:hover:not(:disabled) {
+  background: #066858;
+  border-color: #066858;
+}
+
+/* ── 消息通道：开关 ── */
+
+.wechat-config-toggle {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  font-size: 13px;
+  font-weight: 500;
+  color: #334155;
+  cursor: pointer;
+}
+
+.wechat-config-toggle input[type="checkbox"] {
+  width: 16px;
+  height: 16px;
+  accent-color: #087867;
+  cursor: pointer;
+}
+
+/* ── 消息通道：占位渠道 ── */
+
+.channel-placeholder {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: 12px;
+  padding: 60px 20px;
+  color: #cbd5e1;
+  text-align: center;
+}
+
+.channel-placeholder h3 {
+  margin: 0;
+  color: #64748b;
+  font-size: 16px;
+}
+
+.channel-placeholder p {
+  margin: 0;
+  color: #94a3b8;
+  font-size: 13px;
+}
+
+/* ── 消息通道：卡片网格版（参照 pi-settings-page） ── */
+
+/* editor 里的 toggle（复选框 + 文本横排，区别于 input/select 的 grid 布局） */
+.channel-page .mcp-editor-body label.settings-toggle {
+  display: flex;
+  flex-direction: row;
+  align-items: center;
+  gap: 10px;
+  padding: 6px 0;
+  cursor: pointer;
+}
+
+.channel-page .mcp-editor-body label.settings-toggle input[type="checkbox"] {
+  width: 16px;
+  height: 16px;
+  accent-color: #087867;
+  cursor: pointer;
+  flex-shrink: 0;
+}
+
+.channel-page .mcp-editor-body label.settings-toggle span {
+  font-size: 13px;
+  color: #334155;
+}
+
+.channel-page .mcp-card-grid {
+  /* 复用 mcp-card-grid 基础，改成 auto-fill 自适应，与模型配置一致 */
+  grid-template-columns: repeat(auto-fill, minmax(260px, 300px));
+  gap: 14px;
+  overflow: visible;
+  padding-bottom: 8px;
+}
+
+.channel-card {
+  display: flex;
+  flex-direction: column;
+  align-self: start;
+}
+
+.channel-card.is-disabled {
+  opacity: 0.55;
+}
+
+.channel-card-header {
+  display: grid;
+  grid-template-columns: auto minmax(0, 1fr) auto;
+  align-items: center;
+  gap: 10px;
+  padding: 4px 0 10px;
+  border-bottom: 1px solid #f1f5f9;
+}
+
+.channel-card-header h2 {
+  margin: 0;
+  font-size: 15px;
+  font-weight: 600;
+  color: #0f172a;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.channel-card-body {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  padding: 12px 0;
+  flex: 1;
+}
+
+.channel-card-row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  font-size: 12px;
+}
+
+.channel-card-label {
+  color: #94a3b8;
+}
+
+.channel-card-value {
+  color: #334155;
+  font-weight: 500;
+  max-width: 60%;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.channel-card-error {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  font-size: 11px;
+  color: #b33d49;
+  margin: 4px 0 0;
+  line-height: 1.4;
+}
+
+/* 占位卡片（飞书等开发中） */
+.channel-card-placeholder {
+  background: #f8fafc;
+  border-style: dashed;
+}
+
+.channel-card-placeholder .mcp-card-icon {
+  opacity: 0.5;
+}
+
+.channel-card-soon {
+  font-size: 12px;
+  color: #94a3b8;
+  margin: 0;
+  text-align: center;
+  padding: 16px 0;
+}
+
+.channel-card-hint {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  font-size: 11px;
+  color: #a6630b;
+  margin: 4px 0 0;
+  line-height: 1.4;
+}
+
+/* 卡片按钮区 ──
+ * 渠道卡片按钮独立成套，不再复用 mcp-edit-button 的"透明无边框"风格
+ * （那是给 MCP 卡片的纯文本按钮用的；渠道按钮带图标，无边框时视觉松散、排列凌乱）。
+ * 改为带边框的胶囊按钮，主/停止/危险三态分明，hover/disabled 反馈清晰。
+ */
+
+/* 渠道卡片 footer：mcp-service-card 底部 padding 为 0，footer 需自带底部内边距，
+ * 否则按钮会贴到卡片底边。同时让按钮区左对齐（按钮换行时整齐）。 */
+.channel-card .mcp-card-footer {
+  padding-bottom: 14px;
+  justify-content: flex-start;
+}
+
+.channel-card .mcp-card-actions {
+  flex-wrap: wrap;
+  gap: 6px;
+}
+
+/* 基础按钮：白底 + 浅边框 + 圆角胶囊，覆盖 mcp-edit-button 的透明样式 */
+.channel-card .mcp-card-actions button {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  height: 30px;
+  padding: 0 11px;
+  font-size: 12px;
+  font-weight: 500;
+  line-height: 1;
+  color: #475569;
+  background: #ffffff;
+  border: 1px solid #d8dee8;
+  border-radius: 8px;
+  cursor: pointer;
+  transition: background 0.15s, border-color 0.15s, color 0.15s, transform 0.1s;
+  white-space: nowrap;
+}
+
+.channel-card .mcp-card-actions button:hover:not(:disabled) {
+  background: #f8fafc;
+  border-color: #b6c2d2;
+  color: #1e293b;
+}
+
+.channel-card .mcp-card-actions button:active:not(:disabled) {
+  transform: translateY(1px);
+}
+
+.channel-card .mcp-card-actions button:disabled {
+  opacity: 0.5;
+  cursor: not-allowed;
+}
+
+/* 启动按钮（主操作）：品牌青绿，与未启动卡片对比强烈 */
+.channel-card .channel-btn-primary {
+  color: #ffffff !important;
+  background: #087867 !important;
+  border-color: #087867 !important;
+  font-weight: 600;
+}
+
+.channel-card .channel-btn-primary:hover:not(:disabled) {
+  background: #066858 !important;
+  border-color: #066858 !important;
+  color: #ffffff !important;
+}
+
+/* 停止按钮：中性灰，弱化（避免与"启动"对等视觉权重，启动是高频操作） */
+.channel-card .channel-btn-stop {
+  color: #64748b;
+}
+
+.channel-card .channel-btn-stop:hover:not(:disabled) {
+  color: #334155;
+  border-color: #94a3b8;
+}
+
+/* 危险按钮（删除/解除配对）：浅红描边，hover 加深，但不抢主按钮的视觉 */
+.channel-card .mcp-delete-button {
+  color: #b54851;
+  background: #fdf6f6;
+  border-color: #f1d4d6;
+}
+
+.channel-card .mcp-delete-button:hover:not(:disabled) {
+  color: #9c3640;
+  background: #fbeaea;
+  border-color: #e8b9bc;
+}
+
+/* ── 消息通道：modal 专属样式（复用 mcp-editor-overlay/dialog） ── */
+
+.mcp-editor-dialog-narrow {
+  width: min(360px, 100%);
+}
+
+.channel-qr-body {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 14px;
+  padding: 20px;
+}
+
+.channel-qr-frame {
+  width: 240px;
+  height: 240px;
+  background: #fff;
+  border: 1px solid #e2e8f0;
+  border-radius: 10px;
+  overflow: hidden;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+}
+
+.channel-qr-frame img {
+  width: 100%;
+  height: 100%;
+  object-fit: contain;
+}
+
+.channel-qr-tip {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  font-size: 13px;
+  color: #475569;
+  margin: 0;
+}
+
+/* 消息记录 modal 内的对话列表 */
+.channel-chat-list {
+  flex: 1;
+  overflow-y: auto;
+  padding: 16px 20px;
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+  max-height: calc(100vh - 200px);
+}
+
+.channel-chat-empty {
+  flex: 1;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: 10px;
+  color: #cbd5e1;
+  font-size: 13px;
+  padding: 40px 0;
+}
+
+.channel-chat-item {
+  max-width: 80%;
+  padding: 10px 12px;
+  border-radius: 12px;
+  font-size: 13px;
+  line-height: 1.5;
+}
+
+.channel-chat-incoming {
+  align-self: flex-start;
+  background: #f1f5f9;
+  color: #0f172a;
+  border-bottom-left-radius: 4px;
+}
+
+.channel-chat-assistant {
+  align-self: flex-end;
+  background: #e6f7f3;
+  color: #08403a;
+  border-bottom-right-radius: 4px;
+}
+
+.channel-chat-meta {
+  font-size: 10px;
+  color: #94a3b8;
+  margin-bottom: 4px;
+  display: flex;
+  align-items: center;
+  gap: 4px;
+}
+
+.channel-chat-text {
+  white-space: pre-wrap;
+  word-break: break-word;
+}
+
+.channel-page .spin {
+  animation: attachment-upload-spin 0.9s linear infinite;
+}
+
+/* ── 消息通道：编辑器 token 脱敏态（C1） ── */
+
+/* 已配置 token 的占位行：掩码文本 + "修改"按钮横排 */
+.channel-token-locked {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+  height: 36px;
+  padding: 0 12px;
+  background: #f1f5f9;
+  border: 1px solid #e2e8f0;
+  border-radius: 8px;
+}
+
+.channel-token-mask {
+  font-size: 13px;
+  color: #64748b;
+  letter-spacing: 1px;
+  font-family: ui-monospace, "SFMono-Regular", Menlo, Consolas, monospace;
+}
+
+.channel-token-edit-btn {
+  flex-shrink: 0;
+  padding: 4px 10px;
+  font-size: 12px;
+  font-weight: 500;
+  color: #087867;
+  background: #ffffff;
+  border: 1px solid #b8d9d2;
+  border-radius: 6px;
+  cursor: pointer;
+  transition: background 0.15s, border-color 0.15s;
+}
+
+.channel-token-edit-btn:hover {
+  background: #e6f7f3;
+  border-color: #087867;
+}
+
+/* 编辑器内的"取消修改"链接（保留原 token） */
+.channel-token-cancel-btn {
+  display: inline-block;
+  margin-top: 6px;
+  padding: 0;
+  font-size: 12px;
+  color: #64748b;
+  background: transparent;
+  border: none;
+  cursor: pointer;
+  text-decoration: underline;
+  text-underline-offset: 2px;
+}
+
+.channel-token-cancel-btn:hover {
+  color: #087867;
+}
+
+/* 字段级错误提示（token 格式等） */
+.channel-field-error {
+  display: block;
+  margin-top: 4px;
+  font-size: 11px;
+  font-style: normal;
+  color: #b54851;
+  line-height: 1.4;
+}
+
+/* 编辑器保存按钮在 token 无效时置灰（与 :disabled 联动） */
+.channel-page .mcp-editor-footer button.primary:disabled {
+  opacity: 0.5;
+  cursor: not-allowed;
+}
+
+

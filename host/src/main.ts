@@ -46,6 +46,9 @@ import {
   createExtension,
   DEFAULT_EXTENSION_TEMPLATE,
 } from "./extensions-manager.js";
+import { WeixinBotManager } from "./weixinbot/manager.js";
+import { TelegramBotManager } from "./telegrambot/manager.js";
+import type { TelegramConfig } from "./telegrambot/types.js";
 
 // ── 初始化 ───────────────────────────────────────────────────────────────────
 
@@ -53,6 +56,9 @@ const agentDir = process.argv[2] || join(process.env.HOME || process.cwd(), ".no
 mkdirSync(agentDir, { recursive: true });
 
 let pool: SessionPool | null = null;
+let weixinBot: WeixinBotManager | null = null;
+/** telegramBot 懒初始化：首次 telegram_start 时按前端 config 创建。 */
+let telegramBot: TelegramBotManager | null = null;
 let shuttingDown = false;
 
 async function bootstrap(): Promise<void> {
@@ -62,6 +68,7 @@ async function bootstrap(): Promise<void> {
   initExtensionsManagerPaths(agentDir);
   await initBaseResourceLoader(agentDir);
   pool = new SessionPool();
+  weixinBot = new WeixinBotManager(pool, agentDir);
   try {
     const defaultModel = await getDefaultModel();
     if (defaultModel) {
@@ -298,6 +305,91 @@ async function handleCommand(command: RpcCommand): Promise<void> {
         writeResponse(id, true, ext);
         return;
       }
+      // ── 微信机器人 ──
+      case "weixin_start": {
+        if (!weixinBot) throw new Error("host 尚未就绪");
+        await weixinBot.start(command.humanId);
+        writeResponse(id, true);
+        return;
+      }
+      case "weixin_stop": {
+        await weixinBot?.stop();
+        writeResponse(id, true);
+        return;
+      }
+      case "weixin_login": {
+        if (!weixinBot) throw new Error("host 尚未就绪");
+        // 异步触发：扫码流程较长，立即响应成功，二维码/状态通过事件回流
+        writeResponse(id, true);
+        void weixinBot.login().catch((error) => {
+          writeEvent({
+            type: "wechat_status",
+            status: "error",
+            detail: error instanceof Error ? error.message : String(error),
+          });
+        });
+        return;
+      }
+      case "weixin_status": {
+        writeResponse(id, true, weixinBot?.getStatus() ?? { kind: "offline" });
+        return;
+      }
+      case "weixin_switch_human": {
+        if (!weixinBot) throw new Error("host 尚未就绪");
+        await weixinBot.switchHuman(command.humanId);
+        writeResponse(id, true);
+        return;
+      }
+      // ── Telegram 机器人 ──
+      case "telegram_start": {
+        if (!pool) throw new Error("host 尚未就绪");
+        const config = command.config as unknown as TelegramConfig;
+        // 首次创建实例；后续 start 复用并更新 config。
+        // /start 配对后 service 会 emit online 状态（带 allowedUserId），
+        // 前端订阅时发现 allowedUserId 变化主动 saveMessageChannel 持久化。
+        if (!telegramBot) {
+          telegramBot = new TelegramBotManager(pool, config);
+        }
+        const ok = await telegramBot.start(command.humanId, config);
+        writeResponse(id, true, { started: ok });
+        return;
+      }
+      case "telegram_stop": {
+        await telegramBot?.stop();
+        writeResponse(id, true);
+        return;
+      }
+      case "telegram_dispose": {
+        // 彻底释放单例：stop + 置 null，下次 start 会按新 config 重建实例。
+        // 删除渠道 / 切换账号 / 解除配对时调用，避免幽灵 bot 长轮询和跨用户串号。
+        const bot = telegramBot;
+        telegramBot = null;
+        if (bot) await bot.stop().catch(() => {});
+        writeResponse(id, true);
+        return;
+      }
+      case "telegram_status": {
+        writeResponse(id, true, telegramBot?.getStatus() ?? { kind: "offline" });
+        return;
+      }
+      case "telegram_update_config": {
+        // 前端注册配置写回 sink（/start 配对后用），或运行时更新 config
+        if (command.config) {
+          telegramBot?.updateConfig(command.config as unknown as TelegramConfig);
+        }
+        writeResponse(id, true);
+        return;
+      }
+      case "telegram_reset_pair": {
+        // 解除当前 allowedUserId 配对：清空后回到 awaiting_pair，下个 /start 可重新锁定。
+        if (telegramBot) {
+          const reset = telegramBot.resetPairing();
+          writeResponse(id, true, { reset });
+        } else {
+          writeResponse(id, true, { reset: false });
+        }
+        return;
+      }
       case "shutdown": {
         writeResponse(id, true);
         void gracefulShutdown();
@@ -345,6 +437,8 @@ async function gracefulShutdown(): Promise<void> {
   shuttingDown = true;
   stderrLog("[nova-pi-host] shutting down");
   try {
+    await weixinBot?.stop();
+    await telegramBot?.stop();
     await pool?.disposeAll();
     await mcpRegistry.dispose();
   } catch (error) {

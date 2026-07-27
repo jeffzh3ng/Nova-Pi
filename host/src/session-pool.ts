@@ -24,6 +24,12 @@ type SessionEntry = {
   conversationId: string;
   session: AgentSession;
   humanId: string;
+  /**
+   * 后台会话标记。true 表示不写入 conversationToSession（前端主路由找不到），
+   * 也不落 SQLite 历史索引。供微信机器人这类"非用户对话"场景使用。
+   * 后台会话的事件由 backgroundListeners 单独订阅，不走 forwardEvent 的常规转发。
+   */
+  isBackground?: boolean;
 };
 
 export class SessionPool {
@@ -32,6 +38,12 @@ export class SessionPool {
   /** conversationId → sessionId（前端按 conversationId 索引） */
   private conversationToSession = new Map<string, string>();
   private modelSettings: HostModelSettings | null = null;
+  /**
+   * 后台会话事件监听器集合。
+   * 后台会话不写 conversationToSession，常规 forwardEvent 会丢弃它的事件，
+   * 因此单独维护一套监听器，让微信机器人等模块能拿到 message_end 等事件。
+   */
+  private backgroundListeners = new Set<(sessionId: string, event: AgentSessionEvent) => void>();
 
   constructor() {}
 
@@ -116,6 +128,88 @@ export class SessionPool {
     this.conversationToSession.set(params.conversationId, sessionId);
 
     return sessionId;
+  }
+
+  /**
+   * 创建后台会话（如微信机器人专用）。
+   * 与 createSession 区别：
+   *   - 不写 conversationToSession，前端主路由（按 conversationId 找 sessionId）找不到它，
+   *     避免污染用户当前对话视图的事件流。
+   *   - 不落 SQLite 历史索引（host 不发 session_saved 类事件）。
+   *   - 事件由 backgroundListeners 单独订阅，service 模块据此拿到 message_end 回复。
+   * 复用：同一 conversationId 已有同 humanId 的后台会话则复用。
+   */
+  async createBackgroundSession(params: {
+    humanId: string;
+    conversationId: string;
+    mcpServiceId?: string;
+    resumeMessages?: Array<{ role: string; content: string }>;
+  }): Promise<string> {
+    // 后台会话也用 conversationId 做幂等键（service 内部维护），但不写 conversationToSession。
+    for (const entry of this.sessions.values()) {
+      if (entry.isBackground && entry.conversationId === params.conversationId && entry.humanId === params.humanId) {
+        return entry.sessionId;
+      }
+    }
+
+    const human = getDigitalHuman(params.humanId) ?? makeGenericHuman(params.humanId, params.mcpServiceId);
+    const model = this.resolveCurrentModel();
+    const systemPromptWithHistory = this.injectHistory(human.systemPrompt, params.resumeMessages);
+    const sessionResourceLoader = await createSessionResourceLoader(
+      systemPromptWithHistory,
+      human.allowedMcpServices,
+    );
+
+    const sessionId = `bg-${params.conversationId}-${Date.now().toString(36)}`;
+    const sessionManager = SessionManager.inMemory();
+
+    const { session } = await createAgentSession({
+      model,
+      thinkingLevel: "off",
+      modelRuntime: getModelRuntime(),
+      noTools: "builtin",
+      resourceLoader: sessionResourceLoader,
+      sessionManager,
+    });
+
+    session.subscribe((event: AgentSessionEvent) => {
+      try {
+        this.forwardBackgroundEvent(sessionId, event);
+      } catch (error) {
+        console.error(`[session-pool] forwardBackgroundEvent 抛错（sessionId=${sessionId}）：`, error);
+      }
+    });
+
+    const entry: SessionEntry = {
+      sessionId,
+      conversationId: params.conversationId,
+      session,
+      humanId: params.humanId,
+      isBackground: true,
+    };
+    this.sessions.set(sessionId, entry);
+    return sessionId;
+  }
+
+  /** 订阅后台会话事件。返回取消订阅函数。 */
+  subscribeBackgroundEvents(listener: (sessionId: string, event: AgentSessionEvent) => void): () => void {
+    this.backgroundListeners.add(listener);
+    return () => {
+      this.backgroundListeners.delete(listener);
+    };
+  }
+
+  /** 后台会话事件分发：不走 writeEvent（不发给前端），只通知 backgroundListeners。 */
+  private forwardBackgroundEvent(sessionId: string, event: AgentSessionEvent): void {
+    const entry = this.sessions.get(sessionId);
+    if (!entry || !entry.isBackground) return;
+    for (const listener of this.backgroundListeners) {
+      try {
+        listener(sessionId, event);
+      } catch (error) {
+        console.error(`[session-pool] backgroundListener 抛错（sessionId=${sessionId}）：`, error);
+      }
+    }
   }
 
   /** 判断 session 是否存在（供 main.ts 的 prompt 命令预校验，避免响应成功后又发 error）。 */

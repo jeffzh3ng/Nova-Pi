@@ -3,7 +3,6 @@ import type { CSSProperties, PointerEvent as ReactPointerEvent, MouseEvent as Re
 import {
   Activity,
   Archive,
-  Blocks,
   Bot,
   CheckCircle2,
   ChevronDown,
@@ -11,6 +10,7 @@ import {
   ClipboardList,
   DatabaseZap,
   History,
+  MessageCircle,
   Pencil,
   Settings,
   Store,
@@ -159,13 +159,14 @@ export function Sidebar({
         >
           <Store size={22} />
         </button>
+        {/* Pi 扩展入口暂时隐藏（功能保留，后端代码未删除，便于以后恢复） */}
         <button
-          className={`rail-tool ${activeNav === "extensions" ? "active" : ""}`}
-          aria-label="Pi 扩展"
-          data-tooltip="Pi 扩展"
-          onClick={() => onSelectNav("extensions")}
+          className={`rail-tool ${activeNav === "wechat" ? "active" : ""}`}
+          aria-label="消息通道"
+          data-tooltip="消息通道"
+          onClick={() => onSelectNav("wechat")}
         >
-          <Blocks size={22} />
+          <MessageCircle size={22} />
         </button>
         <button
           className={`rail-tool ${activeNav === "settings" ? "active" : ""}`}
