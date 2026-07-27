@@ -1,0 +1,23 @@
+{
+  "name": "nova-pi",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "workspaces": [
+    "app",
+    "host"
+  ],
+  "scripts": {
+    "dev": "npm run dev --workspace app",
+    "build": "npm run build --workspace host && npm run build --workspace app",
+    "host:dev": "npm run dev --workspace host",
+    "host:build": "npm run build --workspace host",
+    "app:dev": "npm run dev --workspace app",
+    "app:build": "npm run build --workspace app",
+    "tauri:dev": "npm run tauri:dev --workspace app",
+    "tauri:build": "npm run tauri:build --workspace app"
+  },
+  "engines": {
+    "node": ">=22.19.0"
+  }
+}

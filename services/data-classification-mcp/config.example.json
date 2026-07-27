@@ -1,0 +1,22 @@
+{
+  "server": {
+    "host": "127.0.0.1",
+    "port": 8766
+  },
+  "llm": {
+    "mode": "direct",
+    "baseUrl": "https://api.openai.com/v1",
+    "apiKeyEnv": "DATA_CLASSIFICATION_LLM_API_KEY",
+    "apiKey": "",
+    "model": "gpt-4.1-mini",
+    "timeoutSeconds": 120,
+    "maxTokens": 32768,
+    "temperature": 0.1
+  },
+  "classification": {
+    "batchSize": 20,
+    "maxConcurrentBatches": 8,
+    "maxSamplesPerAsset": 3,
+    "maxMatrixRows": 0
+  }
+}

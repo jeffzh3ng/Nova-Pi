@@ -1,0 +1,431 @@
+//! 文件操作命令：打开、定位、另存、临时文件、PCAP/OCR 解析（经 sidecar）。
+//!
+//! 与原 Nova 的差异：PCAP/OCR 解析不再走 Rust 内置的 alert_analysis_mcp shim，
+//! 而是通过 send_rpc 把解析请求转发给 Node sidecar（pi 内核），由 host 的 MCP 客户端
+//! 调用 alert-analysis-mcp 服务的 parse_pcap_file / extract_alert_image 工具。
+
+use std::path::{Path, PathBuf};
+
+use serde_json::json;
+use tauri::{AppHandle, Manager};
+
+use crate::rpc::send_rpc_blocking;
+use crate::mcp_settings::load_mcp_connection_settings;
+
+const MAX_UPLOADED_PCAP_BYTES: usize = 25 * 1024 * 1024;
+const MAX_UPLOADED_ALERT_IMAGE_BYTES: usize = 10 * 1024 * 1024;
+const MAX_UPLOADED_RISK_ZIP_BYTES: usize = 200 * 1024 * 1024;
+const ALLOWED_RISK_ZIP_EXTENSIONS: &[&str] = &["zip"];
+const ALLOWED_PCAP_EXTENSIONS: &[&str] = &["pcap", "pcapng", "cap"];
+const ALLOWED_ALERT_IMAGE_EXTENSIONS: &[&str] =
+    &["png", "jpg", "jpeg", "bmp", "webp", "tif", "tiff"];
+const ALLOWED_TEXT_EXPORT_EXTENSIONS: &[&str] = &["md", "txt", "csv", "json", "log", "html"];
+
+const ALERT_ANALYSIS_MCP_SERVICE: &str = "alert-analysis-mcp";
+
+/// 使用系统默认程序打开文件（跨平台）
+#[tauri::command]
+pub fn open_file_path(app: AppHandle, path: String) -> Result<(), String> {
+    let trimmed = path.trim();
+    if trimmed.starts_with(r"\\") || trimmed.starts_with(r"\\?\") {
+        return Err("不允许打开网络路径。".to_string());
+    }
+    let requested = Path::new(trimmed);
+    if !requested.exists() {
+        return Err(format!("文件不存在：{}", requested.display()));
+    }
+    let canonical = requested
+        .canonicalize()
+        .map_err(|e| format!("无法解析文件路径：{e}"))?;
+    let allowed_roots = allowed_open_roots(&app);
+    let is_allowed = allowed_roots.iter().any(|root| canonical.starts_with(root));
+    if !is_allowed {
+        return Err("只能打开本应用生成的导出文件。".to_string());
+    }
+
+    #[cfg(target_os = "windows")]
+    {
+        std::process::Command::new("explorer")
+            .arg(&canonical)
+            .spawn()
+            .map_err(|e| format!("无法打开文件：{e}"))?;
+    }
+    #[cfg(target_os = "macos")]
+    {
+        std::process::Command::new("open")
+            .arg(&canonical)
+            .spawn()
+            .map_err(|e| format!("无法打开文件：{e}"))?;
+    }
+    #[cfg(target_os = "linux")]
+    {
+        std::process::Command::new("xdg-open")
+            .arg(&canonical)
+            .spawn()
+            .map_err(|e| format!("无法打开文件：{e}"))?;
+    }
+    Ok(())
+}
+
+/// 在系统文件管理器中定位文件（仅允许应用临时目录和导出目录中的文件）
+#[tauri::command]
+pub fn show_file_in_folder(app: AppHandle, path: String) -> Result<(), String> {
+    let trimmed = path.trim();
+    if trimmed.starts_with(r"\\") || trimmed.starts_with(r"\\?\") {
+        return Err("不允许定位网络路径。".to_string());
+    }
+    let requested = Path::new(trimmed);
+    let file_exists = requested.is_file();
+    let target = if file_exists {
+        requested.to_path_buf()
+    } else {
+        requested
+            .parent()
+            .filter(|parent| parent.is_dir())
+            .map(Path::to_path_buf)
+            .ok_or_else(|| "文件已被清理，原目录也不存在。".to_string())?
+    };
+    let canonical = target
+        .canonicalize()
+        .map_err(|e| format!("无法解析文件所在目录：{e}"))?;
+    let allowed_roots = allowed_open_roots(&app);
+    let is_allowed = allowed_roots.iter().any(|root| canonical.starts_with(root));
+    if !is_allowed {
+        return Err("只能定位本应用处理或生成的文件。".to_string());
+    }
+
+    #[cfg(target_os = "windows")]
+    {
+        let mut command = std::process::Command::new("explorer");
+        if file_exists {
+            command.arg("/select,");
+        }
+        command
+            .arg(&canonical)
+            .spawn()
+            .map_err(|e| format!("无法打开文件所在目录：{e}"))?;
+    }
+    #[cfg(target_os = "macos")]
+    {
+        let mut command = std::process::Command::new("open");
+        if file_exists {
+            command.arg("-R");
+        }
+        command
+            .arg(&canonical)
+            .spawn()
+            .map_err(|e| format!("无法打开文件所在目录：{e}"))?;
+    }
+    #[cfg(target_os = "linux")]
+    {
+        let directory = if file_exists {
+            canonical
+                .parent()
+                .ok_or_else(|| "无法获取文件所在目录。".to_string())?
+        } else {
+            canonical.as_path()
+        };
+        std::process::Command::new("xdg-open")
+            .arg(directory)
+            .spawn()
+            .map_err(|e| format!("无法打开文件所在目录：{e}"))?;
+    }
+    Ok(())
+}
+
+/// Directories whose files `open_file_path` is allowed to launch.
+fn allowed_open_roots(app: &AppHandle) -> Vec<PathBuf> {
+    let mut roots = Vec::new();
+    let temp = std::env::temp_dir();
+    if let Ok(canonical_temp) = temp.canonicalize() {
+        roots.push(canonical_temp);
+    } else {
+        roots.push(temp);
+    }
+    if let Ok(data_dir) = app.path().app_data_dir() {
+        let exports = data_dir.join("exports");
+        if let Ok(canonical) = exports.canonicalize() {
+            roots.push(canonical);
+        } else {
+            roots.push(exports);
+        }
+    }
+    roots
+}
+
+/// 弹出保存对话框，将源文件另存为用户指定位置
+#[tauri::command]
+pub fn save_file_as(app: AppHandle, source_path: String) -> Result<String, String> {
+    let trimmed = source_path.trim();
+    if trimmed.starts_with(r"\\") || trimmed.starts_with(r"\\?\") {
+        return Err("不允许保存网络路径的文件。".to_string());
+    }
+    let source = Path::new(trimmed);
+    if !source.exists() {
+        return Err(format!("文件不存在：{}", source.display()));
+    }
+    let canonical = source
+        .canonicalize()
+        .map_err(|e| format!("无法解析文件路径：{e}"))?;
+    let allowed_roots = allowed_open_roots(&app);
+    let is_allowed = allowed_roots.iter().any(|root| canonical.starts_with(root));
+    if !is_allowed {
+        return Err("只能另存本应用生成的导出文件。".to_string());
+    }
+    let file_name = canonical
+        .file_name()
+        .and_then(|n| n.to_str())
+        .unwrap_or("result.xlsx");
+    let ext = canonical
+        .extension()
+        .and_then(|e| e.to_str())
+        .unwrap_or("xlsx")
+        .to_ascii_lowercase();
+    let (filter_label, filter_ext): (&str, &str) = match ext.as_str() {
+        "md" => ("Markdown 文件", "md"),
+        "txt" => ("文本文件", "txt"),
+        "xlsx" => ("Excel 文件", "xlsx"),
+        "docx" => ("Word 文件", "docx"),
+        "pdf" => ("PDF 文件", "pdf"),
+        "zip" => ("压缩包", "zip"),
+        _ => ("所有文件", "*"),
+    };
+    let dest = rfd::FileDialog::new()
+        .set_title("另存为")
+        .set_file_name(file_name)
+        .add_filter(filter_label, &[filter_ext])
+        .add_filter("所有文件", &["*"])
+        .save_file()
+        .ok_or_else(|| "已取消".to_string())?;
+    std::fs::copy(&canonical, &dest).map_err(|e| format!("保存失败：{e}"))?;
+    Ok(dest.to_string_lossy().to_string())
+}
+
+/// 将文本内容写入临时文件，返回文件路径（供 save_file_as 使用）
+#[tauri::command]
+pub fn write_temp_text_file(content: String, extension: String) -> Result<String, String> {
+    let extension = sanitize_text_export_extension(&extension)?;
+    let dir = std::env::temp_dir();
+    let ts = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_millis();
+    let file_name = format!("nova-export-{ts}.{extension}");
+    let path = dir.join(&file_name);
+    std::fs::write(&path, &content).map_err(|e| format!("写入临时文件失败：{e}"))?;
+    Ok(path.to_string_lossy().to_string())
+}
+
+fn sanitize_text_export_extension(extension: &str) -> Result<&'static str, String> {
+    let normalized = extension
+        .trim()
+        .trim_start_matches('.')
+        .to_ascii_lowercase();
+    if normalized
+        .chars()
+        .any(|ch| ch == '/' || ch == '\\' || ch == '\0' || ch == '.')
+    {
+        return Err("不支持的文件扩展名。".to_string());
+    }
+    ALLOWED_TEXT_EXPORT_EXTENSIONS
+        .iter()
+        .copied()
+        .find(|candidate| *candidate == normalized)
+        .ok_or_else(|| "不支持的文件扩展名。".to_string())
+}
+
+pub fn upload_temp_dir() -> PathBuf {
+    std::env::temp_dir().join("nova-uploads")
+}
+
+fn sanitize_pcap_extension(extension: &str) -> Result<&'static str, String> {
+    let normalized = extension
+        .trim()
+        .trim_start_matches('.')
+        .to_ascii_lowercase();
+    ALLOWED_PCAP_EXTENSIONS
+        .iter()
+        .copied()
+        .find(|candidate| *candidate == normalized)
+        .ok_or_else(|| "仅支持 pcap、pcapng、cap 文件".to_string())
+}
+
+fn sanitize_alert_image_extension(extension: &str) -> Result<&'static str, String> {
+    let normalized = extension
+        .trim()
+        .trim_start_matches('.')
+        .to_ascii_lowercase();
+    ALLOWED_ALERT_IMAGE_EXTENSIONS
+        .iter()
+        .copied()
+        .find(|candidate| *candidate == normalized)
+        .ok_or_else(|| "仅支持 png、jpg、jpeg、bmp、webp、tif、tiff 告警截图".to_string())
+}
+
+fn sanitize_risk_zip_extension(extension: &str) -> Result<&'static str, String> {
+    let normalized = extension
+        .trim()
+        .trim_start_matches('.')
+        .to_ascii_lowercase();
+    ALLOWED_RISK_ZIP_EXTENSIONS
+        .iter()
+        .copied()
+        .find(|candidate| *candidate == normalized)
+        .ok_or_else(|| "仅支持 zip 压缩包".to_string())
+}
+
+fn sanitize_uploaded_blob_extension(extension: &str) -> Result<(&'static str, usize), String> {
+    match sanitize_pcap_extension(extension) {
+        Ok(extension) => Ok((extension, MAX_UPLOADED_PCAP_BYTES)),
+        Err(_) => match sanitize_alert_image_extension(extension) {
+            Ok(extension) => Ok((extension, MAX_UPLOADED_ALERT_IMAGE_BYTES)),
+            Err(_) => sanitize_risk_zip_extension(extension)
+                .map(|extension| (extension, MAX_UPLOADED_RISK_ZIP_BYTES)),
+        },
+    }
+}
+
+fn validate_uploaded_pcap_path(path: &str) -> Result<PathBuf, String> {
+    let path = Path::new(path);
+    let upload_dir = upload_temp_dir();
+    std::fs::create_dir_all(&upload_dir).map_err(|e| format!("创建临时目录失败：{e}"))?;
+    let upload_dir = upload_dir
+        .canonicalize()
+        .map_err(|e| format!("读取临时目录失败：{e}"))?;
+    let canonical = path
+        .canonicalize()
+        .map_err(|e| format!("读取上传文件失败：{e}"))?;
+    if !canonical.starts_with(&upload_dir) {
+        return Err("只能解析本应用上传的临时 PCAP 文件".to_string());
+    }
+    let extension = canonical
+        .extension()
+        .and_then(|value| value.to_str())
+        .unwrap_or_default();
+    sanitize_pcap_extension(extension)?;
+    Ok(canonical)
+}
+
+fn validate_uploaded_alert_image_path(path: &str) -> Result<PathBuf, String> {
+    let path = Path::new(path);
+    let upload_dir = upload_temp_dir();
+    std::fs::create_dir_all(&upload_dir).map_err(|e| format!("创建临时目录失败：{e}"))?;
+    let upload_dir = upload_dir
+        .canonicalize()
+        .map_err(|e| format!("读取临时目录失败：{e}"))?;
+    let canonical = path
+        .canonicalize()
+        .map_err(|e| format!("读取上传图片失败：{e}"))?;
+    if !canonical.starts_with(&upload_dir) {
+        return Err("只能识别本应用上传的临时告警截图".to_string());
+    }
+    let extension = canonical
+        .extension()
+        .and_then(|value| value.to_str())
+        .unwrap_or_default();
+    sanitize_alert_image_extension(extension)?;
+    Ok(canonical)
+}
+
+/// 将 base64 编码的文件数据写入临时文件，返回文件路径（供 PCAP 解析等使用）
+#[tauri::command]
+pub fn write_uploaded_blob(base64_data: String, extension: String) -> Result<String, String> {
+    use base64::Engine as _;
+    let (extension, max_bytes) = sanitize_uploaded_blob_extension(&extension)?;
+    if base64_data.len() > max_bytes * 2 {
+        return Err(format!(
+            "上传文件过大，当前限制为 {} MB",
+            max_bytes / 1024 / 1024
+        ));
+    }
+    let bytes = base64::engine::general_purpose::STANDARD
+        .decode(&base64_data)
+        .map_err(|e| format!("base64 解码失败：{e}"))?;
+    if bytes.len() > max_bytes {
+        return Err(format!(
+            "上传文件过大，当前限制为 {} MB",
+            max_bytes / 1024 / 1024
+        ));
+    }
+    let dir = upload_temp_dir();
+    std::fs::create_dir_all(&dir).map_err(|e| format!("创建临时目录失败：{e}"))?;
+    let ts = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_nanos();
+    let file_name = format!("nova-upload-{ts}.{extension}");
+    let path = dir.join(&file_name);
+    std::fs::write(&path, &bytes).map_err(|e| format!("写入临时文件失败：{e}"))?;
+    Ok(path.to_string_lossy().to_string())
+}
+
+/// 解析 PCAP/PCAPNG 文件：经 sidecar 调用 alert-analysis-mcp 的 parse_pcap_file 工具。
+#[tauri::command]
+pub async fn parse_pcap_file_cmd(app: AppHandle, path: String) -> Result<String, String> {
+    let canonical = validate_uploaded_pcap_path(&path)?;
+    let normalized = strip_extended_path_prefix(canonical.to_string_lossy().as_ref());
+    let result = call_alert_mcp_tool(&app, "parse_pcap_file", &json!({ "path": normalized }), 600).await;
+    let _ = std::fs::remove_file(&canonical);
+    result.and_then(|value| extract_text_result(value, "PCAP 解析"))
+}
+
+/// 识别告警截图：经 sidecar 调用 alert-analysis-mcp 的 extract_alert_image 工具。
+#[tauri::command]
+pub async fn extract_alert_image_text_cmd(app: AppHandle, path: String) -> Result<String, String> {
+    let canonical = validate_uploaded_alert_image_path(&path)?;
+    let normalized = strip_extended_path_prefix(canonical.to_string_lossy().as_ref());
+    let result = call_alert_mcp_tool(&app, "extract_alert_image", &json!({ "path": normalized }), 600).await;
+    let _ = std::fs::remove_file(&canonical);
+    result.and_then(|value| extract_text_result(value, "告警截图识别"))
+}
+
+/// 通过 sidecar 调用一个 alert-analysis MCP 工具（host 内的 MCP 客户端转发）。
+async fn call_alert_mcp_tool(
+    app: &AppHandle,
+    tool_name: &str,
+    args: &serde_json::Value,
+    timeout_secs: u64,
+) -> Result<serde_json::Value, String> {
+    let settings = load_mcp_connection_settings(app, ALERT_ANALYSIS_MCP_SERVICE)?;
+    if !settings.enabled {
+        return Err("威胁研判 MCP 服务尚未启用。请在数字员工管理中配置并启用。".to_string());
+    }
+    let command = json!({
+        "type": "mcp_call",
+        "serviceId": ALERT_ANALYSIS_MCP_SERVICE,
+        "toolName": tool_name,
+        "args": args,
+        "timeoutSecs": timeout_secs,
+    });
+    let response = send_rpc_blocking(app, command).await?;
+    // response 是 host 返回的 MCP callTool 原始结果（可能含 content/structuredContent）
+    Ok(response)
+}
+
+fn strip_extended_path_prefix(path: &str) -> String {
+    path.trim_start_matches(r"\\?\").to_string()
+}
+
+fn extract_text_result(value: serde_json::Value, operation: &str) -> Result<String, String> {
+    // 兼容 MCP 的 text-content 数组和 structuredContent.text 两种形态
+    if let Some(text) = value.get("text").and_then(|v| v.as_str()) {
+        return Ok(text.to_string());
+    }
+    if let Some(content) = value.get("content").and_then(|v| v.as_array()) {
+        for block in content {
+            if block.get("type").and_then(|v| v.as_str()) == Some("text") {
+                if let Some(text) = block.get("text").and_then(|v| v.as_str()) {
+                    return Ok(text.to_string());
+                }
+            }
+        }
+    }
+    if let Some(text) = value
+        .get("structuredContent")
+        .and_then(|v| v.get("text"))
+        .and_then(|v| v.as_str())
+    {
+        return Ok(text.to_string());
+    }
+    Err(format!("威胁研判 MCP 返回的{operation}结果中没有文本内容。"))
+}

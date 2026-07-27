@@ -1,0 +1,69 @@
+{
+  "serviceId": "data-classification-mcp",
+  "name": "Data Classification MCP",
+  "version": "0.2.0",
+  "transport": "stdio-or-streamable-http",
+  "status": "external-config-required",
+  "description": "Data asset parsing, classification matrix handling, and classification result normalization.",
+  "llmPolicy": {
+    "mode": "service-managed",
+    "description": "The independent MCP service reads its own configurable OpenAI-compatible model settings and can be used by Nova or other MCP clients."
+  },
+  "tools": [
+    {
+      "name": "classify_data_assets",
+      "description": "Classify data assets with a built-in or custom classification matrix.",
+      "inputSchema": {
+        "type": "object",
+        "required": ["sourceText"],
+        "properties": {
+          "sourceText": {
+            "type": "string"
+          },
+          "customerIndustry": {
+            "type": "string"
+          },
+          "businessScenario": {
+            "type": "string"
+          },
+          "informationSystem": {
+            "type": "object"
+          },
+          "matrixSelection": {
+            "type": "object"
+          },
+          "policyBasis": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            }
+          }
+        }
+      },
+      "outputSchema": {
+        "type": "object",
+        "required": ["overview", "assetResults", "summary", "processingPlan", "riskNotes"],
+        "properties": {
+          "module": {
+            "type": "string"
+          },
+          "model": {
+            "type": "string"
+          },
+          "usedModel": {
+            "type": "boolean"
+          },
+          "overview": {
+            "type": "string"
+          },
+          "assetResults": {
+            "type": "array"
+          },
+          "summary": {
+            "type": "object"
+          }
+        }
+      }
+    }
+  ]
+}

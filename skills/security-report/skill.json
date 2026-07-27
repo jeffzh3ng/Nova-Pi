@@ -1,0 +1,16 @@
+{
+  "id": "security-report",
+  "name": "安全报告生成",
+  "description": "根据告警、日志、处置过程、分类结果或人工说明整理安全交付报告。",
+  "version": "0.1.0",
+  "keywords": ["报告", "安全报告", "交付", "整改", "处置", "总结", "复盘"],
+  "triggers": ["生成报告", "整理成报告", "输出安全报告", "写一份报告", "形成交付文档"],
+  "entry": "SKILL.md",
+  "runtime": "instruction",
+  "enabled": true,
+  "permissions": {
+    "network": false,
+    "filesystem": "none",
+    "scripts": false
+  }
+}

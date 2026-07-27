@@ -1,0 +1,55 @@
+# Dependencies
+node_modules/
+
+# Build output
+dist/
+build/
+app/dist/
+host/dist/
+src-tauri/target/
+app/src-tauri/target/
+
+# Tauri generated
+src-tauri/gen/
+app/src-tauri/gen/
+
+# Local config / secrets
+config.local.json
+*.local
+.env
+.env.*
+.cacert-merged.pem
+
+# SQLite database (runtime-generated)
+*.sqlite3
+
+# pi runtime local credentials/config (generated at runtime, may contain API keys)
+.pi/
+auth.json
+
+# Logs
+*.log
+logs/
+classification_runtime.log
+
+# OS files
+.DS_Store
+Thumbs.db
+
+# IDE
+.vscode/
+.idea/
+*.swp
+
+# Python
+__pycache__/
+*.pyc
+.venv/
+venv/
+
+# Upload temp
+nova-uploads/
+nova-skill-import/
+
+# Lock files for services (keep root lockfile)
+services/**/package-lock.json

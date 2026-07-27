@@ -1,0 +1,132 @@
+{
+  "serviceId": "alert-analysis-mcp",
+  "name": "Threat Analysis MCP",
+  "version": "0.6.0",
+  "transport": "mcp-python-stdio-http",
+  "status": "ready",
+  "description": "Security alert triage via DeepSeek; alert screenshot recognition via Zhipu OCR tool service /files/ocr (separate GLM key, Tesseract fallback); the OCR text is fed back into DeepSeek for analysis. Also includes packet-capture summarization and attack IP threat-intelligence.",
+  "llmPolicy": {
+    "mode": "configurable-or-host-managed",
+    "description": "The service can call a configured OpenAI-compatible model provider when running as an independent MCP server. Nova can still use host-managed LLM by calling the legacy stdio bridge."
+  },
+  "tools": [
+    {
+      "name": "analyze_security_alert",
+      "description": "Analyze security alerts, logs, incident descriptions, or parsed PCAP text and return triage findings, impact, actions, and follow-up questions.",
+      "inputSchema": {
+        "type": "object",
+        "required": ["alertText"],
+        "properties": {
+          "alertText": { "type": "string" },
+          "sourceSystem": { "type": "string" },
+          "sourceDevice": { "type": "string" },
+          "occurredAt": { "type": "string" },
+          "sourceIp": { "type": "string" },
+          "destinationIp": { "type": "string" },
+          "asset": { "type": "string" },
+          "businessContext": { "type": "string" },
+          "currentStatus": { "type": "string" },
+          "analysisMode": { "type": "string" },
+          "pcapData": { "type": "string" },
+          "pcapFilePath": { "type": "string" },
+          "conversationContext": { "type": "string" }
+        }
+      },
+      "outputSchema": {
+        "type": "object",
+        "required": ["module", "model", "usedModel", "overview", "severity", "confidence", "findings", "recommendedActions", "questions", "processingPlan", "riskNotes", "generatedAt"],
+        "properties": {
+          "module": { "type": "string" },
+          "model": { "type": "string" },
+          "usedModel": { "type": "boolean" },
+          "overview": { "type": "string" },
+          "severity": { "type": "string" },
+          "confidence": { "type": "string" },
+          "findings": { "type": "array" },
+          "recommendedActions": { "type": "array" },
+          "questions": { "type": "array" },
+          "processingPlan": { "type": "array" },
+          "riskNotes": { "type": "array" },
+          "generatedAt": { "type": "string" }
+        }
+      }
+    },
+    {
+      "name": "analyze_attack_ip",
+      "description": "Query attack IP reputation and threat labels. ThreatBook is supported through THREATBOOK_API_KEY or config.",
+      "inputSchema": {
+        "type": "object",
+        "required": ["ipList"],
+        "properties": {
+          "ipList": {
+            "oneOf": [
+              { "type": "string" },
+              { "type": "array", "items": { "type": "string" } }
+            ]
+          },
+          "provider": { "type": "string" },
+          "outputCsv": { "type": "string" }
+        }
+      },
+      "outputSchema": {
+        "type": "object",
+        "required": ["module", "overview", "severity", "confidence", "results", "recommendedActions", "riskNotes", "generatedAt"],
+        "properties": {
+          "module": { "type": "string" },
+          "overview": { "type": "string" },
+          "severity": { "type": "string" },
+          "confidence": { "type": "string" },
+          "results": { "type": "array" },
+          "recommendedActions": { "type": "array" },
+          "riskNotes": { "type": "array" }
+        }
+      }
+    },
+    {
+      "name": "parse_pcap_file",
+      "description": "Parse a local PCAP/PCAPNG/CAP file with configured tshark/capinfos/tcpdump paths and return text suitable for alert analysis.",
+      "inputSchema": {
+        "type": "object",
+        "required": ["path"],
+        "properties": {
+          "path": { "type": "string" },
+          "maxPackets": { "type": "integer" }
+        }
+      },
+      "outputSchema": {
+        "type": "object",
+        "required": ["module", "text", "tool", "generatedAt"],
+        "properties": {
+          "module": { "type": "string" },
+          "text": { "type": "string" },
+          "tool": { "type": "string" },
+          "generatedAt": { "type": "string" }
+        }
+      }
+    },
+    {
+      "name": "extract_alert_image",
+      "description": "Extract alert text from a local alert screenshot through the configured OCR engine. The returned text is intended to be passed into analyze_security_alert.",
+      "inputSchema": {
+        "type": "object",
+        "required": ["path"],
+        "properties": {
+          "path": { "type": "string" },
+          "language": { "type": "string" },
+          "pageSegmentationMode": { "type": "integer" }
+        }
+      },
+      "outputSchema": {
+        "type": "object",
+        "required": ["module", "text", "tool", "generatedAt"],
+        "properties": {
+          "module": { "type": "string" },
+          "text": { "type": "string" },
+          "tool": { "type": "string" },
+          "language": { "type": "string" },
+          "generatedAt": { "type": "string" }
+        }
+      }
+    }
+  ]
+}

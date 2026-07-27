@@ -1,0 +1,37 @@
+:root {
+  color-scheme: light;
+  --color-page: #f7f9fb;
+  --color-surface: #ffffff;
+  --color-panel: #f1f4f7;
+  --color-soft: #edf6f4;
+  --color-line: #dde5ea;
+  --color-line-strong: #aab8c2;
+  --color-ink: #121826;
+  --color-text: #4b5563;
+  --color-muted: #8a94a6;
+  --color-accent: #247ba0;
+  --color-accent-weak: #e8f4f7;
+  --color-blue: #1f6f8b;
+  --color-cyan: #2a9d8f;
+  --color-success: #2a9d8f;
+  --color-notice: #d9903d;
+  /* Digital human accent palette */
+  --color-emerald: #16a34a;
+  --color-emerald-soft: #ecfdf5;
+  --color-indigo: #6366f1;
+  --color-indigo-soft: #eef2ff;
+  --color-crimson: #dc2626;
+  --color-crimson-soft: #fef2f2;
+  --color-teal: #0d9488;
+  --color-teal-soft: #f0fdfa;
+  --color-amber: #d97706;
+  --color-amber-soft: #fffbeb;
+  --shadow-soft: 0 18px 46px rgba(18, 24, 38, 0.11);
+  --shadow-card: 0 12px 24px rgba(18, 24, 38, 0.08);
+  --radius-card: 8px;
+  --radius-pill: 999px;
+  --sidebar-rail: 68px;
+  --sidebar-panel: 226px;
+  --content-max: 710px;
+  --font-sans: Inter, "Microsoft YaHei UI", "Microsoft YaHei", "PingFang SC", "Segoe UI", Arial, sans-serif;
+}
