@@ -146,17 +146,16 @@ export function ComputerAgentSettingsPanel() {
   };
 
   if (!draft) {
-    return <section className="computer-agent-settings"><p className="mcp-status-line">{status}</p></section>;
+    return <section className="settings-section computer-agent-settings"><p className="mcp-status-line">{status}</p></section>;
   }
 
   const conversationsById = new Map(snapshot.conversations.map((item) => [item.id, item]));
 
   return (
-    <section className="computer-agent-settings" aria-label="Nova 智能员工设置">
-      <header className="settings-header computer-agent-header">
+    <section className="settings-section computer-agent-settings" aria-label="Nova 智能员工设置">
+      <header className="settings-section-header computer-agent-header">
         <div>
-          <span>内置数字员工</span>
-          <h1>Nova 智能员工</h1>
+          <h2>Nova 智能员工</h2>
           <p className="mcp-status-line" title={status}>{status}</p>
         </div>
         <span className={`computer-agent-state ${draft.enabled ? "is-enabled" : ""}`}>
