@@ -146,7 +146,8 @@ pub async fn call_llm(
     let settings = load_default_model_settings(app)?;
     ensure_model_is_callable(&settings)?;
     let (content, usage) = chat_completion(&settings, messages, json_response).await?;
-    save_token_usage(app, &settings.model, agent_name, &usage);
+    // call_llm 路径无 host callId（host 不经手），传 None 不参与去重。
+    save_token_usage(app, &settings.model, agent_name, &usage, None);
     Ok((content, usage))
 }
 
@@ -333,18 +334,38 @@ fn init_token_usage_db(connection: &Connection) -> Result<(), String> {
             )
             .map_err(|error| format!("迁移 Token 用量表失败：{error}"))?;
     }
+    // call_id：host 端为每个 usage 事件生成的全局唯一键（sessionId#序号）。
+    // 旧数据没有 call_id（NULL），不参与去重；新事件非空时按 UNIQUE 约束去重，
+    // 避免 host 重启/事件重放导致 list_token_usage 重复累加。
+    if !table_has_column(connection, "token_usage", "call_id")? {
+        connection
+            .execute_batch(
+                "ALTER TABLE token_usage ADD COLUMN call_id TEXT; CREATE UNIQUE INDEX IF NOT EXISTS idx_token_usage_call_id ON token_usage(call_id) WHERE call_id IS NOT NULL;",
+            )
+            .map_err(|error| format!("迁移 Token 用量表（call_id）失败：{error}"))?;
+    }
     Ok(())
 }
 
-pub fn save_token_usage(app: &AppHandle, model: &str, agent_name: &str, usage: &Usage) {
+/// 保存一条 token 用量记录。
+///
+/// `call_id` 为 host 生成的全局唯一键（sessionId#序号）。非空时按 UNIQUE 约束去重：
+/// 同一 call_id 第二次写入会被 SQLite 拒绝（约束冲突），这里视为"已记录"静默成功，
+/// 而不是错误——这是幂等的预期行为。
+pub fn save_token_usage(
+    app: &AppHandle,
+    model: &str,
+    agent_name: &str,
+    usage: &Usage,
+    call_id: Option<&str>,
+) {
     let result: Result<(), String> = app_database::with_database(
         app,
         initialize_model_db,
         |connection, _| {
             init_token_usage_db(connection)?;
-            connection
-            .execute(
-                "INSERT INTO token_usage (model, agent_name, prompt_tokens, completion_tokens, total_tokens, created_at) VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
+            match connection.execute(
+                "INSERT INTO token_usage (model, agent_name, prompt_tokens, completion_tokens, total_tokens, created_at, call_id) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
                 params![
                     model,
                     agent_name,
@@ -352,10 +373,20 @@ pub fn save_token_usage(app: &AppHandle, model: &str, agent_name: &str, usage: &
                     usage.completion_tokens,
                     usage.total_tokens,
                     chrono::Local::now().format("%Y-%m-%d %H:%M:%S").to_string(),
+                    call_id,
                 ],
-            )
-            .map(|_| ())
-            .map_err(|error| format!("保存 Token 用量失败：{error}"))
+            ) {
+                Ok(_) => Ok(()),
+                // SQLITE_CONSTRAINT_UNIQUE(2067)：call_id 已存在，幂等成功，不算错误。
+                Err(e) => {
+                    if let Some(db_err) = e.sqlite_error() {
+                        if db_err.extended_code == 2067 {
+                            return Ok(());
+                        }
+                    }
+                    Err(format!("保存 Token 用量失败：{e}"))
+                }
+            }
         },
     );
     if let Err(error) = result {

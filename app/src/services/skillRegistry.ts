@@ -49,43 +49,27 @@ const normalizeCatalog = (catalog: SkillCatalog): SkillCatalog => ({
   errors: Array.isArray(catalog.errors) ? catalog.errors : [],
 });
 
-// In-memory catalog cache. The agent runtime calls listSkills() on every
-// user turn; without a cache each message triggers a full disk scan on the
-// Rust side. Mutations below invalidate it so the Skill Center always shows
-// fresh data after install/toggle/delete.
+// In-memory catalog cache. listSkillCatalog() backs the Skill Center, whose
+// "刷新" button re-reads from disk (manifest edits, files dropped into the
+// dir, etc.); mutations below invalidate the cache so the Skill Center always
+// shows fresh data after install/toggle/delete.
 let catalogCache: SkillCatalog | null = null;
-let skillsCache: SkillManifest[] | null = null;
 
 const invalidateCatalogCache = () => {
   catalogCache = null;
-  skillsCache = null;
 };
 
 export async function listSkillCatalog(): Promise<SkillCatalog> {
   // listSkillCatalog backs the Skill Center, whose "刷新" button is meant to
   // re-read from disk (manifest edits, files dropped into the dir, etc.), so
-  // it must bypass the cache. It refreshes the cache as a side effect so the
-  // per-turn listSkills() hot path also sees the latest data.
+  // it must bypass the cache. It refreshes the cache as a side effect.
   try {
     const catalog = await invoke<SkillCatalog>("list_skill_catalog");
     catalogCache = normalizeCatalog(catalog);
-    skillsCache = catalogCache.skills;
     return catalogCache;
   } catch (error) {
     console.warn("Failed to list skill catalog", error);
     return { skills: [], errors: [] };
-  }
-}
-
-export async function listSkills(): Promise<SkillManifest[]> {
-  if (skillsCache) return skillsCache;
-  try {
-    const skills = await invoke<SkillManifest[]>("list_skills");
-    skillsCache = skills.map(normalizeManifest);
-    return skillsCache;
-  } catch (error) {
-    console.warn("Failed to list skills", error);
-    return [];
   }
 }
 

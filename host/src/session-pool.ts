@@ -5,7 +5,7 @@
  * + 该员工的 system prompt）。pi 的事件流订阅后转发为 RPC event，由 Rust emit 给前端。
  */
 
-import { readFileSync } from "node:fs";
+import { readFile } from "node:fs/promises";
 import {
   AgentSession,
   SessionManager,
@@ -38,6 +38,11 @@ export class SessionPool {
   /** conversationId → sessionId（前端按 conversationId 索引） */
   private conversationToSession = new Map<string, string>();
   private modelSettings: HostModelSettings | null = null;
+  /**
+   * usage 事件的自增序号，与 sessionId 组合形成全局唯一 callId（幂等键）。
+   * Rust 端按 callId 去重落库，防止 host 重启/事件重放导致 token 统计重复累加。
+   */
+  private usageCallCounter = 0;
   /**
    * 后台会话事件监听器集合。
    * 后台会话不写 conversationToSession，常规 forwardEvent 会丢弃它的事件，
@@ -227,15 +232,21 @@ export class SessionPool {
     if (!entry) throw new Error(`会话不存在：${params.sessionId}`);
 
     // 附件上下文拼到消息前（PCAP/OCR 哨兵格式，与原 Nova 一致）
-    const message = this.injectAttachments(params.message, params.attachments);
+    const message = await this.injectAttachments(params.message, params.attachments);
     await entry.session.prompt(message);
   }
 
-  /** 中止当前会话的 agent loop。 */
+  /**
+   * 中止当前会话的 agent loop。
+   *
+   * 不再静默吞错：abort 失败（pi 内部状态机错误等）会向上抛出，由 main.ts 的 abort
+   * case 接住并 emit error 事件。否则前端拿到 success:true 以为已中止，UI 退出 busy，
+   * 但 agent loop 实际仍在跑，只能等 5min 安全超时兜底——状态机不一致。
+   */
   async abort(sessionId: string): Promise<void> {
     const entry = this.sessions.get(sessionId);
-    if (!entry) return;
-    await entry.session.abort().catch(() => {});
+    if (!entry) return; // 会话不存在视为已中止，不算错误。
+    await entry.session.abort();
   }
 
   /** 销毁会话（切换/删除 conversation 时调用）。 */
@@ -289,7 +300,7 @@ export class SessionPool {
     return `${basePrompt}\n\n--- 以下是之前的历史对话，作为上下文参考（请基于此继续，不要重复已回答的内容）---\n${turns.join("\n")}`;
   }
 
-  private injectAttachments(message: string, attachments?: ConversationAttachments): string {
+  private async injectAttachments(message: string, attachments?: ConversationAttachments): Promise<string> {
     if (!attachments) return message;
     const parts: string[] = [];
     if (attachments.pcapSections?.length) {
@@ -309,19 +320,23 @@ export class SessionPool {
     if (attachments.files?.length) {
       // 读取每个文件的临时盘路径内容，拼成哨兵段注入。单个文件截断到 50k 字符
       // 避免超大文件撑爆 prompt；读取失败时附错误说明而非整段中断。
+      // 用异步 readFile 而非 readFileSync：同步读会阻塞 Node 事件循环，大文件读取
+      // 期间会卡住整个 sidecar（包括其他 session 的 token 流转发）。
       const FILE_CHAR_LIMIT = 50_000;
-      const fileSections = attachments.files.map((file) => {
-        try {
-          const raw = readFileSync(file.path, { encoding: "utf-8" });
-          const clipped = raw.length > FILE_CHAR_LIMIT
-            ? `${raw.slice(0, FILE_CHAR_LIMIT)}\n...(已截断，原始 ${raw.length} 字符)`
-            : raw;
-          return `=== 附件文件：${file.name} ===\n${clipped}`;
-        } catch (error) {
-          const reason = error instanceof Error ? error.message : String(error);
-          return `=== 附件文件：${file.name}（读取失败）===\n${reason}`;
-        }
-      });
+      const fileSections = await Promise.all(
+        attachments.files.map(async (file) => {
+          try {
+            const raw = await readFile(file.path, { encoding: "utf-8" });
+            const clipped = raw.length > FILE_CHAR_LIMIT
+              ? `${raw.slice(0, FILE_CHAR_LIMIT)}\n...(已截断，原始 ${raw.length} 字符)`
+              : raw;
+            return `=== 附件文件：${file.name} ===\n${clipped}`;
+          } catch (error) {
+            const reason = error instanceof Error ? error.message : String(error);
+            return `=== 附件文件：${file.name}（读取失败）===\n${reason}`;
+          }
+        }),
+      );
       parts.push(fileSections.join("\n\n"));
     }
     if (parts.length === 0) return message;
@@ -364,9 +379,15 @@ export class SessionPool {
     const entry = this.sessions.get(sessionId);
     const settings = entry ? this.modelSettings : null;
     model = settings?.model ?? model;
+    // 附带 callId 作为幂等键：host 重启或事件重放时，Rust 端按 callId 去重，
+    // 避免 list_token_usage 重复累加。sessionId 本身每次 createSession 都新生成
+    // （pi-{conversationId}-{timestamp}），但同一 session 的多次 agent_end 仍会
+    // 产生多个 usage 事件，所以用 sessionId + 自增序号组成全局唯一 callId。
+    this.usageCallCounter += 1;
     writeEvent({
       type: "usage",
       sessionId,
+      callId: `${sessionId}#${this.usageCallCounter}`,
       promptTokens,
       completionTokens,
       totalTokens,

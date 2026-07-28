@@ -113,7 +113,7 @@ export type RpcEvent =
   | { type: "tool_execution_update"; sessionId: string; toolCallId: string; toolName: string; partialResult?: unknown }
   | { type: "tool_execution_end"; sessionId: string; toolCallId: string; toolName: string; result?: unknown; isError?: boolean }
   // Nova-PI 扩展事件
-  | { type: "usage"; sessionId?: string; promptTokens: number; completionTokens: number; totalTokens: number; cacheRead?: number; cacheWrite?: number; model: string; agentName?: string }
+  | { type: "usage"; sessionId?: string; callId?: string; promptTokens: number; completionTokens: number; totalTokens: number; cacheRead?: number; cacheWrite?: number; model: string; agentName?: string }
   | { type: "risk_job_update"; sessionId: string; job: unknown }
   | { type: "session_saved"; conversationId: string; title?: string }
   // 微信机器人事件（前端 MessageChannelsPanel 微信卡片订阅）

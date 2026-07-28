@@ -8,8 +8,6 @@ import { DigitalHumanPicker } from "./components/DigitalHumanPicker";
 import { Hero } from "./components/Hero";
 import { McpSquarePanel } from "./components/McpSquarePanel";
 import { MessageChannelsPanel } from "./components/MessageChannelsPanel";
-// Pi 扩展入口暂时隐藏（组件保留，便于以后恢复）
-// import { ExtensionsPanel } from "./components/ExtensionsPanel";
 import { SettingsPanel } from "./components/SettingsPanel";
 import { Sidebar } from "./components/Sidebar";
 import { SkillCenterPanel } from "./components/SkillCenterPanel";
@@ -2780,6 +2778,16 @@ export default function App() {
     setPrompt(value);
   };
 
+  // 侧栏拖拽 resize：把 window 级 pointer 监听器的清理函数存到 ref，
+  // 组件卸载时统一移除，避免拖拽中路由切换/StrictMode 双调导致监听器残留。
+  const sidebarResizeCleanupRef = useRef<(() => void) | null>(null);
+  useEffect(() => {
+    return () => {
+      sidebarResizeCleanupRef.current?.();
+      sidebarResizeCleanupRef.current = null;
+    };
+  }, []);
+
   const handleSidebarResizeStart = (event: ReactPointerEvent<HTMLButtonElement>) => {
     event.preventDefault();
     const startX = event.clientX;
@@ -2793,11 +2801,19 @@ export default function App() {
       document.body.classList.remove("is-resizing-sidebar");
       window.removeEventListener("pointermove", handlePointerMove);
       window.removeEventListener("pointerup", handlePointerUp);
+      sidebarResizeCleanupRef.current = null;
     };
 
+    // 启动新拖拽前，先清理上一次未正常结束的监听器（防御性）。
+    sidebarResizeCleanupRef.current?.();
     document.body.classList.add("is-resizing-sidebar");
     window.addEventListener("pointermove", handlePointerMove);
     window.addEventListener("pointerup", handlePointerUp, { once: true });
+    sidebarResizeCleanupRef.current = () => {
+      document.body.classList.remove("is-resizing-sidebar");
+      window.removeEventListener("pointermove", handlePointerMove);
+      window.removeEventListener("pointerup", handlePointerUp);
+    };
   };
 
   const handleDeleteTask = (task: RecentTask) => setModal({ type: "delete", task });

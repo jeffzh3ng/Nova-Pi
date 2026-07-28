@@ -157,13 +157,19 @@ fn persist_usage_event(app: &AppHandle, event: &Value) {
     if prompt_tokens == 0 && completion_tokens == 0 && total_tokens == 0 {
         return;
     }
+    // callId 幂等键：host 为每个 usage 事件生成（sessionId#序号）。
+    // 同一事件重放时 SQLite UNIQUE 约束会拒绝重复插入，避免 token 统计虚高。
+    let call_id = event
+        .get("callId")
+        .and_then(|v| v.as_str())
+        .map(|s| s.to_string());
     let usage = crate::llm_settings::Usage {
         prompt_tokens,
         completion_tokens,
         total_tokens,
     };
     // 写库失败不应影响事件流，仅记录日志。
-    crate::llm_settings::save_token_usage(app, &model, &agent_name, &usage);
+    crate::llm_settings::save_token_usage(app, &model, &agent_name, &usage, call_id.as_deref());
 }
 
 /// 让 lib.rs 在初始化时调用（占位，目前无需额外初始化）。

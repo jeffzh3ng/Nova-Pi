@@ -159,7 +159,6 @@ export function Sidebar({
         >
           <Store size={22} />
         </button>
-        {/* Pi 扩展入口暂时隐藏（功能保留，后端代码未删除，便于以后恢复） */}
         <button
           className={`rail-tool ${activeNav === "wechat" ? "active" : ""}`}
           aria-label="消息通道"

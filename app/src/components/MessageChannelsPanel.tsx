@@ -540,6 +540,7 @@ export function MessageChannelsPanel() {
 
               <footer className="mcp-card-footer">
                 <div className="mcp-card-actions">
+                  {/* 主操作：启动 / 停止（带文字，视觉重心） */}
                   {implemented && rt.phase === "stopped" ? (
                     <button
                       className="mcp-edit-button channel-btn-primary"
@@ -554,11 +555,6 @@ export function MessageChannelsPanel() {
                       <Power size={13} /> 启动
                     </button>
                   ) : null}
-                  {isWechat && rt.phase === "started" && rt.status !== "online" && rt.status !== "awaiting_scan" ? (
-                    <button onClick={handleWeixinLogin} disabled={busy}>
-                      <QrCode size={13} /> 扫码登录
-                    </button>
-                  ) : null}
                   {implemented && rt.phase === "started" ? (
                     <button
                       className="channel-btn-stop"
@@ -568,28 +564,59 @@ export function MessageChannelsPanel() {
                       <LogOut size={13} /> 停止
                     </button>
                   ) : null}
-                  {/* H1：解除 Telegram 配对（仅在线 + 已配对时显示） */}
-                  {isTelegram && rt.status === "online" && rt.allowedUserId ? (
+
+                  {/* 图标条：次要操作（hover 显示文字 tooltip） */}
+                  <div className="channel-card-icons">
+                    {isWechat && rt.phase === "started" && rt.status !== "online" && rt.status !== "awaiting_scan" ? (
+                      <button
+                        className="channel-btn-icon"
+                        onClick={handleWeixinLogin}
+                        disabled={busy}
+                        data-tip="扫码登录"
+                        aria-label="扫码登录"
+                      >
+                        <QrCode size={14} />
+                      </button>
+                    ) : null}
+                    {/* 解除 Telegram 配对（仅在线 + 已配对时显示） */}
+                    {isTelegram && rt.status === "online" && rt.allowedUserId ? (
+                      <button
+                        className="channel-btn-icon mcp-delete-button"
+                        onClick={handleTelegramResetPair}
+                        disabled={busy}
+                        data-tip="解除配对"
+                        aria-label="解除配对（清空已配对用户）"
+                      >
+                        <Link2Off size={14} />
+                      </button>
+                    ) : null}
+                    {implemented ? (
+                      <button
+                        className="channel-btn-icon"
+                        onClick={() => setChatModalFor(channel.channelId)}
+                        data-tip="消息记录"
+                        aria-label="消息记录"
+                      >
+                        <Eye size={14} />
+                      </button>
+                    ) : null}
                     <button
-                      className="mcp-delete-button"
-                      onClick={handleTelegramResetPair}
-                      disabled={busy}
-                      title="清空已配对用户，回到等待 /start 状态"
+                      className="channel-btn-icon"
+                      onClick={() => setEditor({ mode: "edit", draft: { ...channel } })}
+                      data-tip="编辑"
+                      aria-label="编辑"
                     >
-                      <Link2Off size={13} /> 解除配对
+                      <Pencil size={14} />
                     </button>
-                  ) : null}
-                  {implemented ? (
-                    <button onClick={() => setChatModalFor(channel.channelId)}>
-                      <Eye size={13} /> 消息记录
+                    <button
+                      className="channel-btn-icon mcp-delete-button"
+                      onClick={() => setPendingDelete(channel)}
+                      data-tip={isWechat ? "禁用" : "删除"}
+                      aria-label={isWechat ? "禁用" : "删除"}
+                    >
+                      <Trash2 size={14} />
                     </button>
-                  ) : null}
-                  <button onClick={() => setEditor({ mode: "edit", draft: { ...channel } })}>
-                    <Pencil size={13} /> 编辑
-                  </button>
-                  <button className="mcp-delete-button" onClick={() => setPendingDelete(channel)}>
-                    <Trash2 size={13} /> {isWechat ? "禁用" : "删除"}
-                  </button>
+                  </div>
                 </div>
               </footer>
             </article>

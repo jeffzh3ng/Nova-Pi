@@ -6,7 +6,10 @@
 use std::io::{BufRead, BufReader, Write};
 use std::path::PathBuf;
 use std::process::{Child, Command, Stdio};
+use std::sync::atomic::{AtomicU32, Ordering};
 use std::sync::{Mutex, OnceLock};
+use std::thread;
+use std::time::Duration;
 
 #[cfg(windows)]
 use std::os::windows::process::CommandExt;
@@ -23,6 +26,19 @@ struct SidecarHandle {
 }
 
 static SIDECAR: OnceLock<SidecarHandle> = OnceLock::new();
+
+/// watchdog 连续失败计数器：用于指数退避与熔断。
+///
+/// - start_sidecar 主动调用且成功时清零（用户操作触发，认为外部状态可能已修复）。
+/// - watchdog 自动重启每次失败 +1，达到 MAX_WATCHDOG_FAILURES 后停止重启，
+///   emit `pi-sidecar-fatal` 让前端进入「sidecar 不可用，请重启应用」的明确错误态，
+///   避免对已损坏的 host 文件无限重启导致 CPU 自循环 + 事件风暴。
+static WATCHDOG_FAILURES: AtomicU32 = AtomicU32::new(0);
+/// 连续失败达到此阈值后熔断（不再自动重启）。
+const MAX_WATCHDOG_FAILURES: u32 = 5;
+/// 每次失败后的基础退避秒数；实际 sleep = BASE_BACKOFF_SECS * 2^min(failures, cap)，
+/// 上限约 60s。防止「立即崩→立即重启→立即崩」的 tight loop。
+const BASE_BACKOFF_SECS: u64 = 2;
 
 fn sidecar() -> &'static SidecarHandle {
     SIDECAR.get_or_init(|| SidecarHandle {
@@ -116,7 +132,40 @@ pub fn start_sidecar(app: &AppHandle) -> Result<(), String> {
             .unwrap_or(false);
         let _ = app_handle.emit("pi-sidecar-exited", ());
         if unexpected {
-            eprintln!("[sidecar] 意外退出，尝试 watchdog 重启");
+            // 指数退避：连续失败越多，下次重启前等得越久（上限 ~60s）。
+            // 防止 host 文件损坏时陷入「立即崩→立即重启→立即崩」的 tight loop，
+            // 既浪费 CPU 又会向前端 emit 事件风暴。
+            let failures = WATCHDOG_FAILURES.fetch_add(1, Ordering::Relaxed) + 1;
+            if failures > MAX_WATCHDOG_FAILURES {
+                // 熔断：累计失败超阈值，停止自动重启，等待用户手动介入。
+                // emit fatal 让前端进入明确的错误态，而不是无声地反复卡死。
+                let msg = format!(
+                    "sidecar 连续崩溃 {failures} 次，已停止自动重启。请检查日志或重启应用。"
+                );
+                eprintln!("[sidecar] {msg}");
+                let _ = app_handle.emit("pi-sidecar-fatal", msg);
+                return;
+            }
+            // 指数退避：2, 4, 8, 16, 32s（failures=1..5），封顶 60s。
+            // failures 从 1 开始（fetch_add 返回旧值，+1 后是新计数）。
+            let exp = failures.min(5) as u32;
+            let backoff_secs = BASE_BACKOFF_SECS
+                .saturating_mul(1u64 << exp)
+                .min(60);
+            eprintln!(
+                "[sidecar] 意外退出（第 {failures}/{MAX_WATCHDOG_FAILURES} 次），{backoff_secs}s 后尝试 watchdog 重启"
+            );
+            thread::sleep(Duration::from_secs(backoff_secs));
+            // 退避期间若应用已退出（stop_sidecar 把 child 置 None），放弃重启避免无谓 spawn。
+            let still_unexpected = sidecar()
+                .child
+                .lock()
+                .map(|guard| guard.is_some())
+                .unwrap_or(false);
+            if !still_unexpected {
+                eprintln!("[sidecar] 退避期间应用已关闭，放弃重启");
+                return;
+            }
             match start_sidecar(&app_handle) {
                 Ok(()) => {
                     let _ = app_handle.emit("pi-sidecar-restarted", ());
@@ -157,6 +206,9 @@ pub fn start_sidecar(app: &AppHandle) -> Result<(), String> {
             eprintln!("[sidecar] 启动后同步 MCP 配置失败：{error}");
         }
     });
+
+    // spawn 成功：清零 watchdog 失败计数（无论本次是首次启动还是重启）。
+    WATCHDOG_FAILURES.store(0, Ordering::Relaxed);
 
     Ok(())
 }

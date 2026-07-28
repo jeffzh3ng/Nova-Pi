@@ -203,7 +203,22 @@ export async function upsertProvider(
     }
     config.providers[id] = provider;
     await writeModelsJson(config);
-    applyProviderToRuntime(runtime, id, provider);
+    // apply 到 runtime 失败时回滚 models.json：避免"文件已写、runtime 内存层未注册"
+    // 的不一致状态。回滚后 throw 让调用方知道本次 upsert 未生效。
+    try {
+      applyProviderToRuntime(runtime, id, provider);
+    } catch (error) {
+      const rollback: ModelsJson = { providers: { ...config.providers } };
+      if (existing) {
+        rollback.providers[id] = existing;
+      } else {
+        delete rollback.providers[id];
+      }
+      await writeModelsJson(rollback).catch(() => undefined);
+      throw new Error(
+        `应用 provider ${id} 到 runtime 失败，已回滚 models.json：${error instanceof Error ? error.message : String(error)}`,
+      );
+    }
   });
 }
 
@@ -232,9 +247,19 @@ export async function setProviderApiKey(
     const config = await readModelsJson();
     const provider = config.providers[providerId];
     if (!provider) throw new Error(`Provider 不存在：${providerId}`);
+    const previousKey = provider.apiKey;
     provider.apiKey = apiKey.trim();
     await writeModelsJson(config);
-    runtime.setRuntimeApiKey(providerId, apiKey.trim());
+    // apply 失败时回滚旧 key，保持文件与 runtime 内存层一致。
+    try {
+      runtime.setRuntimeApiKey(providerId, apiKey.trim());
+    } catch (error) {
+      provider.apiKey = previousKey;
+      await writeModelsJson(config).catch(() => undefined);
+      throw new Error(
+        `应用 API Key 到 runtime 失败，已回滚 models.json：${error instanceof Error ? error.message : String(error)}`,
+      );
+    }
   });
 }
 
@@ -468,15 +493,17 @@ async function writeSettingsJson(settings: PiSettings): Promise<void> {
   await writeFile(settingsJsonPath, JSON.stringify(settings, null, 2), "utf8");
 }
 
-/** 把 models.json 的 provider 应用到 ModelRuntime 内存层（apiKey + 模型注册）。 */
+/**
+ * 把 models.json 的 provider 应用到 ModelRuntime 内存层（apiKey + 模型注册）。
+ *
+ * 失败时向上抛错而非静默吞掉。调用方负责回滚 models.json，否则会出现"文件里有 key
+ * 但 runtime 内存层没有"的不一致状态——LLM 调用会因 hasConfiguredAuth=false 而失败，
+ * 但 UI 读 models.json 却显示已配置，用户困惑。
+ */
 function applyProviderToRuntime(runtime: ModelRuntime, providerId: string, provider: ModelsJsonProvider): void {
-  try {
-    if (provider.apiKey) {
-      const resolved = resolveApiKey(provider.apiKey);
-      if (resolved) runtime.setRuntimeApiKey(providerId, resolved);
-    }
-  } catch (error) {
-    console.error(`[models-manager] 应用 provider ${providerId} 到 runtime 失败：${error}`);
+  if (provider.apiKey) {
+    const resolved = resolveApiKey(provider.apiKey);
+    if (resolved) runtime.setRuntimeApiKey(providerId, resolved);
   }
 }
 

@@ -135,7 +135,19 @@ async function handleCommand(command: RpcCommand): Promise<void> {
         return;
       }
       case "abort": {
-        await pool?.abort(command.sessionId);
+        // abort 是"尽力而为"：失败时仍响应成功（前端会乐观地退出 busy），
+        // 但额外 emit 一个 recoverable error 事件，让 UI 知道 agent loop 可能仍在跑。
+        // 这比之前静默吞错（前端永远卡 busy 直到 5min 安全超时）更可控。
+        try {
+          await pool?.abort(command.sessionId);
+        } catch (error) {
+          writeEvent({
+            type: "error",
+            sessionId: command.sessionId,
+            message: `中止失败，agent loop 可能仍在运行：${error instanceof Error ? error.message : String(error)}`,
+            recoverable: true,
+          });
+        }
         writeResponse(id, true);
         return;
       }
