@@ -7,6 +7,7 @@ import { invoke } from "@tauri-apps/api/core";
 
 export type MessageChannel = {
   channelId: string;
+  channelType: string;
   displayName: string;
   enabled: boolean;
   autoStart: boolean;
@@ -18,14 +19,16 @@ export type MessageChannel = {
 
 /**
  * 渠道类型目录（新建渠道时选）。
- * available=true 表示已实现可新建；false 表示占位（飞书等开发中），UI 标灰禁用。
- * host 侧 WeixinBotManager 是单例，每种渠道同时只能一个活动连接，
- * 所以同一类型不能重复新建（前端在新建表单里据此禁用已存在的类型）。
+ * available=true 表示已实现可新建；false 表示仍是占位，UI 标灰禁用。
+ * 微信、Telegram 仍是单实例；飞书按 channelId 建立独立 manager，允许配置多个应用，
+ * 并分别绑定不同数字员工。
  */
 export type ChannelTypeOption = {
   id: string;
   displayName: string;
   available: boolean;
+  /** 是否允许同一类型创建多个独立渠道实例。 */
+  multiple?: boolean;
   /** 默认显示名（新建时预填） */
   defaultDisplayName: string;
 };
@@ -33,7 +36,7 @@ export type ChannelTypeOption = {
 export const CHANNEL_TYPES: ChannelTypeOption[] = [
   { id: "wechat", displayName: "微信", available: true, defaultDisplayName: "微信" },
   { id: "telegram", displayName: "Telegram", available: true, defaultDisplayName: "Telegram" },
-  { id: "feishu", displayName: "飞书", available: false, defaultDisplayName: "飞书" },
+  { id: "feishu", displayName: "飞书", available: true, multiple: true, defaultDisplayName: "飞书" },
   { id: "dingtalk", displayName: "钉钉", available: false, defaultDisplayName: "钉钉" },
 ];
 
@@ -56,4 +59,30 @@ export async function saveMessageChannel(channel: MessageChannel): Promise<void>
 /** 删除（或禁用）通道。内置 wechat 走禁用，自定义渠道真删。 */
 export async function deleteMessageChannel(channelId: string): Promise<void> {
   await invoke("delete_message_channel", { channelId });
+}
+
+export type MessageChannelRecord = {
+  recordId: number;
+  channelId: string;
+  eventKey: string;
+  externalMessageId?: string;
+  conversationKey?: string;
+  role: "incoming" | "assistant";
+  senderId?: string;
+  content: string;
+  createdAtMs: number;
+};
+
+/** 读取指定渠道最近的持久化消息记录，返回顺序为从旧到新。 */
+export async function listMessageChannelRecords(
+  channelId: string,
+  limit = 200,
+  beforeId?: number,
+): Promise<MessageChannelRecord[]> {
+  const result = await invoke<{ records: MessageChannelRecord[] }>("list_message_channel_records", {
+    channelId,
+    limit,
+    beforeId,
+  });
+  return result.records;
 }

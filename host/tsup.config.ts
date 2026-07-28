@@ -12,6 +12,8 @@ export default defineConfig({
   splitting: false,
   sourcemap: true,
   clean: true,
+  // 飞书 SDK 必须随 host/dist 打包；生产安装包只携带 dist，不携带工作区 node_modules。
+  noExternal: ["@larksuiteoapi/node-sdk"],
   // pi-coding-agent and pi-ai ship ESM + native deps; keep them external
   // so the sidecar resolves them at runtime from node_modules.
   external: [

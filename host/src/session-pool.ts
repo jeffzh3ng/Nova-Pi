@@ -12,12 +12,26 @@ import {
   createAgentSession,
   type AgentSessionEvent,
   type ResourceLoader,
+  type ToolDefinition,
 } from "@earendil-works/pi-coding-agent";
 import type { Model } from "@earendil-works/pi-ai";
 import { getDigitalHuman, makeGenericHuman } from "./digital-human.js";
 import { getModelRuntime, resolveModel, applyApiKey, type HostModelSettings } from "./model-setup.js";
 import { writeEvent, type ConversationAttachments } from "./rpc-protocol.js";
 import { createSessionResourceLoader } from "./skills/loader.js";
+import {
+  builtInToolNamesForSettings,
+  COMPUTER_AGENT_ID,
+  createComputerAgentTools,
+  customToolNamesForSettings,
+  DEFAULT_COMPUTER_AGENT_SETTINGS,
+  normalizeComputerAgentSettings,
+  validateComputerAgentSettings,
+  type ComputerAgentSettings,
+  type NovaConversationContext,
+  type NovaRuntimeSession,
+  type NovaStatusSnapshot,
+} from "./computer-agent.js";
 
 type SessionEntry = {
   sessionId: string;
@@ -30,6 +44,10 @@ type SessionEntry = {
    * 后台会话的事件由 backgroundListeners 单独订阅，不走 forwardEvent 的常规转发。
    */
   isBackground?: boolean;
+  status: "idle" | "running";
+  createdAt: number;
+  lastActivityAt: number;
+  activeTool?: string;
 };
 
 export class SessionPool {
@@ -49,6 +67,8 @@ export class SessionPool {
    * 因此单独维护一套监听器，让微信机器人等模块能拿到 message_end 等事件。
    */
   private backgroundListeners = new Set<(sessionId: string, event: AgentSessionEvent) => void>();
+  private computerAgentSettings: ComputerAgentSettings = { ...DEFAULT_COMPUTER_AGENT_SETTINGS };
+  private novaConversations: NovaConversationContext[] = [];
 
   constructor() {}
 
@@ -70,6 +90,100 @@ export class SessionPool {
         }
       }),
     );
+  }
+
+  async configureComputerAgent(settings: unknown): Promise<ComputerAgentSettings> {
+    const normalized = normalizeComputerAgentSettings(settings);
+    await validateComputerAgentSettings(normalized);
+    const changed = JSON.stringify(normalized) !== JSON.stringify(this.computerAgentSettings);
+    this.computerAgentSettings = normalized;
+    if (changed) {
+      const computerSessions = [...this.sessions.values()]
+        .filter((entry) => entry.humanId === COMPUTER_AGENT_ID)
+        .map((entry) => entry.sessionId);
+      for (const sessionId of computerSessions) {
+        const entry = this.sessions.get(sessionId);
+        if (entry?.status === "running") await entry.session.abort().catch(() => {});
+        await this.dispose(sessionId);
+      }
+    }
+    return { ...this.computerAgentSettings };
+  }
+
+  updateNovaContext(conversations: NovaConversationContext[]): void {
+    this.novaConversations = conversations
+      .filter((item) => item && typeof item.id === "string" && item.id.trim())
+      .slice(0, 160)
+      .map((item) => ({
+        id: item.id,
+        title: String(item.title || "未命名任务").slice(0, 120),
+        agentId: item.agentId,
+        agentName: item.agentName,
+        status: (["done", "running", "paused", "canceled"].includes(item.status)
+          ? item.status
+          : "paused") as NovaConversationContext["status"],
+        updatedAt: item.updatedAt,
+        archived: item.archived === true,
+        messageCount: Number.isFinite(item.messageCount) ? Math.max(0, Number(item.messageCount)) : undefined,
+      }));
+  }
+
+  getNovaStatus(): NovaStatusSnapshot {
+    const sessions: NovaRuntimeSession[] = [...this.sessions.values()].map((entry) => ({
+      sessionId: entry.sessionId,
+      conversationId: entry.conversationId,
+      humanId: entry.humanId,
+      status: entry.status,
+      background: entry.isBackground === true,
+      createdAt: entry.createdAt,
+      lastActivityAt: entry.lastActivityAt,
+      activeTool: entry.activeTool,
+    }));
+    const liveByConversation = new Map(sessions.map((entry) => [entry.conversationId, entry]));
+    const conversations = this.novaConversations.map((item) => ({
+      ...item,
+      status: liveByConversation.get(item.id)?.status === "running" ? "running" as const : item.status,
+    }));
+    return {
+      host: {
+        pid: process.pid,
+        uptimeSeconds: Math.round(process.uptime()),
+        nodeVersion: process.version,
+        platform: `${process.platform}/${process.arch}`,
+      },
+      totals: {
+        conversations: conversations.length,
+        sessions: sessions.length,
+        running: sessions.filter((entry) => entry.status === "running").length,
+        background: sessions.filter((entry) => entry.background).length,
+      },
+      conversations,
+      sessions,
+    };
+  }
+
+  async manageNovaTask(
+    conversationId: string,
+    action: "abort" | "dispose",
+    requesterConversationId = "",
+  ): Promise<{ ok: boolean; message: string }> {
+    if (!conversationId) return { ok: false, message: "conversationId 不能为空。" };
+    if (conversationId === requesterConversationId) {
+      return { ok: false, message: "不能从当前任务内部中止或释放自身会话，请使用界面的停止按钮。" };
+    }
+    const entry = [...this.sessions.values()].find((item) => item.conversationId === conversationId);
+    if (!entry) return { ok: false, message: `未找到正在加载的会话：${conversationId}` };
+    if (action === "abort") {
+      if (entry.status !== "running") return { ok: false, message: "目标任务当前不在运行。" };
+      await entry.session.abort();
+      entry.status = "idle";
+      entry.activeTool = undefined;
+      entry.lastActivityAt = Date.now();
+      return { ok: true, message: `已中止任务 ${conversationId}。` };
+    }
+    if (entry.status === "running") return { ok: false, message: "目标任务仍在运行，请先中止再释放会话。" };
+    await this.dispose(entry.sessionId);
+    return { ok: true, message: `已释放会话 ${conversationId}，下次对话会重新创建。` };
   }
 
   /** 创建新会话。返回 sessionId（供前端后续 prompt/abort 引用）。 */
@@ -99,21 +213,26 @@ export class SessionPool {
     // pi 无"静默灌入 assistant 回复"的公开 API（sendUserMessage 会触发 turn），
     // 因此用 system prompt 承载历史文本，避免协议层撒谎（resumeMessages 之前收到后直接 break）。
     const systemPromptWithHistory = this.injectHistory(human.systemPrompt, params.resumeMessages);
+    const computerSetup = await this.computerAgentSetup(params.humanId, params.conversationId);
     const sessionResourceLoader = await createSessionResourceLoader(
       systemPromptWithHistory,
       human.allowedMcpServices,
+      computerSetup.cwd,
     );
 
     const sessionId = `pi-${params.conversationId}-${Date.now().toString(36)}`;
-    const sessionManager = SessionManager.inMemory();
+    const sessionManager = SessionManager.inMemory(computerSetup.cwd);
 
     const { session } = await createAgentSession({
       model,
-      thinkingLevel: "off",
+      thinkingLevel: computerSetup.isComputerAgent ? "medium" : "off",
       modelRuntime: getModelRuntime(),
       // 仅禁用 pi 内置 read/bash/edit/write；MCP 作为 extensionFactories
       // 注入，因此必须保留扩展工具。这也是 pi SDK 对嵌入式扩展的标准配置。
-      noTools: "builtin",
+      ...(computerSetup.isComputerAgent
+        ? { tools: computerSetup.tools, customTools: computerSetup.customTools }
+        : { noTools: "builtin" as const }),
+      cwd: computerSetup.cwd,
       resourceLoader: sessionResourceLoader,
       sessionManager,
     });
@@ -128,7 +247,16 @@ export class SessionPool {
       }
     });
 
-    const entry: SessionEntry = { sessionId, conversationId: params.conversationId, session, humanId: params.humanId };
+    const now = Date.now();
+    const entry: SessionEntry = {
+      sessionId,
+      conversationId: params.conversationId,
+      session,
+      humanId: params.humanId,
+      status: "idle",
+      createdAt: now,
+      lastActivityAt: now,
+    };
     this.sessions.set(sessionId, entry);
     this.conversationToSession.set(params.conversationId, sessionId);
 
@@ -160,19 +288,24 @@ export class SessionPool {
     const human = getDigitalHuman(params.humanId) ?? makeGenericHuman(params.humanId, params.mcpServiceId);
     const model = this.resolveCurrentModel();
     const systemPromptWithHistory = this.injectHistory(human.systemPrompt, params.resumeMessages);
+    const computerSetup = await this.computerAgentSetup(params.humanId, params.conversationId);
     const sessionResourceLoader = await createSessionResourceLoader(
       systemPromptWithHistory,
       human.allowedMcpServices,
+      computerSetup.cwd,
     );
 
     const sessionId = `bg-${params.conversationId}-${Date.now().toString(36)}`;
-    const sessionManager = SessionManager.inMemory();
+    const sessionManager = SessionManager.inMemory(computerSetup.cwd);
 
     const { session } = await createAgentSession({
       model,
-      thinkingLevel: "off",
+      thinkingLevel: computerSetup.isComputerAgent ? "medium" : "off",
       modelRuntime: getModelRuntime(),
-      noTools: "builtin",
+      ...(computerSetup.isComputerAgent
+        ? { tools: computerSetup.tools, customTools: computerSetup.customTools }
+        : { noTools: "builtin" as const }),
+      cwd: computerSetup.cwd,
       resourceLoader: sessionResourceLoader,
       sessionManager,
     });
@@ -185,12 +318,16 @@ export class SessionPool {
       }
     });
 
+    const now = Date.now();
     const entry: SessionEntry = {
       sessionId,
       conversationId: params.conversationId,
       session,
       humanId: params.humanId,
       isBackground: true,
+      status: "idle",
+      createdAt: now,
+      lastActivityAt: now,
     };
     this.sessions.set(sessionId, entry);
     return sessionId;
@@ -208,6 +345,7 @@ export class SessionPool {
   private forwardBackgroundEvent(sessionId: string, event: AgentSessionEvent): void {
     const entry = this.sessions.get(sessionId);
     if (!entry || !entry.isBackground) return;
+    this.updateEntryRuntime(entry, event);
     for (const listener of this.backgroundListeners) {
       try {
         listener(sessionId, event);
@@ -232,8 +370,17 @@ export class SessionPool {
     if (!entry) throw new Error(`会话不存在：${params.sessionId}`);
 
     // 附件上下文拼到消息前（PCAP/OCR 哨兵格式，与原 Nova 一致）
+    entry.status = "running";
+    entry.lastActivityAt = Date.now();
     const message = await this.injectAttachments(params.message, params.attachments);
-    await entry.session.prompt(message);
+    try {
+      await entry.session.prompt(message);
+    } catch (error) {
+      entry.status = "idle";
+      entry.activeTool = undefined;
+      entry.lastActivityAt = Date.now();
+      throw error;
+    }
   }
 
   /**
@@ -247,6 +394,9 @@ export class SessionPool {
     const entry = this.sessions.get(sessionId);
     if (!entry) return; // 会话不存在视为已中止，不算错误。
     await entry.session.abort();
+    entry.status = "idle";
+    entry.activeTool = undefined;
+    entry.lastActivityAt = Date.now();
   }
 
   /** 销毁会话（切换/删除 conversation 时调用）。 */
@@ -268,6 +418,44 @@ export class SessionPool {
   }
 
   // ── 内部 ──
+
+  private async computerAgentSetup(humanId: string, conversationId: string): Promise<{
+    isComputerAgent: boolean;
+    cwd: string;
+    tools?: string[];
+    customTools?: ToolDefinition[];
+  }> {
+    if (humanId !== COMPUTER_AGENT_ID) {
+      return { isComputerAgent: false, cwd: process.cwd() };
+    }
+    const settings = this.computerAgentSettings;
+    if (!settings.enabled) {
+      throw new Error("Nova 智能员工尚未启用，请在设置 > 智能员工中开启并授权。");
+    }
+    await validateComputerAgentSettings(settings);
+    const customTools = createComputerAgentTools(settings, {
+      currentConversationId: conversationId,
+      getNovaStatus: () => this.getNovaStatus(),
+      manageNovaTask: (targetId, action, requesterId) => this.manageNovaTask(targetId, action, requesterId),
+    });
+    return {
+      isComputerAgent: true,
+      cwd: settings.workingDirectory,
+      tools: [...builtInToolNamesForSettings(settings), ...customToolNamesForSettings(settings)],
+      customTools,
+    };
+  }
+
+  private updateEntryRuntime(entry: SessionEntry, event: AgentSessionEvent): void {
+    entry.lastActivityAt = Date.now();
+    if (event.type === "agent_start" || event.type === "turn_start") entry.status = "running";
+    if (event.type === "agent_end") {
+      entry.status = "idle";
+      entry.activeTool = undefined;
+    }
+    if (event.type === "tool_execution_start") entry.activeTool = event.toolName;
+    if (event.type === "tool_execution_end" && entry.activeTool === event.toolName) entry.activeTool = undefined;
+  }
 
   private resolveCurrentModel(): Model<any> {
     if (this.modelSettings) {
@@ -347,6 +535,7 @@ export class SessionPool {
     const entry = this.sessions.get(sessionId);
     // dispose 后残留的队列事件直接丢弃，避免发出无 conversationId 的孤儿事件。
     if (!entry) return;
+    this.updateEntryRuntime(entry, event);
     const conversationId = entry.conversationId;
     // 透传 pi 事件的核心子集；前端按 sessionId→conversationId 映射后更新 ChatMessage。
     // 不同事件类型携带的字段不同，这里统一加 sessionId 后转发。

@@ -30,8 +30,15 @@ pub fn handle_sidecar_message(app: &AppHandle, message: Value) {
     let msg_type = message.get("type").and_then(|v| v.as_str()).unwrap_or("");
     match msg_type {
         "response" => {
-            let id = message.get("id").and_then(|v| v.as_str()).unwrap_or("").to_string();
-            let success = message.get("success").and_then(|v| v.as_bool()).unwrap_or(false);
+            let id = message
+                .get("id")
+                .and_then(|v| v.as_str())
+                .unwrap_or("")
+                .to_string();
+            let success = message
+                .get("success")
+                .and_then(|v| v.as_bool())
+                .unwrap_or(false);
             // 锁中毒时仍取出内部数据继续：单次 panic 不应让整个 RPC 子系统永久瘫痪。
             let mut map = pending().map.lock().unwrap_or_else(|e| e.into_inner());
             if let Some(sender) = map.remove(&id) {
@@ -54,6 +61,14 @@ pub fn handle_sidecar_message(app: &AppHandle, message: Value) {
                 // Rust 的 call_llm 路径在新架构下几乎不被触达，必须在此记录。
                 if event.get("type").and_then(|v| v.as_str()) == Some("usage") {
                     persist_usage_event(app, event);
+                }
+                if matches!(
+                    event.get("type").and_then(|v| v.as_str()),
+                    Some("wechat_message" | "telegram_message" | "feishu_message")
+                ) {
+                    if let Err(error) = crate::message_channels::persist_message_event(app, event) {
+                        eprintln!("[rpc] 保存消息通道记录失败：{error}");
+                    }
                 }
                 let _ = app.emit("pi-event", event.clone());
             }
@@ -88,18 +103,30 @@ pub async fn send_rpc_blocking_with_timeout(
     };
 
     let (tx, rx) = oneshot::channel();
-    pending().map.lock().unwrap_or_else(|e| e.into_inner()).insert(id.clone(), tx);
+    pending()
+        .map
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+        .insert(id.clone(), tx);
 
     crate::sidecar::write_command(&full_command)?;
 
     match tokio::time::timeout(timeout, rx).await {
         Ok(Ok(result)) => result,
         Ok(Err(_)) => {
-            pending().map.lock().unwrap_or_else(|e| e.into_inner()).remove(&id);
+            pending()
+                .map
+                .lock()
+                .unwrap_or_else(|e| e.into_inner())
+                .remove(&id);
             Err("sidecar 响应通道已关闭".to_string())
         }
         Err(_) => {
-            pending().map.lock().unwrap_or_else(|e| e.into_inner()).remove(&id);
+            pending()
+                .map
+                .lock()
+                .unwrap_or_else(|e| e.into_inner())
+                .remove(&id);
             Err("sidecar 响应超时".to_string())
         }
     }

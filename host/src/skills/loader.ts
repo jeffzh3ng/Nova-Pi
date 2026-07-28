@@ -43,15 +43,16 @@ export function getBaseResourceLoader(): ResourceLoader | null {
 export async function createSessionResourceLoader(
   humanSystemPrompt: string,
   allowedMcpServices: string[],
+  cwd = process.cwd(),
 ): Promise<ResourceLoader> {
   if (!configuredAgentDir) {
     throw new Error("pi ResourceLoader 尚未初始化。");
   }
   const loader = new DefaultResourceLoader({
-    cwd: process.cwd(),
+    cwd,
     agentDir: configuredAgentDir,
     systemPromptOverride: () => humanSystemPrompt,
-    extensionFactories: [createMcpExtension(allowedMcpServices)],
+    extensionFactories: allowedMcpServices.length > 0 ? [createMcpExtension(allowedMcpServices)] : [],
   });
   await loader.reload();
   return loader;

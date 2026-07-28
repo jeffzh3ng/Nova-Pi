@@ -23,13 +23,14 @@ pub const WECHAT_CHANNEL_ID: &str = "wechat";
 
 /// 内置渠道白名单（save 时校验 channel_id，防止前端任意构造 id 覆盖内置行）。
 /// 未来新增渠道（飞书等）在此登记。
-const BUILTIN_CHANNEL_IDS: &[&str] = &["wechat", "telegram", "feishu", "dingtalk"];
+const BUILTIN_CHANNEL_TYPES: &[&str] = &["wechat", "telegram", "feishu", "dingtalk"];
 
 /// config_json 中需要混淆存储的字段路径（按渠道类型）。
-/// telegram.botToken 是核心敏感数据；其他渠道目前无敏感字段。
-fn sensitive_keys_for(channel_id: &str) -> &'static [&'static str] {
-    match channel_id {
+/// Telegram Bot Token 与飞书 App Secret 都按现有本地密钥机制混淆保存。
+fn sensitive_keys_for(channel_type: &str) -> &'static [&'static str] {
+    match channel_type {
         "telegram" => &["botToken"],
+        "feishu" => &["appSecret"],
         _ => &[],
     }
 }
@@ -38,6 +39,9 @@ fn sensitive_keys_for(channel_id: &str) -> &'static [&'static str] {
 #[serde(rename_all = "camelCase")]
 pub struct MessageChannel {
     pub channel_id: String,
+    /// 渠道类型与实例 ID 分离。飞书允许多个实例，例如 `feishu-<uuid>`。
+    #[serde(default)]
+    pub channel_type: String,
     pub display_name: String,
     /// 是否启用（禁用的渠道不出现在 Tab）
     pub enabled: bool,
@@ -59,6 +63,26 @@ pub struct MessageChannelList {
     pub channels: Vec<MessageChannel>,
 }
 
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct MessageChannelRecord {
+    pub record_id: i64,
+    pub channel_id: String,
+    pub event_key: String,
+    pub external_message_id: Option<String>,
+    pub conversation_key: Option<String>,
+    pub role: String,
+    pub sender_id: Option<String>,
+    pub content: String,
+    pub created_at_ms: i64,
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct MessageChannelRecordList {
+    pub records: Vec<MessageChannelRecord>,
+}
+
 // ── 数据库初始化（建表 + 懒 seed） ──
 
 fn initialize_message_channels_db(connection: &Connection) -> Result<(), String> {
@@ -67,6 +91,7 @@ fn initialize_message_channels_db(connection: &Connection) -> Result<(), String>
             r#"
             CREATE TABLE IF NOT EXISTS message_channels (
                 channel_id   TEXT PRIMARY KEY,
+                channel_type TEXT NOT NULL DEFAULT '',
                 display_name TEXT NOT NULL DEFAULT '',
                 enabled      INTEGER NOT NULL DEFAULT 0,
                 auto_start   INTEGER NOT NULL DEFAULT 1,
@@ -75,17 +100,55 @@ fn initialize_message_channels_db(connection: &Connection) -> Result<(), String>
                 config_json  TEXT NOT NULL DEFAULT '{}',
                 updated_at   TEXT NOT NULL
             );
+            CREATE TABLE IF NOT EXISTS message_channel_records (
+                record_id           INTEGER PRIMARY KEY AUTOINCREMENT,
+                channel_id          TEXT NOT NULL,
+                event_key           TEXT NOT NULL,
+                external_message_id TEXT,
+                conversation_key    TEXT,
+                role                TEXT NOT NULL,
+                sender_id           TEXT,
+                content             TEXT NOT NULL,
+                created_at_ms       INTEGER NOT NULL,
+                UNIQUE(channel_id, event_key)
+            );
+            CREATE INDEX IF NOT EXISTS idx_message_channel_records_channel_time
+              ON message_channel_records(channel_id, created_at_ms DESC, record_id DESC);
             "#,
         )
         .map_err(|error| format!("初始化消息通道表失败：{error}"))?;
+
+    // 兼容旧库：早期版本以 channel_id 同时表示类型和实例，没有 channel_type 列。
+    let has_channel_type = connection
+        .query_row(
+            "SELECT COUNT(*) FROM pragma_table_info('message_channels') WHERE name = 'channel_type'",
+            [],
+            |row| row.get::<_, i64>(0),
+        )
+        .map_err(|error| format!("检查消息通道表结构失败：{error}"))?
+        > 0;
+    if !has_channel_type {
+        connection
+            .execute(
+                "ALTER TABLE message_channels ADD COLUMN channel_type TEXT NOT NULL DEFAULT ''",
+                [],
+            )
+            .map_err(|error| format!("升级消息通道表失败：{error}"))?;
+    }
+    connection
+        .execute(
+            "UPDATE message_channels SET channel_type = CASE WHEN channel_id LIKE 'feishu-%' THEN 'feishu' ELSE channel_id END WHERE channel_type = ''",
+            [],
+        )
+        .map_err(|error| format!("补全消息通道类型失败：{error}"))?;
 
     // 懒 seed：首次初始化时插入默认微信渠道（已存在则跳过）。
     let now = chrono::Local::now().format("%Y-%m-%d %H:%M:%S").to_string();
     connection
         .execute(
             r#"INSERT OR IGNORE INTO message_channels
-               (channel_id, display_name, enabled, auto_start, human_id, show_messages, config_json, updated_at)
-               VALUES (?1, ?2, 1, 1, 'general-chat', 0, '{}', ?3)"#,
+               (channel_id, channel_type, display_name, enabled, auto_start, human_id, show_messages, config_json, updated_at)
+               VALUES (?1, 'wechat', ?2, 1, 1, 'general-chat', 0, '{}', ?3)"#,
             rusqlite::params![WECHAT_CHANNEL_ID, "微信", now],
         )
         .map_err(|error| format!("seed 默认消息通道失败：{error}"))?;
@@ -98,13 +161,28 @@ fn initialize_message_channels_db(connection: &Connection) -> Result<(), String>
 fn row_to_channel(row: &rusqlite::Row) -> rusqlite::Result<MessageChannel> {
     Ok(MessageChannel {
         channel_id: row.get::<_, String>(0)?,
-        display_name: row.get::<_, String>(1)?,
-        enabled: row.get::<_, i64>(2)? != 0,
-        auto_start: row.get::<_, i64>(3)? != 0,
-        human_id: row.get::<_, String>(4)?,
-        show_messages: row.get::<_, i64>(5)? != 0,
-        config_json: row.get::<_, String>(6)?,
-        updated_at: row.get::<_, String>(7)?,
+        channel_type: row.get::<_, String>(1)?,
+        display_name: row.get::<_, String>(2)?,
+        enabled: row.get::<_, i64>(3)? != 0,
+        auto_start: row.get::<_, i64>(4)? != 0,
+        human_id: row.get::<_, String>(5)?,
+        show_messages: row.get::<_, i64>(6)? != 0,
+        config_json: row.get::<_, String>(7)?,
+        updated_at: row.get::<_, String>(8)?,
+    })
+}
+
+fn row_to_record(row: &rusqlite::Row) -> rusqlite::Result<MessageChannelRecord> {
+    Ok(MessageChannelRecord {
+        record_id: row.get(0)?,
+        channel_id: row.get(1)?,
+        event_key: row.get(2)?,
+        external_message_id: row.get(3)?,
+        conversation_key: row.get(4)?,
+        role: row.get(5)?,
+        sender_id: row.get(6)?,
+        content: row.get(7)?,
+        created_at_ms: row.get(8)?,
     })
 }
 
@@ -166,13 +244,36 @@ fn decrypt_config_sensitive(config_json: &str, channel_id: &str, key_seed: &str)
     serde_json::to_string(&value).unwrap_or_else(|_| config_json.to_string())
 }
 
-/// 校验 channel_id 合法性（白名单）。新增/编辑都需校验，防止前端任意构造 id。
-fn validate_channel_id(channel_id: &str) -> Result<(), String> {
+fn resolve_channel_type(channel_id: &str, channel_type: &str) -> String {
+    if !channel_type.trim().is_empty() {
+        return channel_type.trim().to_string();
+    }
+    if channel_id.starts_with("feishu-") {
+        return "feishu".to_string();
+    }
+    channel_id.to_string()
+}
+
+/// 校验渠道类型和实例 ID。飞书可多实例，其他现有渠道仍保持单实例。
+fn validate_channel_id(channel_id: &str, channel_type: &str) -> Result<(), String> {
     if channel_id.trim().is_empty() {
         return Err("渠道 ID 不能为空".to_string());
     }
-    if !BUILTIN_CHANNEL_IDS.iter().any(|id| *id == channel_id) {
-        return Err(format!("不支持的渠道类型：{channel_id}"));
+    if !BUILTIN_CHANNEL_TYPES.contains(&channel_type) {
+        return Err(format!("不支持的消息通道类型：{channel_type}"));
+    }
+    if channel_type == "feishu" {
+        let valid = channel_id == "feishu"
+            || (channel_id.starts_with("feishu-")
+                && channel_id.len() <= 80
+                && channel_id
+                    .chars()
+                    .all(|ch| ch.is_ascii_alphanumeric() || ch == '-' || ch == '_'));
+        if !valid {
+            return Err("飞书通道实例 ID 格式不正确".to_string());
+        }
+    } else if channel_id != channel_type {
+        return Err(format!("{channel_type} 通道暂不支持创建多个实例"));
     }
     Ok(())
 }
@@ -181,67 +282,81 @@ fn validate_channel_id(channel_id: &str) -> Result<(), String> {
 
 #[tauri::command]
 pub fn list_message_channels(app: AppHandle) -> Result<MessageChannelList, String> {
-    app_database::with_database(&app, initialize_message_channels_db, |connection, db_path| {
-        // key_seed 用数据库文件路径（机器 + 用户 + 安装位置绑定）
-        let key_seed = db_path.to_string_lossy().to_string();
-        let mut stmt = connection
-            .prepare("SELECT channel_id, display_name, enabled, auto_start, human_id, show_messages, config_json, updated_at FROM message_channels ORDER BY channel_id")
+    app_database::with_database(
+        &app,
+        initialize_message_channels_db,
+        |connection, db_path| {
+            // key_seed 用数据库文件路径（机器 + 用户 + 安装位置绑定）
+            let key_seed = db_path.to_string_lossy().to_string();
+            let mut stmt = connection
+            .prepare("SELECT channel_id, channel_type, display_name, enabled, auto_start, human_id, show_messages, config_json, updated_at FROM message_channels ORDER BY updated_at DESC, channel_id")
             .map_err(|error| format!("查询消息通道失败：{error}"))?;
-        let channels = stmt
-            .query_map([], row_to_channel)
-            .map_err(|error| format!("查询消息通道失败：{error}"))?
-            .collect::<rusqlite::Result<Vec<MessageChannel>>>()
-            .map_err(|error| format!("查询消息通道失败：{error}"))?;
-        // 出库后解密敏感字段
-        let channels = channels
-            .into_iter()
-            .map(|mut c| {
-                c.config_json = decrypt_config_sensitive(&c.config_json, &c.channel_id, &key_seed);
-                c
-            })
-            .collect();
-        Ok(MessageChannelList { channels })
-    })
+            let channels = stmt
+                .query_map([], row_to_channel)
+                .map_err(|error| format!("查询消息通道失败：{error}"))?
+                .collect::<rusqlite::Result<Vec<MessageChannel>>>()
+                .map_err(|error| format!("查询消息通道失败：{error}"))?;
+            // 出库后解密敏感字段
+            let channels = channels
+                .into_iter()
+                .map(|mut c| {
+                    c.config_json =
+                        decrypt_config_sensitive(&c.config_json, &c.channel_type, &key_seed);
+                    c
+                })
+                .collect();
+            Ok(MessageChannelList { channels })
+        },
+    )
 }
 
 #[tauri::command]
 pub fn get_message_channel(app: AppHandle, channel_id: String) -> Result<MessageChannel, String> {
-    app_database::with_database(&app, initialize_message_channels_db, |connection, db_path| {
-        let key_seed = db_path.to_string_lossy().to_string();
-        let mut channel = connection
+    app_database::with_database(
+        &app,
+        initialize_message_channels_db,
+        |connection, db_path| {
+            let key_seed = db_path.to_string_lossy().to_string();
+            let mut channel = connection
             .query_row(
-                "SELECT channel_id, display_name, enabled, auto_start, human_id, show_messages, config_json, updated_at FROM message_channels WHERE channel_id = ?1",
+                "SELECT channel_id, channel_type, display_name, enabled, auto_start, human_id, show_messages, config_json, updated_at FROM message_channels WHERE channel_id = ?1",
                 rusqlite::params![channel_id],
                 row_to_channel,
             )
             .map_err(|error| format!("查询消息通道失败：{error}"))?;
-        channel.config_json =
-            decrypt_config_sensitive(&channel.config_json, &channel.channel_id, &key_seed);
-        Ok(channel)
-    })
+            channel.config_json =
+                decrypt_config_sensitive(&channel.config_json, &channel.channel_type, &key_seed);
+            Ok(channel)
+        },
+    )
 }
 
 /// 保存（upsert）一个消息通道配置。
 /// 校验 channel_id 白名单；敏感字段（telegram.botToken 等）落库前混淆。
 #[tauri::command]
 pub fn save_message_channel(app: AppHandle, channel: MessageChannel) -> Result<(), String> {
-    validate_channel_id(&channel.channel_id)?;
-    app_database::with_database_mut(&app, initialize_message_channels_db, |connection, db_path| {
-        let key_seed = db_path.to_string_lossy().to_string();
-        let now = chrono::Local::now().format("%Y-%m-%d %H:%M:%S").to_string();
-        let raw_config = if channel.config_json.is_empty() {
-            "{}".to_string()
-        } else {
-            channel.config_json
-        };
-        // 入库前加密敏感字段
-        let config_json = encrypt_config_sensitive(&raw_config, &channel.channel_id, &key_seed);
-        connection
+    let channel_type = resolve_channel_type(&channel.channel_id, &channel.channel_type);
+    validate_channel_id(&channel.channel_id, &channel_type)?;
+    app_database::with_database_mut(
+        &app,
+        initialize_message_channels_db,
+        |connection, db_path| {
+            let key_seed = db_path.to_string_lossy().to_string();
+            let now = chrono::Local::now().format("%Y-%m-%d %H:%M:%S").to_string();
+            let raw_config = if channel.config_json.is_empty() {
+                "{}".to_string()
+            } else {
+                channel.config_json
+            };
+            // 入库前加密敏感字段
+            let config_json = encrypt_config_sensitive(&raw_config, &channel_type, &key_seed);
+            connection
             .execute(
                 r#"INSERT INTO message_channels
-                   (channel_id, display_name, enabled, auto_start, human_id, show_messages, config_json, updated_at)
-                   VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)
+                   (channel_id, channel_type, display_name, enabled, auto_start, human_id, show_messages, config_json, updated_at)
+                   VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)
                    ON CONFLICT(channel_id) DO UPDATE SET
+                     channel_type = excluded.channel_type,
                      display_name = excluded.display_name,
                      enabled = excluded.enabled,
                      auto_start = excluded.auto_start,
@@ -251,6 +366,7 @@ pub fn save_message_channel(app: AppHandle, channel: MessageChannel) -> Result<(
                      updated_at = excluded.updated_at"#,
                 rusqlite::params![
                     channel.channel_id,
+                    channel_type,
                     channel.display_name,
                     channel.enabled as i64,
                     channel.auto_start as i64,
@@ -261,6 +377,116 @@ pub fn save_message_channel(app: AppHandle, channel: MessageChannel) -> Result<(
                 ],
             )
             .map_err(|error| format!("保存消息通道失败：{error}"))?;
+            Ok(())
+        },
+    )
+}
+
+#[tauri::command]
+pub fn list_message_channel_records(
+    app: AppHandle,
+    channel_id: String,
+    limit: Option<u32>,
+    before_id: Option<i64>,
+) -> Result<MessageChannelRecordList, String> {
+    let limit = i64::from(limit.unwrap_or(200).clamp(1, 500));
+    app_database::with_database(&app, initialize_message_channels_db, |connection, _| {
+        let mut records = if let Some(before_id) = before_id {
+            let mut stmt = connection
+                .prepare(
+                    "SELECT record_id, channel_id, event_key, external_message_id, conversation_key, role, sender_id, content, created_at_ms FROM message_channel_records WHERE channel_id = ?1 AND record_id < ?2 ORDER BY record_id DESC LIMIT ?3",
+                )
+                .map_err(|error| format!("查询消息记录失败：{error}"))?;
+            let rows = stmt
+                .query_map(
+                    rusqlite::params![channel_id, before_id, limit],
+                    row_to_record,
+                )
+                .map_err(|error| format!("查询消息记录失败：{error}"))?
+                .collect::<rusqlite::Result<Vec<_>>>()
+                .map_err(|error| format!("读取消息记录失败：{error}"))?;
+            rows
+        } else {
+            let mut stmt = connection
+                .prepare(
+                    "SELECT record_id, channel_id, event_key, external_message_id, conversation_key, role, sender_id, content, created_at_ms FROM message_channel_records WHERE channel_id = ?1 ORDER BY record_id DESC LIMIT ?2",
+                )
+                .map_err(|error| format!("查询消息记录失败：{error}"))?;
+            let rows = stmt
+                .query_map(rusqlite::params![channel_id, limit], row_to_record)
+                .map_err(|error| format!("查询消息记录失败：{error}"))?
+                .collect::<rusqlite::Result<Vec<_>>>()
+                .map_err(|error| format!("读取消息记录失败：{error}"))?;
+            rows
+        };
+        records.reverse();
+        Ok(MessageChannelRecordList { records })
+    })
+}
+
+/// 把 sidecar 发出的渠道消息事件持久化。失败只写日志，不阻断事件继续送往前端。
+pub fn persist_message_event(app: &AppHandle, event: &Value) -> Result<(), String> {
+    let event_type = event.get("type").and_then(Value::as_str).unwrap_or("");
+    let channel_id = match event_type {
+        "wechat_message" => "wechat".to_string(),
+        "telegram_message" => "telegram".to_string(),
+        "feishu_message" => event
+            .get("channelId")
+            .and_then(Value::as_str)
+            .unwrap_or("")
+            .to_string(),
+        _ => return Ok(()),
+    };
+    if channel_id.is_empty() {
+        return Err("消息事件缺少 channelId".to_string());
+    }
+    let role = event.get("role").and_then(Value::as_str).unwrap_or("");
+    let content = event.get("text").and_then(Value::as_str).unwrap_or("");
+    if !matches!(role, "incoming" | "assistant") || content.trim().is_empty() {
+        return Ok(());
+    }
+    let external_message_id = event.get("reqId").and_then(Value::as_str);
+    let created_at_ms = event
+        .get("timestamp")
+        .and_then(Value::as_i64)
+        .unwrap_or_else(|| chrono::Utc::now().timestamp_millis());
+    let event_key = event
+        .get("eventKey")
+        .and_then(Value::as_str)
+        .map(str::to_string)
+        .unwrap_or_else(|| {
+            external_message_id
+                .map(|message_id| format!("{role}:{message_id}"))
+                .unwrap_or_else(|| format!("{event_type}:{role}:no-id:{created_at_ms}"))
+        });
+    let conversation_key = event.get("conversationKey").and_then(Value::as_str);
+    let sender_id = event.get("fromUser").and_then(Value::as_str);
+
+    app_database::with_database_mut(app, initialize_message_channels_db, |connection, _| {
+        connection
+            .execute(
+                r#"INSERT OR IGNORE INTO message_channel_records
+                   (channel_id, event_key, external_message_id, conversation_key, role, sender_id, content, created_at_ms)
+                   VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)"#,
+                rusqlite::params![
+                    channel_id,
+                    event_key,
+                    external_message_id,
+                    conversation_key,
+                    role,
+                    sender_id,
+                    content,
+                    created_at_ms,
+                ],
+            )
+            .map_err(|error| format!("保存消息记录失败：{error}"))?;
+        // 每个实例只保留最近 5000 条，避免长期运行导致本地记录无限增长。
+        connection
+            .execute(
+                "DELETE FROM message_channel_records WHERE channel_id = ?1 AND record_id NOT IN (SELECT record_id FROM message_channel_records WHERE channel_id = ?1 ORDER BY record_id DESC LIMIT 5000)",
+                rusqlite::params![channel_id],
+            )
+            .map_err(|error| format!("清理过期消息记录失败：{error}"))?;
         Ok(())
     })
 }
@@ -289,4 +515,62 @@ pub fn delete_message_channel(app: AppHandle, channel_id: String) -> Result<(), 
         }
         Ok(())
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn accepts_multiple_feishu_instances_but_keeps_other_types_singleton() {
+        assert!(validate_channel_id("feishu-a1_b2", "feishu").is_ok());
+        assert!(validate_channel_id("feishu-another", "feishu").is_ok());
+        assert!(validate_channel_id("telegram-copy", "telegram").is_err());
+    }
+
+    #[test]
+    fn initializes_schema_and_seeds_channel_type() {
+        let connection = Connection::open_in_memory().expect("open db");
+        initialize_message_channels_db(&connection).expect("initialize");
+        let value: String = connection
+            .query_row(
+                "SELECT channel_type FROM message_channels WHERE channel_id = 'wechat'",
+                [],
+                |row| row.get(0),
+            )
+            .expect("seeded row");
+        assert_eq!(value, "wechat");
+    }
+
+    #[test]
+    fn migrates_legacy_channel_table_without_losing_rows() {
+        let connection = Connection::open_in_memory().expect("open db");
+        connection
+            .execute_batch(
+                r#"
+                CREATE TABLE message_channels (
+                    channel_id TEXT PRIMARY KEY,
+                    display_name TEXT NOT NULL DEFAULT '',
+                    enabled INTEGER NOT NULL DEFAULT 0,
+                    auto_start INTEGER NOT NULL DEFAULT 1,
+                    human_id TEXT NOT NULL DEFAULT 'general-chat',
+                    show_messages INTEGER NOT NULL DEFAULT 0,
+                    config_json TEXT NOT NULL DEFAULT '{}',
+                    updated_at TEXT NOT NULL
+                );
+                INSERT INTO message_channels VALUES
+                  ('telegram', 'Telegram', 1, 1, 'general-chat', 0, '{}', '2026-01-01');
+                "#,
+            )
+            .expect("legacy schema");
+        initialize_message_channels_db(&connection).expect("migrate");
+        let channel_type: String = connection
+            .query_row(
+                "SELECT channel_type FROM message_channels WHERE channel_id = 'telegram'",
+                [],
+                |row| row.get(0),
+            )
+            .expect("legacy row remains");
+        assert_eq!(channel_type, "telegram");
+    }
 }

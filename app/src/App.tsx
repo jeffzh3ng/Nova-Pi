@@ -67,6 +67,14 @@ import {
   testMcpConnection,
 } from "./services/mcpSettings";
 import type { McpConnectionSettings } from "./services/mcpSettings";
+import {
+  COMPUTER_AGENT_ID,
+  configureComputerAgentHost,
+  getComputerAgentSettings,
+  syncComputerAgentSettingsToHost,
+  updateNovaContext,
+} from "./services/computerAgent";
+import type { ComputerAgentSettings } from "./services/computerAgent";
 
 const SIDEBAR_PANEL_WIDTH_KEY = "dp-agent-sidebar-panel-width";
 const RECENTLY_USED_HUMAN_IDS_KEY = "dp-recently-used-human-ids";
@@ -86,6 +94,8 @@ const DIGITAL_HUMAN_TEMPLATE_BY_MCP = new Map(
 const QUICK_ACTION_TEMPLATE_BY_MCP = new Map(
   quickActions.flatMap((action) => (action.mcpService ? [[action.mcpService, action] as const] : [])),
 );
+
+const COMPUTER_AGENT_TEMPLATE = digitalHumans.find((human) => human.id === COMPUTER_AGENT_ID)!;
 
 const CUSTOM_HUMAN_ACCENTS: DigitalHuman["accent"][] = [
   "blue",
@@ -473,6 +483,7 @@ export default function App() {
   const [runningConversationIds, setRunningConversationIds] = useState<Set<string>>(() => new Set());
   const [mcpCatalog, setMcpCatalog] = useState<McpConnectionSettings[]>([]);
   const [mcpAvailability, setMcpAvailability] = useState<Record<string, McpAvailability>>({});
+  const [computerAgentSettings, setComputerAgentSettings] = useState<ComputerAgentSettings | null>(null);
   const activeRunIdRef = useRef(0);
   // busy 的 ref 镜像：catch/超时等非渲染上下文需要读最新值，避免 stale closure。
   const busyRef = useRef(false);
@@ -598,6 +609,47 @@ export default function App() {
     };
   }, []);
 
+  useEffect(() => {
+    let alive = true;
+    let unlistenRestart: (() => void) | undefined;
+    const clearComputerAgentSessions = () => {
+      for (const conversationId of Object.keys(conversationPiSessionRef.current)) {
+        if (conversationMetadataRef.current[conversationId]?.agentId === COMPUTER_AGENT_ID) {
+          delete conversationPiSessionRef.current[conversationId];
+        }
+      }
+    };
+    const refreshComputerAgent = async (syncHost = true) => {
+      try {
+        const settings = await getComputerAgentSettings();
+        if (alive) setComputerAgentSettings(settings);
+        if (syncHost) await configureComputerAgentHost(settings);
+      } catch (error) {
+        if (alive) console.error("读取或同步 Nova 智能员工设置失败", error);
+      }
+    };
+    const handleChanged = (event: Event) => {
+      const settings = (event as CustomEvent<ComputerAgentSettings>).detail;
+      if (settings) setComputerAgentSettings(settings);
+      else void refreshComputerAgent(false);
+      clearComputerAgentSessions();
+    };
+    void refreshComputerAgent();
+    window.addEventListener("nova-computer-agent-settings-changed", handleChanged);
+    void listen("pi-sidecar-restarted", () => {
+      conversationPiSessionRef.current = {};
+      void refreshComputerAgent();
+    }).then((unlisten) => {
+      if (alive) unlistenRestart = unlisten;
+      else unlisten();
+    });
+    return () => {
+      alive = false;
+      unlistenRestart?.();
+      window.removeEventListener("nova-computer-agent-settings-changed", handleChanged);
+    };
+  }, []);
+
   type ModalState =
     | { type: "delete"; task: RecentTask }
     | { type: "archive"; task: RecentTask }
@@ -633,17 +685,27 @@ export default function App() {
   );
 
   const effectiveDigitalHumans = useMemo(
-    () =>
-      catalogDigitalHumans.map((human) => {
+    () => {
+      const computerHuman: DigitalHuman = {
+        ...COMPUTER_AGENT_TEMPLATE,
+        name: computerAgentSettings?.displayName || COMPUTER_AGENT_TEMPLATE.name,
+        status: computerAgentSettings?.enabled ? "ready" : "pending",
+        disabledReason: computerAgentSettings?.enabled
+          ? undefined
+          : "请在设置 > 智能员工中开启并授权",
+      };
+      const mcpHumans = catalogDigitalHumans.map((human) => {
         const resolved = resolveMcpStatus(human.status, human.mcpService);
         return { ...human, status: resolved.status, disabledReason: resolved.disabledReason ?? human.disabledReason };
-      }),
-    [catalogDigitalHumans, mcpAvailability],
+      });
+      return [computerHuman, ...mcpHumans];
+    },
+    [catalogDigitalHumans, computerAgentSettings, mcpAvailability],
   );
 
   const effectiveQuickActions = useMemo(
     () =>
-      catalogDigitalHumans.map(digitalHumanToQuickAction).map((action) => {
+      effectiveDigitalHumans.map(digitalHumanToQuickAction).map((action) => {
         const resolved = resolveMcpStatus(action.status, action.mcpService);
         return {
           ...action,
@@ -652,7 +714,7 @@ export default function App() {
           disabledReason: resolved.disabledReason ?? action.disabledReason,
         };
       }),
-    [catalogDigitalHumans, mcpAvailability],
+    [effectiveDigitalHumans, mcpAvailability],
   );
 
   // @ 召唤可选的员工列表：effectiveDigitalHumans 即真正的数字员工（不含 general-chat），
@@ -866,6 +928,9 @@ export default function App() {
         const channels = await listMessageChannels();
         const ready = await waitSidecarReady();
         if (!ready || cancelled) return;
+        await syncComputerAgentSettingsToHost().catch((error) => {
+          console.error("[消息通道] Nova 智能员工授权同步失败", error);
+        });
 
         // 微信：创建后台会话 + 触发登录（token 缓存命中则秒连，否则需扫码）
         const wechat = channels.find((c) => c.channelId === "wechat" && c.enabled && c.autoStart);
@@ -890,6 +955,27 @@ export default function App() {
           } catch (error) {
             console.error("[消息通道] Telegram 自动启动失败", error);
           }
+        }
+
+        // 飞书：每条配置是独立应用实例，可并行连接并绑定不同数字员工。
+        const feishuChannels = channels.filter((channel) =>
+          (channel.channelType === "feishu" || channel.channelId.startsWith("feishu-"))
+          && channel.enabled
+          && channel.autoStart,
+        );
+        if (feishuChannels.length > 0 && !cancelled) {
+          const { startFeishuBot } = await import("./services/feishuBot");
+          await Promise.allSettled(feishuChannels.map(async (channel) => {
+            const config = JSON.parse(channel.configJson || "{}");
+            if (!config.appId || !config.appSecret) return;
+            const started = await startFeishuBot(channel.channelId, channel.humanId, {
+              appId: config.appId,
+              appSecret: config.appSecret,
+              domain: config.domain === "lark" ? "lark" : "feishu",
+              groupPolicy: config.groupPolicy === "open" ? "open" : "mention",
+            });
+            if (!started) console.error(`[消息通道] 飞书自动启动失败：${channel.displayName}`);
+          }));
         }
       } catch (error) {
         // 自动启动失败不影响应用正常使用，用户可手动进面板重试
@@ -946,6 +1032,26 @@ export default function App() {
   const riskAssessmentTransport =
     mcpCatalog.find((settings) => settings.serviceId === DATA_RISK_ASSESSMENT_MCP_SERVICE)
       ?.transport ?? "stdio";
+
+  useEffect(() => {
+    const timer = window.setTimeout(() => {
+      const contexts = [...recentTasks.map((task) => ({ ...task, archived: false })), ...archivedTasks.map((task) => ({ ...task, archived: true }))]
+        .map((task) => ({
+          id: task.id,
+          title: task.title,
+          agentId: task.agentId,
+          agentName: task.agentName,
+          status: runningConversationIds.has(task.id) ? "running" as const : task.status,
+          updatedAt: task.updatedAt,
+          archived: task.archived,
+          messageCount: conversationMessageBuffersRef.current[task.id]?.length,
+        }));
+      void updateNovaContext(contexts).catch(() => {
+        // sidecar 启动/重启窗口内允许同步失败；后续任务状态变化会自动重试。
+      });
+    }, 250);
+    return () => window.clearTimeout(timer);
+  }, [archivedTasks, recentTasks, runningConversationIds]);
 
   useEffect(() => {
     let alive = true;
@@ -2143,6 +2249,10 @@ export default function App() {
       // 流式 token、工具调用、结构化结果都通过 subscribePiEvents 的事件回流。
       let piSessionId = conversationPiSessionRef.current[conversationId];
       if (!piSessionId) {
+        if (selectedHuman.id === COMPUTER_AGENT_ID) {
+          const latestSettings = await syncComputerAgentSettingsToHost();
+          setComputerAgentSettings(latestSettings);
+        }
         piSessionId = await sendRpc<string>({
           type: "new_session",
           humanId: selectedHuman.id,
@@ -3025,7 +3135,7 @@ export default function App() {
           <TaskCenter
             tasks={displayedRecentTasks}
             mcpConnectedCount={connectedMcpCount}
-            mcpTotalCount={effectiveDigitalHumans.length}
+            mcpTotalCount={catalogDigitalHumans.length}
             mcpChecking={mcpChecking}
             onSelectTask={handleSelectTask}
             onRenameTask={handleRenameTask}

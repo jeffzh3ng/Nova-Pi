@@ -12,6 +12,7 @@ import {
 } from "../services/modelsService";
 import type { DefaultModelInfo, ModelSummary, ProviderSummary } from "../services/hostBridge";
 import { toUserFacingError } from "../services/uiError";
+import { ComputerAgentSettingsPanel } from "./ComputerAgentSettingsPanel";
 
 type ProviderDraft = {
   id: string;
@@ -77,7 +78,7 @@ const uniqueProviderId = (providerName: string, modelId: string, providers: Prov
   return `${base}-${suffix}`;
 };
 
-export function SettingsPanel() {
+function ModelSettingsPanel() {
   const [providers, setProviders] = useState<ProviderSummary[]>([]);
   const [defaultModel, setDefaultModelState] = useState<DefaultModelInfo | null>(null);
   const [editor, setEditor] = useState<EditorState | null>(null);
@@ -622,6 +623,23 @@ export function SettingsPanel() {
         onConfirm={() => void confirmDelete()}
         onCancel={() => setPendingDelete(null)}
       />
+    </section>
+  );
+}
+
+export function SettingsPanel() {
+  const [section, setSection] = useState<"model" | "agent">("model");
+  return (
+    <section className="settings-module" aria-label="系统设置">
+      <nav className="settings-module-tabs" aria-label="设置分类">
+        <button type="button" className={section === "model" ? "active" : ""} onClick={() => setSection("model")}>
+          模型配置
+        </button>
+        <button type="button" className={section === "agent" ? "active" : ""} onClick={() => setSection("agent")}>
+          智能员工
+        </button>
+      </nav>
+      {section === "model" ? <ModelSettingsPanel /> : <ComputerAgentSettingsPanel />}
     </section>
   );
 }

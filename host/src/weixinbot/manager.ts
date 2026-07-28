@@ -31,6 +31,11 @@ const BG_CONVERSATION_ID = "nova-weixin-bg";
  */
 const HUMAN_ALIASES: Array<{ humanId: string; displayName: string; aliases: string[] }> = [
   {
+    humanId: "nova-computer-agent",
+    displayName: "Nova 智能员工",
+    aliases: ["Nova 智能员工", "Nova智能员工", "智能员工", "电脑助手"],
+  },
+  {
     humanId: "general-chat",
     displayName: "通用对话",
     aliases: ["通用对话", "通用", "默认"],
@@ -95,16 +100,18 @@ export class WeixinBotManager {
 
   /** 启动：创建后台会话 + 订阅事件。不自动登录（登录由 weixin_login 触发）。 */
   async start(humanId: string): Promise<void> {
-    if (this.bgSessionId) return;
+    if (this.bgSessionId && this.pool.hasSession(this.bgSessionId)) return;
+    this.currentHumanId = humanId;
     this.bgSessionId = await this.pool.createBackgroundSession({
       humanId,
       conversationId: BG_CONVERSATION_ID,
     });
-    this.currentHumanId = humanId;
-    this.unsubscribeBackground = this.pool.subscribeBackgroundEvents((sessionId, event) => {
-      if (sessionId !== this.bgSessionId) return;
-      this.handleBackgroundEvent(event);
-    });
+    if (!this.unsubscribeBackground) {
+      this.unsubscribeBackground = this.pool.subscribeBackgroundEvents((sessionId, event) => {
+        if (sessionId !== this.bgSessionId) return;
+        this.handleBackgroundEvent(event);
+      });
+    }
     // 推一次初始状态给前端
     this.emitStatus(this.service.getStatus());
   }
@@ -226,7 +233,21 @@ export class WeixinBotManager {
       text: msg.text,
       fromUser: msg.fromUserId,
     });
-    const sessionId = this.bgSessionId;
+    let sessionId = this.bgSessionId;
+    try {
+      if ((!sessionId || !this.pool.hasSession(sessionId)) && this.currentHumanId) {
+        sessionId = await this.pool.createBackgroundSession({
+          humanId: this.currentHumanId,
+          conversationId: BG_CONVERSATION_ID,
+        });
+        this.bgSessionId = sessionId;
+      }
+    } catch (error) {
+      const reason = error instanceof Error ? error.message : String(error);
+      this.clearStreaming();
+      this.service.failCurrent(msg.reqId, `数字员工不可用：${reason}`);
+      return;
+    }
     if (!sessionId) {
       // session 已停止：让队列推进，否则这条消息会永久卡住。
       this.clearStreaming();

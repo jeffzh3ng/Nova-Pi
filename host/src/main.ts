@@ -49,6 +49,8 @@ import {
 import { WeixinBotManager } from "./weixinbot/manager.js";
 import { TelegramBotManager } from "./telegrambot/manager.js";
 import type { TelegramConfig } from "./telegrambot/types.js";
+import { FeishuBotManager } from "./feishubot/manager.js";
+import { normalizeFeishuConfig, type FeishuConfig } from "./feishubot/types.js";
 
 // ── 初始化 ───────────────────────────────────────────────────────────────────
 
@@ -59,6 +61,8 @@ let pool: SessionPool | null = null;
 let weixinBot: WeixinBotManager | null = null;
 /** telegramBot 懒初始化：首次 telegram_start 时按前端 config 创建。 */
 let telegramBot: TelegramBotManager | null = null;
+/** 飞书按渠道实例 ID 管理，允许多个应用同时连接并分别绑定数字员工。 */
+const feishuBots = new Map<string, FeishuBotManager>();
 let shuttingDown = false;
 
 async function bootstrap(): Promise<void> {
@@ -181,7 +185,30 @@ async function handleCommand(command: RpcCommand): Promise<void> {
         return;
       }
       case "get_state": {
-        writeResponse(id, true, { status: "ready" });
+        writeResponse(id, true, { status: "ready", nova: pool?.getNovaStatus() });
+        return;
+      }
+      case "configure_computer_agent": {
+        if (!pool) throw new Error("host 尚未就绪");
+        const settings = await pool.configureComputerAgent(command.settings);
+        writeResponse(id, true, settings);
+        return;
+      }
+      case "update_nova_context": {
+        if (!pool) throw new Error("host 尚未就绪");
+        pool.updateNovaContext(command.conversations as Parameters<SessionPool["updateNovaContext"]>[0]);
+        writeResponse(id, true);
+        return;
+      }
+      case "get_nova_status": {
+        if (!pool) throw new Error("host 尚未就绪");
+        writeResponse(id, true, pool.getNovaStatus());
+        return;
+      }
+      case "manage_nova_task": {
+        if (!pool) throw new Error("host 尚未就绪");
+        const result = await pool.manageNovaTask(command.conversationId, command.action);
+        writeResponse(id, true, result);
         return;
       }
       case "configure_mcp": {
@@ -402,6 +429,34 @@ async function handleCommand(command: RpcCommand): Promise<void> {
         }
         return;
       }
+      // ── 飞书机器人（多实例） ──
+      case "feishu_start": {
+        if (!pool) throw new Error("host 尚未就绪");
+        const config = normalizeFeishuConfig(command.config as Partial<FeishuConfig>);
+        const previous = feishuBots.get(command.channelId);
+        if (previous) await previous.stop().catch(() => {});
+        const manager = new FeishuBotManager(command.channelId, pool, agentDir);
+        feishuBots.set(command.channelId, manager);
+        const started = await manager.start(command.humanId, config);
+        writeResponse(id, true, { started });
+        return;
+      }
+      case "feishu_stop": {
+        await feishuBots.get(command.channelId)?.stop();
+        writeResponse(id, true);
+        return;
+      }
+      case "feishu_dispose": {
+        const manager = feishuBots.get(command.channelId);
+        feishuBots.delete(command.channelId);
+        await manager?.stop().catch(() => {});
+        writeResponse(id, true);
+        return;
+      }
+      case "feishu_status": {
+        writeResponse(id, true, feishuBots.get(command.channelId)?.getStatus() ?? { kind: "offline" });
+        return;
+      }
       case "shutdown": {
         writeResponse(id, true);
         void gracefulShutdown();
@@ -451,6 +506,8 @@ async function gracefulShutdown(): Promise<void> {
   try {
     await weixinBot?.stop();
     await telegramBot?.stop();
+    await Promise.all([...feishuBots.values()].map((manager) => manager.stop().catch(() => {})));
+    feishuBots.clear();
     await pool?.disposeAll();
     await mcpRegistry.dispose();
   } catch (error) {

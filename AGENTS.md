@@ -54,7 +54,7 @@ Nova-PI/
 │   ├── src/                     # React 前端
 │   │   ├── main.tsx / App.tsx
 │   │   ├── types.ts
-│   │   ├── config/appContent.ts # 2 个内置数字员工定义
+│   │   ├── config/appContent.ts # 内置数字员工展示定义（含 Nova 智能员工）
 │   │   ├── components/          # UI 组件
 │   │   ├── services/            # hostBridge + CRUD 封装
 │   │   └── styles/              # tokens/base/app/index.css
@@ -122,18 +122,19 @@ JSON-line over stdin/stdout。详见 `host/src/rpc-protocol.ts`。
 
 **重要**：命令名为 snake_case（匹配 Rust 函数名）。Tauri v2 不做 camelCase 转换。
 
-## 数字员工（2 个）
+## 数字员工
 
 | id | name | mcpService |
 |---|---|---|
 | `data-security-risk-assessment` | 数安风评数字员工 | `data-security-risk-assessment-mcp` |
 | `alert-analysis` | 威胁研判数字员工 | `alert-analysis-mcp` |
+| `nova-computer-agent` | Nova 智能员工 | 无（pi 原生工具，设置授权后启用） |
 
 每个员工在 `host/src/digital-human.ts` 配置：system prompt + 允许的 MCP 服务集 + 内置工具。
 
 ## Key Design Decisions & Caveats
 
-1. **pi 用 `noTools: "builtin"` 起步**：只禁用 pi 内置的 read/bash/edit/write；MCP 作为 inline extension 注入并保持可用。禁止使用 `noTools: "all"`，它会同时屏蔽 MCP 扩展工具。
+1. **专业员工用 `noTools: "builtin"` 起步**：只禁用 pi 内置的 read/bash/edit/write；MCP 作为 inline extension 注入并保持可用。禁止使用 `noTools: "all"`，它会同时屏蔽 MCP 扩展工具。唯一例外是 `nova-computer-agent`：它不挂 MCP，通过设置中的逐项授权生成显式 `tools` allowlist，可启用 read/bash/edit/write 及 Nova 状态管理工具；其他员工不得继承这些权限。
 2. **路由简化**：原 Nova 的 `agentRuntime.ts` 三分支路由（skill/alert/workbench）被 pi 的 LLM 工具调用决策取代。system prompt 承载角色，扩展工具描述能力，LLM 自行决定。
 3. **会话持久化双轨**：pi 的 `SessionManager` 写 JSONL（完整历史，host 内部）；Rust SQLite 存索引+消息快照（侧栏列表+重启恢复）。
 4. **title 保护**：只在 INSERT 时设 title，UPDATE 不覆盖。`title_source` 三态（pending/manual/auto）。手动重命名设 `manual`，LLM 生成设 `auto`，条件 UPDATE（`WHERE title_source='pending' AND archived=0`）防竞态。

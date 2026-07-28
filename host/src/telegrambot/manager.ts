@@ -25,6 +25,7 @@ export class TelegramBotManager {
   private pool: SessionPool;
   private service: TelegramBotService;
   private bgSessionId: string | null = null;
+  private currentHumanId: string | null = null;
   private unsubscribeBackground: (() => void) | null = null;
   /**
    * 当前流式累积所属的 reqId（H3 修复，与微信 manager 对称）。
@@ -57,15 +58,18 @@ export class TelegramBotManager {
   async start(humanId: string, config: TelegramConfig): Promise<boolean> {
     // 配置可能被用户更新（botToken 变了），同步到 service
     this.service.updateConfig(config);
-    if (!this.bgSessionId) {
+    this.currentHumanId = humanId;
+    if (!this.bgSessionId || !this.pool.hasSession(this.bgSessionId)) {
       this.bgSessionId = await this.pool.createBackgroundSession({
         humanId,
         conversationId: BG_CONVERSATION_ID,
       });
-      this.unsubscribeBackground = this.pool.subscribeBackgroundEvents((sessionId, event) => {
-        if (sessionId !== this.bgSessionId) return;
-        this.handleBackgroundEvent(event);
-      });
+      if (!this.unsubscribeBackground) {
+        this.unsubscribeBackground = this.pool.subscribeBackgroundEvents((sessionId, event) => {
+          if (sessionId !== this.bgSessionId) return;
+          this.handleBackgroundEvent(event);
+        });
+      }
     }
     return this.service.start();
   }
@@ -78,6 +82,7 @@ export class TelegramBotManager {
     }
     const bgSessionId = this.bgSessionId;
     this.bgSessionId = null;
+    this.currentHumanId = null;
     if (bgSessionId) {
       await this.pool.dispose(bgSessionId).catch(() => {});
     }
@@ -131,7 +136,21 @@ export class TelegramBotManager {
       text: msg.text,
       fromUser: msg.fromUserId,
     });
-    const sessionId = this.bgSessionId;
+    let sessionId = this.bgSessionId;
+    try {
+      if ((!sessionId || !this.pool.hasSession(sessionId)) && this.currentHumanId) {
+        sessionId = await this.pool.createBackgroundSession({
+          humanId: this.currentHumanId,
+          conversationId: BG_CONVERSATION_ID,
+        });
+        this.bgSessionId = sessionId;
+      }
+    } catch (error) {
+      const reason = error instanceof Error ? error.message : String(error);
+      this.clearStreaming();
+      this.service.failCurrent(msg.reqId, `数字员工不可用：${reason}`);
+      return;
+    }
     if (!sessionId) {
       this.clearStreaming();
       this.service.failCurrent(msg.reqId, "后台会话已停止");

@@ -3,8 +3,19 @@ import {
   ALERT_ANALYSIS_MCP_SERVICE,
   DATA_RISK_ASSESSMENT_MCP_SERVICE,
 } from "../services/mcpSettings";
+import { COMPUTER_AGENT_ID } from "../services/computerAgent";
 
 export const digitalHumans: DigitalHuman[] = [
+  {
+    id: COMPUTER_AGENT_ID,
+    name: "Nova 智能员工",
+    role: "本机智能执行与编程",
+    description: "使用 pi 原生 Agent 能力操作文件、执行命令、编程，并查看 Nova-PI 运行状态。",
+    welcomeMessage: "我可以在授权范围内读取和修改文件、执行命令、编程，并协助管理 Nova-PI 任务。",
+    accent: "primary",
+    status: "pending",
+    disabledReason: "请在设置 > 智能员工中开启并授权",
+  },
   {
     id: "data-security-risk-assessment",
     name: "数安风评数字员工",

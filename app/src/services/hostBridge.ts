@@ -35,6 +35,11 @@ export type RpcCommand =
   | { id?: string; type: "set_model"; provider: string; modelId: string; apiKey?: string; baseUrl?: string; temperature?: number; maxTokens?: number; proxyUrl?: string }
   | { id?: string; type: "test_model"; provider: string; modelId: string; apiKey?: string; baseUrl?: string }
   | { id?: string; type: "get_state"; sessionId: string }
+  // 内置电脑智能员工
+  | { id?: string; type: "configure_computer_agent"; settings: Record<string, unknown> }
+  | { id?: string; type: "update_nova_context"; conversations: Array<Record<string, unknown>> }
+  | { id?: string; type: "get_nova_status" }
+  | { id?: string; type: "manage_nova_task"; conversationId: string; action: "abort" | "dispose" }
   // MCP
   | { id?: string; type: "configure_mcp"; servers: McpServerConfig[] }
   | { id?: string; type: "list_mcp_tools"; serviceId: string }
@@ -76,6 +81,11 @@ export type RpcCommand =
   | { id?: string; type: "telegram_status" }
   | { id?: string; type: "telegram_reset_pair" }
   | { id?: string; type: "telegram_update_config"; config: Record<string, unknown> }
+  // 飞书机器人（channelId 为具体实例，支持多个并行连接）
+  | { id?: string; type: "feishu_start"; channelId: string; humanId: string; config: Record<string, unknown> }
+  | { id?: string; type: "feishu_stop"; channelId: string }
+  | { id?: string; type: "feishu_dispose"; channelId: string }
+  | { id?: string; type: "feishu_status"; channelId: string }
   // 公文
   | { id?: string; type: "shutdown" };
 
@@ -185,6 +195,8 @@ export type PiEvent =
   // Telegram 机器人事件（telegram 卡片订阅）
   | { type: "telegram_status"; status: "offline" | "awaiting_pair" | "online" | "error"; botUsername?: string; allowedUserId?: string; detail?: string }
   | { type: "telegram_message"; role: "incoming" | "assistant"; reqId?: string; text: string; fromUser?: string }
+  | { type: "feishu_status"; channelId: string; status: "offline" | "connecting" | "online" | "error"; appName?: string; botOpenId?: string; detail?: string }
+  | { type: "feishu_message"; channelId: string; role: "incoming" | "assistant"; reqId: string; eventKey: string; conversationKey: string; text: string; fromUser?: string; timestamp: number }
   | { type: "error"; sessionId?: string; message: string; recoverable?: boolean };
 
 // ─────────────────────────────────────────────────────────────────────────────

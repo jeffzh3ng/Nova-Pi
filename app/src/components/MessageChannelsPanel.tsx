@@ -5,8 +5,8 @@
  * 每个渠道一张卡片，含状态徽章 + 账号/员工 + 操作按钮。
  * 详情（二维码/消息记录/编辑配置）全部走 modal。
  *
- * 已实现渠道：微信（扫码）、Telegram（botToken + /start 配对）。
- * 占位渠道：飞书、钉钉（开发中）。
+ * 已实现渠道：微信（扫码）、Telegram（botToken + /start 配对）、飞书/Lark（多应用长连接）。
+ * 占位渠道：钉钉（开发中）。
  *
  * 每个渠道独立的状态/消息流，按 channelId 隔离，互不干扰。
  */
@@ -15,8 +15,6 @@ import { useCallback, useEffect, useRef, useState } from "react";
 import {
   MessageCircle,
   Send,
-  Power,
-  LogOut,
   Loader2,
   AlertTriangle,
   QrCode,
@@ -26,10 +24,10 @@ import {
   X,
   Save,
   Eye,
-  Settings2,
   Link2Off,
 } from "lucide-react";
 import { subscribePiEvents } from "../services/hostBridge";
+import { syncComputerAgentSettingsToHost } from "../services/computerAgent";
 import {
   startWeixinBot,
   stopWeixinBot,
@@ -45,7 +43,15 @@ import {
   type TelegramConfig,
 } from "../services/telegramBot";
 import {
+  startFeishuBot,
+  stopFeishuBot,
+  disposeFeishuBot,
+  getFeishuBotStatus,
+  type FeishuConfig,
+} from "../services/feishuBot";
+import {
   listMessageChannels,
+  listMessageChannelRecords,
   saveMessageChannel,
   deleteMessageChannel,
   CHANNEL_TYPES,
@@ -68,6 +74,7 @@ const nextChatEntryId = (role: string, reqId?: string): string => {
 /** 统一状态枚举（覆盖微信/telegram 两套状态的并集）。 */
 type PanelStatus =
   | "offline"
+  | "connecting"
   | "awaiting_scan" // 微信等待扫码
   | "awaiting_pair" // telegram 等待 /start 配对
   | "online"
@@ -76,9 +83,11 @@ type ConnectionPhase = "stopped" | "started";
 
 type ChatEntry = {
   id: string;
+  eventKey?: string;
   role: "incoming" | "assistant";
   text: string;
   fromUser?: string;
+  conversationKey?: string;
   ts: number;
 };
 
@@ -99,6 +108,7 @@ type ChannelRuntime = {
 
 const STATUS_LABEL: Record<PanelStatus, string> = {
   offline: "未连接",
+  connecting: "连接中",
   awaiting_scan: "等待扫码",
   awaiting_pair: "等待配对",
   online: "已连接",
@@ -107,13 +117,27 @@ const STATUS_LABEL: Record<PanelStatus, string> = {
 
 const STATUS_TONE: Record<PanelStatus, string> = {
   offline: "is-offline",
+  connecting: "is-pending",
   awaiting_scan: "is-pending",
   awaiting_pair: "is-pending",
   online: "is-online",
   error: "is-error",
 };
 
-/** 通用对话员工选项（host 的 general-chat，前端 appContent 不含它）。 */
+const CHANNEL_SUBTITLE: Record<string, string> = {
+  wechat: "个人微信消息接入",
+  telegram: "Telegram Bot 接入",
+  feishu: "飞书消息接入",
+  dingtalk: "钉钉消息接入",
+};
+
+function ChannelGlyph({ channelType, size = 21 }: { channelType: string; size?: number }) {
+  return channelType === "telegram" ? <Send size={size} /> : <MessageCircle size={size} />;
+}
+
+const channelTypeOf = (channel: MessageChannel): string => channel.channelType || channel.channelId;
+
+/** 通用对话不在 appContent 的数字员工目录中，作为消息渠道的独立默认选项补入。 */
 const GENERAL_CHAT_OPTION = { id: "general-chat", name: "通用对话" };
 const humanOptions = [GENERAL_CHAT_OPTION, ...digitalHumans];
 
@@ -128,6 +152,7 @@ type EditorState = {
 
 const EMPTY_DRAFT: MessageChannel = {
   channelId: "",
+  channelType: "",
   displayName: "",
   enabled: true,
   autoStart: true,
@@ -185,6 +210,7 @@ export function MessageChannelsPanel() {
   const appendChat = (channelId: string, entry: ChatEntry) => {
     setRuntime((prev) => {
       const cur = prev[channelId] ?? emptyRuntime();
+      if (entry.eventKey && cur.chat.some((item) => item.eventKey === entry.eventKey)) return prev;
       return { ...prev, [channelId]: { ...cur, chat: [...cur.chat, entry] } };
     });
   };
@@ -192,6 +218,23 @@ export function MessageChannelsPanel() {
   useEffect(() => {
     void loadChannels();
   }, []);
+
+  // 飞书是多实例渠道，逐个查询运行状态并按实例 ID 隔离展示。
+  useEffect(() => {
+    for (const channel of channels) {
+      if (channelTypeOf(channel) !== "feishu") continue;
+      void getFeishuBotStatus(channel.channelId)
+        .then((status) => {
+          patchRuntime(channel.channelId, {
+            status: status.kind,
+            account: status.appName ?? status.botOpenId,
+            detail: status.detail,
+            phase: status.kind === "offline" ? "stopped" : "started",
+          });
+        })
+        .catch(() => {});
+    }
+  }, [channels]);
 
   // 拉一次当前状态（微信 + telegram）
   useEffect(() => {
@@ -245,6 +288,7 @@ export function MessageChannelsPanel() {
         case "wechat_message":
           appendChat("wechat", {
             id: nextChatEntryId(event.role, event.reqId),
+            eventKey: event.reqId ? `${event.role}:${event.reqId}` : undefined,
             role: event.role,
             text: event.text,
             fromUser: event.fromUser,
@@ -270,10 +314,33 @@ export function MessageChannelsPanel() {
         case "telegram_message":
           appendChat("telegram", {
             id: nextChatEntryId(event.role, event.reqId),
+            eventKey: event.reqId ? `${event.role}:${event.reqId}` : undefined,
             role: event.role,
             text: event.text,
             fromUser: event.fromUser,
             ts: Date.now(),
+          });
+          break;
+        case "feishu_status":
+          patchRuntime(event.channelId, {
+            status: event.status,
+            account: event.appName ?? event.botOpenId,
+            detail: event.detail,
+            phase: event.status === "offline" ? "stopped" : "started",
+          });
+          if (event.status === "online" || event.status === "error" || event.status === "offline") {
+            setBusyChannel((current) => (current === event.channelId ? null : current));
+          }
+          break;
+        case "feishu_message":
+          appendChat(event.channelId, {
+            id: nextChatEntryId(event.role, event.reqId),
+            eventKey: event.eventKey,
+            role: event.role,
+            text: event.text,
+            fromUser: event.fromUser,
+            conversationKey: event.conversationKey,
+            ts: event.timestamp,
           });
           break;
         default:
@@ -322,11 +389,23 @@ export function MessageChannelsPanel() {
       alert("请填写显示名称");
       return;
     }
+    const restartFeishu = channelTypeOf(draft) === "feishu"
+      && runtime[draft.channelId]?.phase === "started";
     setEditor(null);
     setBusyChannel(draft.channelId || null);
     try {
       await saveMessageChannel(draft);
       await loadChannels();
+      if (restartFeishu) {
+        await syncComputerAgentSettingsToHost();
+        await disposeFeishuBot(draft.channelId).catch(() => {});
+        patchRuntime(draft.channelId, { phase: "started", status: "connecting", detail: undefined });
+        await startFeishuBot(
+          draft.channelId,
+          draft.humanId,
+          parseFeishuConfig(draft.configJson),
+        );
+      }
     } catch (err) {
       alert(`保存失败：${err instanceof Error ? err.message : String(err)}`);
     } finally {
@@ -338,6 +417,7 @@ export function MessageChannelsPanel() {
   const handleWeixinStart = async (humanId: string): Promise<void> => {
     setBusyChannel("wechat");
     try {
+      await syncComputerAgentSettingsToHost();
       await startWeixinBot(humanId);
       patchRuntime("wechat", { phase: "started", status: "offline" });
     } finally {
@@ -378,6 +458,7 @@ export function MessageChannelsPanel() {
   const handleTelegramStart = async (humanId: string, config: TelegramConfig): Promise<void> => {
     setBusyChannel("telegram");
     try {
+      await syncComputerAgentSettingsToHost();
       const ok = await startTelegramBot(humanId, config);
       if (ok) {
         patchRuntime("telegram", { phase: "started", status: "awaiting_pair" });
@@ -426,6 +507,73 @@ export function MessageChannelsPanel() {
     }
   };
 
+  // ── 飞书操作（每个 channelId 对应独立应用、连接和数字员工） ──
+  const handleFeishuStart = async (channel: MessageChannel): Promise<void> => {
+    setBusyChannel(channel.channelId);
+    patchRuntime(channel.channelId, { phase: "started", status: "connecting", detail: undefined });
+    try {
+      await syncComputerAgentSettingsToHost();
+      const started = await startFeishuBot(
+        channel.channelId,
+        channel.humanId,
+        parseFeishuConfig(channel.configJson),
+      );
+      if (!started) {
+        patchRuntime(channel.channelId, { phase: "started", status: "error" });
+      }
+    } catch (error) {
+      patchRuntime(channel.channelId, {
+        phase: "started",
+        status: "error",
+        detail: error instanceof Error ? error.message : String(error),
+      });
+    } finally {
+      setBusyChannel((current) => (current === channel.channelId ? null : current));
+    }
+  };
+
+  const handleFeishuStop = async (channelId: string): Promise<void> => {
+    setBusyChannel(channelId);
+    try {
+      await stopFeishuBot(channelId);
+      patchRuntime(channelId, { phase: "stopped", status: "offline", detail: undefined });
+    } finally {
+      setBusyChannel((current) => (current === channelId ? null : current));
+    }
+  };
+
+  const openChatRecords = async (channelId: string): Promise<void> => {
+    setChatModalFor(channelId);
+    try {
+      const records = await listMessageChannelRecords(channelId);
+      setRuntime((prev) => {
+        const current = prev[channelId] ?? emptyRuntime();
+        const loaded = records.map((record): ChatEntry => ({
+          id: `record-${record.recordId}`,
+          eventKey: record.eventKey,
+          role: record.role,
+          text: record.content,
+          fromUser: record.senderId,
+          conversationKey: record.conversationKey,
+          ts: record.createdAtMs,
+        }));
+        const merged = new Map<string, ChatEntry>();
+        for (const entry of [...loaded, ...current.chat]) {
+          merged.set(entry.eventKey ?? entry.id, entry);
+        }
+        return {
+          ...prev,
+          [channelId]: {
+            ...current,
+            chat: [...merged.values()].sort((left, right) => left.ts - right.ts),
+          },
+        };
+      });
+    } catch (error) {
+      console.error("[消息通道] 读取消息记录失败", error);
+    }
+  };
+
   // ── 删除 ──
   const confirmDelete = async (): Promise<void> => {
     if (!pendingDelete) return;
@@ -440,6 +588,9 @@ export function MessageChannelsPanel() {
       if (rt?.phase === "started") await handleTelegramStop().catch(() => {});
       await disposeTelegramBot().catch(() => {});
       patchRuntime("telegram", { phase: "stopped", status: "offline", allowedUserId: undefined, detail: undefined });
+    } else if (channelTypeOf(target) === "feishu") {
+      await disposeFeishuBot(target.channelId).catch(() => {});
+      patchRuntime(target.channelId, { phase: "stopped", status: "offline", detail: undefined });
     }
     try {
       await deleteMessageChannel(target.channelId);
@@ -449,14 +600,15 @@ export function MessageChannelsPanel() {
     }
   };
 
-  const existingIds = new Set(channels.map((c) => c.channelId));
-  const placeholderCards = CHANNEL_TYPES.filter(
-    (t) => !t.available && !existingIds.has(t.id),
-  );
+  const existingIds = new Set(channels.map(channelTypeOf));
+  const activeChatChannel = chatModalFor
+    ? channels.find((channel) => channel.channelId === chatModalFor)
+    : undefined;
+  const activeChatEntries = chatModalFor ? (runtime[chatModalFor]?.chat ?? []) : [];
 
   return (
     <section className="settings-page mcp-square-page channel-page" aria-label="消息通道">
-      <header className="settings-header">
+      <header className="settings-header channel-page-header">
         <div>
           <span>外部对接</span>
           <h1>消息通道</h1>
@@ -479,25 +631,34 @@ export function MessageChannelsPanel() {
       <div className="mcp-card-grid">
         {channels.map((channel) => {
           const rt = runtime[channel.channelId] ?? emptyRuntime();
+          const channelType = channelTypeOf(channel);
           const humanName = HUMAN_NAME[channel.humanId] ?? channel.humanId;
           const busy = busyChannel === channel.channelId;
-          const isWechat = channel.channelId === "wechat";
-          const isTelegram = channel.channelId === "telegram";
-          const implemented = isWechat || isTelegram;
+          const isWechat = channelType === "wechat";
+          const isTelegram = channelType === "telegram";
+          const isFeishu = channelType === "feishu";
+          const implemented = isWechat || isTelegram || isFeishu;
 
           return (
             <article
               key={channel.channelId}
-              className={`mcp-service-card channel-card ${channel.enabled ? "" : "is-disabled"}`}
+              className={`channel-card ${STATUS_TONE[rt.status]} ${channel.enabled ? "" : "is-disabled"}`}
+              data-channel={channelType}
             >
               <div className="channel-card-header">
-                <span className="mcp-card-icon">
-                  <MessageCircle size={24} />
-                </span>
-                <h2>{channel.displayName}</h2>
-                <span className="pi-provider-badges">
-                  <span className={`mcp-connection-badge ${STATUS_TONE[rt.status]}`}>
-                    {busy && (rt.status === "awaiting_scan" || rt.status === "awaiting_pair") ? (
+                <div className="channel-card-identity">
+                  <span className="channel-card-icon">
+                    <ChannelGlyph channelType={channelType} />
+                  </span>
+                  <div className="channel-card-title">
+                    <h2>{channel.displayName}</h2>
+                    <p>{CHANNEL_SUBTITLE[channelType] ?? "外部消息接入"}</p>
+                  </div>
+                </div>
+                <span className={`channel-status ${STATUS_TONE[rt.status]}`}>
+                  <span className="channel-status-dot" aria-hidden="true" />
+                  <span>
+                    {busy && (rt.status === "connecting" || rt.status === "awaiting_scan" || rt.status === "awaiting_pair") ? (
                       <Loader2 size={11} className="spin" />
                     ) : null}
                     {STATUS_LABEL[rt.status]}
@@ -506,26 +667,28 @@ export function MessageChannelsPanel() {
               </div>
 
               <div className="channel-card-body">
-                {rt.status === "online" && rt.account ? (
+                <dl className="channel-card-details">
                   <div className="channel-card-row">
-                    <span className="channel-card-label">{isTelegram ? "Bot" : "账号"}</span>
-                    <span className="channel-card-value">{rt.account}</span>
+                    <dt>{isTelegram ? "Bot 账号" : isFeishu ? "飞书应用" : "连接账号"}</dt>
+                    <dd className={rt.account ? "" : "is-muted"} title={rt.account}>
+                      {rt.account ?? "尚未连接"}
+                    </dd>
                   </div>
-                ) : null}
-                {isTelegram && rt.status === "online" && rt.allowedUserId ? (
+                  {isTelegram && rt.allowedUserId ? (
+                    <div className="channel-card-row">
+                      <dt>配对用户</dt>
+                      <dd title={rt.allowedUserId}>{rt.allowedUserId}</dd>
+                    </div>
+                  ) : null}
                   <div className="channel-card-row">
-                    <span className="channel-card-label">已配对用户</span>
-                    <span className="channel-card-value">{rt.allowedUserId}</span>
+                    <dt>处理员工</dt>
+                    <dd title={humanName}>{humanName}</dd>
                   </div>
-                ) : null}
-                <div className="channel-card-row">
-                  <span className="channel-card-label">员工</span>
-                  <span className="channel-card-value">{humanName}</span>
-                </div>
-                <div className="channel-card-row">
-                  <span className="channel-card-label">自动启动</span>
-                  <span className="channel-card-value">{channel.autoStart ? "是" : "否"}</span>
-                </div>
+                  <div className="channel-card-row">
+                    <dt>启动方式</dt>
+                    <dd>{channel.autoStart ? "跟随应用" : "手动启动"}</dd>
+                  </div>
+                </dl>
                 {rt.detail && implemented ? (
                   <p className="channel-card-error">
                     <AlertTriangle size={12} /> {rt.detail}
@@ -538,83 +701,85 @@ export function MessageChannelsPanel() {
                 ) : null}
               </div>
 
-              <footer className="mcp-card-footer">
-                <div className="mcp-card-actions">
-                  {/* 主操作：启动 / 停止（带文字，视觉重心） */}
-                  {implemented && rt.phase === "stopped" ? (
+              <footer className="channel-card-footer">
+                <div className="channel-card-actions">
+                  {implemented ? (
                     <button
-                      className="mcp-edit-button channel-btn-primary"
+                      type="button"
+                      role="switch"
+                      aria-checked={rt.phase === "started"}
+                      className="channel-card-switch"
                       onClick={() => {
-                        if (isWechat) void handleWeixinStart(channel.humanId);
-                        else if (isTelegram) {
-                          void handleTelegramStart(channel.humanId, parseTelegramConfig(channel.configJson));
+                        if (rt.phase === "started") {
+                          if (isWechat) void handleWeixinStop();
+                          else if (isTelegram) void handleTelegramStop();
+                          else if (isFeishu) void handleFeishuStop(channel.channelId);
+                        } else {
+                          if (isWechat) void handleWeixinStart(channel.humanId);
+                          else if (isTelegram) {
+                            void handleTelegramStart(channel.humanId, parseTelegramConfig(channel.configJson));
+                          }
+                          else if (isFeishu) void handleFeishuStart(channel);
                         }
                       }}
                       disabled={busy}
                     >
-                      <Power size={13} /> 启动
-                    </button>
-                  ) : null}
-                  {implemented && rt.phase === "started" ? (
-                    <button
-                      className="channel-btn-stop"
-                      onClick={() => (isWechat ? handleWeixinStop() : handleTelegramStop())}
-                      disabled={busy}
-                    >
-                      <LogOut size={13} /> 停止
+                      <span className="channel-switch-track" aria-hidden="true">
+                        <span />
+                      </span>
+                      <em>{busy ? "处理中" : rt.phase === "started" ? "已启用" : "未启用"}</em>
                     </button>
                   ) : null}
 
-                  {/* 图标条：次要操作（hover 显示文字 tooltip） */}
-                  <div className="channel-card-icons">
+                  <div className="channel-card-links">
                     {isWechat && rt.phase === "started" && rt.status !== "online" && rt.status !== "awaiting_scan" ? (
                       <button
-                        className="channel-btn-icon"
+                        type="button"
+                        className="channel-action-link is-accent"
                         onClick={handleWeixinLogin}
                         disabled={busy}
-                        data-tip="扫码登录"
                         aria-label="扫码登录"
                       >
-                        <QrCode size={14} />
+                        <QrCode size={14} /> 扫码
                       </button>
                     ) : null}
                     {/* 解除 Telegram 配对（仅在线 + 已配对时显示） */}
                     {isTelegram && rt.status === "online" && rt.allowedUserId ? (
                       <button
-                        className="channel-btn-icon mcp-delete-button"
+                        type="button"
+                        className="channel-action-link is-danger"
                         onClick={handleTelegramResetPair}
                         disabled={busy}
-                        data-tip="解除配对"
                         aria-label="解除配对（清空已配对用户）"
                       >
-                        <Link2Off size={14} />
+                        <Link2Off size={14} /> 解绑
                       </button>
                     ) : null}
                     {implemented ? (
                       <button
-                        className="channel-btn-icon"
-                        onClick={() => setChatModalFor(channel.channelId)}
-                        data-tip="消息记录"
+                        type="button"
+                        className="channel-action-link is-accent"
+                        onClick={() => void openChatRecords(channel.channelId)}
                         aria-label="消息记录"
                       >
-                        <Eye size={14} />
+                        <Eye size={14} /> 记录
                       </button>
                     ) : null}
                     <button
-                      className="channel-btn-icon"
+                      type="button"
+                      className="channel-action-link is-accent"
                       onClick={() => setEditor({ mode: "edit", draft: { ...channel } })}
-                      data-tip="编辑"
                       aria-label="编辑"
                     >
-                      <Pencil size={14} />
+                      <Pencil size={14} /> 编辑
                     </button>
                     <button
-                      className="channel-btn-icon mcp-delete-button"
+                      type="button"
+                      className="channel-action-link is-danger"
                       onClick={() => setPendingDelete(channel)}
-                      data-tip={isWechat ? "禁用" : "删除"}
                       aria-label={isWechat ? "禁用" : "删除"}
                     >
-                      <Trash2 size={14} />
+                      <Trash2 size={14} /> {isWechat ? "禁用" : "删除"}
                     </button>
                   </div>
                 </div>
@@ -623,23 +788,6 @@ export function MessageChannelsPanel() {
           );
         })}
 
-        {/* 占位卡片 */}
-        {placeholderCards.map((t) => (
-          <article key={t.id} className="mcp-service-card channel-card channel-card-placeholder">
-            <div className="channel-card-header">
-              <span className="mcp-card-icon">
-                <MessageCircle size={24} />
-              </span>
-              <h2>{t.displayName}</h2>
-              <span className="pi-provider-badges">
-                <span className="mcp-connection-badge is-offline">即将推出</span>
-              </span>
-            </div>
-            <div className="channel-card-body">
-              <p className="channel-card-soon">该渠道正在开发中，敬请期待。</p>
-            </div>
-          </article>
-        ))}
       </div>
 
       {/* 编辑/新建 modal */}
@@ -689,36 +837,63 @@ export function MessageChannelsPanel() {
       {/* 消息记录 modal */}
       {chatModalFor ? (
         <div
-          className="mcp-editor-overlay"
+          className="mcp-editor-overlay channel-chat-overlay"
           onMouseDown={(e) => {
             if (e.target === e.currentTarget) setChatModalFor(null);
           }}
         >
-          <section className="mcp-editor-dialog" role="dialog" aria-modal="true">
-            <header className="mcp-editor-header">
-              <span className="mcp-card-icon">
-                <MessageCircle size={20} />
-              </span>
-              <div>
-                <span>消息记录</span>
-                <h2>{channels.find((c) => c.channelId === chatModalFor)?.displayName ?? "对话"}</h2>
+          <section
+            className="mcp-editor-dialog channel-chat-dialog"
+            role="dialog"
+            aria-modal="true"
+            aria-labelledby="channel-chat-title"
+          >
+            <header className="channel-chat-header">
+              <div className="channel-chat-heading">
+                <span
+                  className="channel-chat-channel-icon"
+                  data-channel={activeChatChannel ? channelTypeOf(activeChatChannel) : chatModalFor}
+                >
+                  <ChannelGlyph channelType={activeChatChannel ? channelTypeOf(activeChatChannel) : chatModalFor} size={20} />
+                </span>
+                <div className="channel-chat-header-copy">
+                  <span>消息记录</span>
+                  <h2 id="channel-chat-title">{activeChatChannel?.displayName ?? "对话"}</h2>
+                </div>
               </div>
-              <button onClick={() => setChatModalFor(null)} aria-label="关闭">
-                <X size={18} />
-              </button>
+              <div className="channel-chat-header-actions">
+                <span className="channel-chat-live">
+                  <span aria-hidden="true" />
+                  实时更新
+                </span>
+                <button type="button" onClick={() => setChatModalFor(null)} aria-label="关闭消息记录">
+                  <X size={18} />
+                </button>
+              </div>
             </header>
-            <div className="channel-chat-list" ref={chatScrollRef}>
-              {(runtime[chatModalFor]?.chat ?? []).length === 0 ? (
+            <div
+              className="channel-chat-list"
+              data-empty={activeChatEntries.length === 0 ? "true" : "false"}
+              ref={chatScrollRef}
+              aria-live="polite"
+            >
+              {activeChatEntries.length === 0 ? (
                 <div className="channel-chat-empty">
-                  <MessageCircle size={32} />
-                  <p>等待消息...</p>
+                  <span className="channel-chat-empty-icon">
+                    <MessageCircle size={24} />
+                  </span>
+                  <strong>暂无消息记录</strong>
+                  <p>收到的用户消息与数字员工回复会实时显示在这里</p>
                 </div>
               ) : (
-                (runtime[chatModalFor]?.chat ?? []).map((entry) => (
+                activeChatEntries.map((entry) => (
                   <div key={entry.id} className={`channel-chat-item channel-chat-${entry.role}`}>
                     <div className="channel-chat-meta">
                       {entry.role === "incoming" ? (
-                        <span>来自 {chatModalFor === "wechat" ? "微信" : "Telegram"}{entry.fromUser ? ` · ${entry.fromUser.slice(0, 10)}` : ""}</span>
+                          <span>
+                            来自 {activeChatChannel ? activeChatChannel.displayName : "外部渠道"}
+                            {entry.fromUser ? ` · ${entry.fromUser.slice(0, 10)}` : ""}
+                          </span>
                       ) : (
                         <span>
                           <Send size={11} /> 已发回
@@ -726,6 +901,7 @@ export function MessageChannelsPanel() {
                       )}
                     </div>
                     <div className="channel-chat-text">{entry.text}</div>
+                    <time>{new Date(entry.ts).toLocaleString()}</time>
                   </div>
                 ))
               )}
@@ -766,9 +942,13 @@ type ChannelEditorProps = {
 
 function ChannelEditor({ editor, existingIds, onClose, onSave, onDraftChange }: ChannelEditorProps) {
   const { draft, mode } = editor;
-  const isTelegram = draft.channelId === "telegram";
+  const draftType = channelTypeOf(draft);
+  const isTelegram = draftType === "telegram";
+  const isFeishu = draftType === "feishu";
   const tgConfig = parseTelegramConfig(draft.configJson);
+  const fsConfig = parseFeishuConfig(draft.configJson);
   const hasStoredToken = Boolean(tgConfig.botToken);
+  const hasStoredSecret = Boolean(fsConfig.appSecret);
   /**
    * C1 修复：编辑模式下不回显 token 明文，避免截图/肩窥泄露。
    * - edit 模式 + 已有 token：默认显示占位提示，用户点"修改"才进入输入态。
@@ -776,6 +956,8 @@ function ChannelEditor({ editor, existingIds, onClose, onSave, onDraftChange }: 
    */
   const [editingToken, setEditingToken] = useState(false);
   const [tokenDraft, setTokenDraft] = useState("");
+  const [editingSecret, setEditingSecret] = useState(false);
+  const [secretDraft, setSecretDraft] = useState("");
   // 校验 botToken 格式（M4 延伸：数字:35字符 形式）
   const tokenValid = !isTelegram || !editingToken || /^\d{6,}:[A-Za-z0-9_-]{30,}$/.test(tokenDraft);
 
@@ -795,21 +977,37 @@ function ChannelEditor({ editor, existingIds, onClose, onSave, onDraftChange }: 
       onSave({ ...draft, configJson: JSON.stringify(merged) });
       return;
     }
+    if (isFeishu) {
+      if (!fsConfig.appId.trim()) {
+        alert("请填写飞书 App ID");
+        return;
+      }
+      const appSecret = editingSecret ? secretDraft.trim() : fsConfig.appSecret.trim();
+      if (!appSecret) {
+        alert("请填写飞书 App Secret");
+        return;
+      }
+      onSave({ ...draft, configJson: JSON.stringify({ ...fsConfig, appSecret }) });
+      return;
+    }
     onSave();
+  };
+
+  const updateFeishuConfig = (patch: Partial<FeishuConfig>) => {
+    onDraftChange({ ...draft, configJson: JSON.stringify({ ...fsConfig, ...patch }) });
   };
 
   return (
     <div className="mcp-editor-overlay" onMouseDown={(e) => { if (e.target === e.currentTarget) onClose(); }}>
-      <section className="mcp-editor-dialog" role="dialog" aria-modal="true">
-        <header className="mcp-editor-header">
-          <span className="mcp-card-icon">
-            <Settings2 size={20} />
-          </span>
-          <div>
-            <span>{mode === "add" ? "新建渠道" : "编辑渠道"}</span>
-            <h2>{draft.displayName || "消息通道配置"}</h2>
-          </div>
-          <button onClick={onClose} aria-label="关闭">
+      <section
+        className="mcp-editor-dialog channel-editor-dialog"
+        role="dialog"
+        aria-modal="true"
+        aria-labelledby="channel-editor-title"
+      >
+        <header className="mcp-editor-header channel-editor-header">
+          <h2 id="channel-editor-title">{mode === "add" ? "新建渠道" : "编辑渠道"}</h2>
+          <button type="button" onClick={onClose} aria-label="关闭">
             <X size={18} />
           </button>
         </header>
@@ -817,16 +1015,23 @@ function ChannelEditor({ editor, existingIds, onClose, onSave, onDraftChange }: 
           <label>
             <span>渠道类型 {mode === "add" ? "*" : ""}</span>
             <select
-              value={draft.channelId}
+              value={draft.channelType}
               onChange={(e) => {
                 const typeId = e.target.value;
                 const type = CHANNEL_TYPES.find((t) => t.id === typeId);
+                const channelId = typeId === "feishu"
+                  ? `feishu-${globalThis.crypto.randomUUID()}`
+                  : typeId;
                 onDraftChange({
                   ...draft,
-                  channelId: typeId,
+                  channelId,
+                  channelType: typeId,
                   displayName: type?.defaultDisplayName ?? draft.displayName,
-                  // telegram 切换时重置 configJson
-                  configJson: typeId === "telegram" ? JSON.stringify({ botToken: "" }) : "{}",
+                  configJson: typeId === "telegram"
+                    ? JSON.stringify({ botToken: "" })
+                    : typeId === "feishu"
+                      ? JSON.stringify({ appId: "", appSecret: "", domain: "feishu", groupPolicy: "mention" })
+                      : "{}",
                 });
               }}
               disabled={mode === "edit"}
@@ -834,10 +1039,10 @@ function ChannelEditor({ editor, existingIds, onClose, onSave, onDraftChange }: 
               <option value="" disabled>请选择渠道</option>
               {CHANNEL_TYPES.map((t) => {
                 const exists = existingIds.has(t.id);
-                const disabled = !t.available || (exists && mode === "add");
+                const disabled = !t.available || (!t.multiple && exists && mode === "add");
                 const label = !t.available
                   ? `${t.displayName}（即将推出）`
-                  : exists && mode === "add"
+                  : !t.multiple && exists && mode === "add"
                     ? `${t.displayName}（已添加）`
                     : t.displayName;
                 return (
@@ -848,6 +1053,81 @@ function ChannelEditor({ editor, existingIds, onClose, onSave, onDraftChange }: 
               })}
             </select>
           </label>
+
+          {isFeishu ? (
+            <>
+              <label>
+                <span>App ID *</span>
+                <input
+                  type="text"
+                  value={fsConfig.appId}
+                  onChange={(event) => updateFeishuConfig({ appId: event.target.value })}
+                  placeholder="cli_xxxxxxxxxxxxxxxx"
+                  autoComplete="off"
+                />
+              </label>
+              <label>
+                <span>App Secret *</span>
+                {mode === "edit" && hasStoredSecret && !editingSecret ? (
+                  <div className="channel-token-locked">
+                    <span className="channel-token-mask">••••••••（已配置）</span>
+                    <button
+                      type="button"
+                      className="channel-token-edit-btn"
+                      onClick={() => { setEditingSecret(true); setSecretDraft(""); }}
+                    >
+                      修改
+                    </button>
+                  </div>
+                ) : (
+                  <>
+                    <input
+                      type="password"
+                      value={editingSecret ? secretDraft : fsConfig.appSecret}
+                      onChange={(event) => {
+                        setSecretDraft(event.target.value);
+                        if (!editingSecret) setEditingSecret(true);
+                      }}
+                      placeholder="飞书开放平台应用凭证"
+                      autoComplete="off"
+                    />
+                    {mode === "edit" && editingSecret ? (
+                      <button
+                        type="button"
+                        className="channel-token-cancel-btn"
+                        onClick={() => { setEditingSecret(false); setSecretDraft(""); }}
+                      >
+                        取消修改，保留原 Secret
+                      </button>
+                    ) : null}
+                  </>
+                )}
+              </label>
+              <label>
+                <span>平台域名</span>
+                <select
+                  value={fsConfig.domain}
+                  onChange={(event) => updateFeishuConfig({ domain: event.target.value as FeishuConfig["domain"] })}
+                >
+                  <option value="feishu">飞书（中国）</option>
+                  <option value="lark">Lark（国际）</option>
+                </select>
+              </label>
+              <label>
+                <span>群聊响应策略</span>
+                <select
+                  value={fsConfig.groupPolicy}
+                  onChange={(event) => updateFeishuConfig({ groupPolicy: event.target.value as FeishuConfig["groupPolicy"] })}
+                >
+                  <option value="mention">仅被 @ 时回复</option>
+                  <option value="open">接收群内全部消息</option>
+                </select>
+              </label>
+              <p className="channel-field-help">
+                飞书开放平台需启用机器人能力、选择“使用长连接接收事件”，并订阅消息接收事件。
+              </p>
+            </>
+          ) : null}
 
           <label>
             <span>显示名称 *</span>
@@ -952,5 +1232,20 @@ function parseTelegramConfig(json: string): TelegramConfig {
     return { botToken: parsed.botToken ?? "", allowedUserId: parsed.allowedUserId };
   } catch {
     return { botToken: "" };
+  }
+}
+
+/** 解析飞书 config_json（容错并补齐安全默认值）。 */
+function parseFeishuConfig(json: string): FeishuConfig {
+  try {
+    const parsed = JSON.parse(json) as Partial<FeishuConfig>;
+    return {
+      appId: parsed.appId ?? "",
+      appSecret: parsed.appSecret ?? "",
+      domain: parsed.domain === "lark" ? "lark" : "feishu",
+      groupPolicy: parsed.groupPolicy === "open" ? "open" : "mention",
+    };
+  } catch {
+    return { appId: "", appSecret: "", domain: "feishu", groupPolicy: "mention" };
   }
 }

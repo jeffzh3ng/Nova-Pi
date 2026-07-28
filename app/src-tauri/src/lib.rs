@@ -9,6 +9,7 @@
 //! - 技能 zip 安装/脚本执行（gongwen_format.py）
 
 mod app_database;
+mod computer_agent_settings;
 mod conversation_store;
 mod files;
 mod llm_settings;
@@ -20,6 +21,10 @@ mod secrets;
 mod sidecar;
 mod skill_registry;
 
+use computer_agent_settings::{
+    get_computer_agent_settings, pick_computer_agent_working_directory,
+    save_computer_agent_settings,
+};
 use conversation_store::{
     archive_conversation, delete_conversation, generate_conversation_title,
     list_archived_conversations, list_conversations, load_conversation, rename_conversation,
@@ -38,16 +43,17 @@ use mcp_settings::{
     save_mcp_connection_settings,
 };
 use message_channels::{
-    delete_message_channel, get_message_channel, list_message_channels, save_message_channel,
+    delete_message_channel, get_message_channel, list_message_channel_records,
+    list_message_channels, save_message_channel,
 };
 use risk_http::{download_risk_assessment_result, upload_risk_assessment_material};
 use rpc::send_rpc;
 use serde_json::json;
-use tauri::Manager;
 use skill_registry::{
     delete_user_skill, execute_skill_plan, get_skill, list_skill_catalog, list_skills,
     open_user_skill_dir, pick_and_install_skill, set_skill_enabled,
 };
+use tauri::Manager;
 
 /// MCP 连接测试：经 sidecar 的 MCP 客户端做 initialize + tools/list 握手。
 #[tauri::command]
@@ -75,7 +81,10 @@ async fn test_mcp_connection(app: tauri::AppHandle, service_id: String) -> Resul
 /// 强制重连 MCP 服务：先断开 sidecar 缓存的旧连接（kill 旧子进程），再用当前配置重新 spawn。
 /// 用于 Python 侧进程内配置（如 config.local.json）变化后，让用户手动重启子进程生效。
 #[tauri::command]
-async fn reconnect_mcp_connection(app: tauri::AppHandle, service_id: String) -> Result<serde_json::Value, String> {
+async fn reconnect_mcp_connection(
+    app: tauri::AppHandle,
+    service_id: String,
+) -> Result<serde_json::Value, String> {
     let service_id = service_id.trim();
     if service_id.is_empty() {
         return Err("MCP 服务 ID 不能为空。".to_string());
@@ -98,7 +107,10 @@ async fn reconnect_mcp_connection(app: tauri::AppHandle, service_id: String) -> 
 
 /// 列出 MCP 服务声明的工具（调试用）。
 #[tauri::command]
-async fn list_mcp_tools(app: tauri::AppHandle, service_id: String) -> Result<serde_json::Value, String> {
+async fn list_mcp_tools(
+    app: tauri::AppHandle,
+    service_id: String,
+) -> Result<serde_json::Value, String> {
     let service_id = service_id.trim();
     sync_mcp_config_to_sidecar(&app).await?;
     let command = json!({ "type": "list_mcp_tools", "serviceId": service_id });
@@ -182,6 +194,10 @@ pub fn run() {
             test_mcp_connection,
             reconnect_mcp_connection,
             list_mcp_tools,
+            // 内置电脑智能员工设置
+            get_computer_agent_settings,
+            save_computer_agent_settings,
+            pick_computer_agent_working_directory,
             // 文件
             open_file_path,
             show_file_in_folder,
@@ -199,6 +215,7 @@ pub fn run() {
             get_message_channel,
             save_message_channel,
             delete_message_channel,
+            list_message_channel_records,
             // 会话
             list_conversations,
             load_conversation,
