@@ -1,6 +1,6 @@
 # Nova-PI
 
-迪普科技 AI 数字员工 —— 基于 [pi](https://github.com/earendil-works/pi) agent 底座的桌面工作台。
+Nova —— AI 数字员工桌面工作台，基于 [pi](https://github.com/earendil-works/pi) agent 底座。
 
 ## 架构
 

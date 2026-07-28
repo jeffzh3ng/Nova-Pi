@@ -202,7 +202,7 @@ pub async fn run_agent_chat(
         vec![
             LlmMessage {
                 role: "system".to_string(),
-                content: format!("你是迪普科技驻场服务 AI 工作台中的「{human_name}」。请用简体中文直接回答用户任务，输出简洁、可执行的结果。"),
+                content: format!("你是 Nova 中的「{human_name}」。请用简体中文直接回答用户任务，输出简洁、可执行的结果。"),
             },
             LlmMessage { role: "user".to_string(), content: prompt.to_string() },
         ],

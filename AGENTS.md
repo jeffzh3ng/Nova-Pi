@@ -1,4 +1,4 @@
-# Nova-PI — 迪普科技 AI 数字员工（pi 内核版）
+# Nova-PI — AI 数字员工（pi 内核版）
 
 ## Overview
 

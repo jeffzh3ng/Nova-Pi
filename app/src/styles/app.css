@@ -1071,17 +1071,17 @@ body.is-resizing-sidebar * {
   gap: 14px;
 }
 
-/* 输入框包装层：grid 叠放，让高亮覆盖层与 textarea 像素级对齐。
+/* 输入框包装层：textarea 定高撑开容器，覆盖层绝对定位叠在上面。
    覆盖层和 textarea 必须共享完全相同的字号/行高/字距/padding/换行规则，
-   否则高亮文字会和光标错位（这是 mention 高亮的标准对齐约束）。 */
+   否则高亮文字会和光标错位（这是 mention 高亮的标准对齐约束）。
+   注意：覆盖层必须脱离布局流（absolute），否则它会随内容增长撑高容器，
+   导致 textarea 跟着变高（grid 叠放会取两元素的最大行高）。 */
 .composer-input-wrap {
   position: relative;
-  display: grid;
 }
 
 .composer-highlight-overlay,
 .composer-input-wrap textarea {
-  grid-area: 1 / 1;
   width: 100%;
   min-height: 87px;
   margin: 0;
@@ -1096,15 +1096,18 @@ body.is-resizing-sidebar * {
   overflow-wrap: break-word;
 }
 
-/* 覆盖层：在 textarea 下方渲染可见文字（含高亮 mention），不可交互、不占布局。
-   textarea 的文字本身透明（仅保留 caret），由本层负责可见呈现。 */
+/* 覆盖层：绝对定位叠在 textarea 上，渲染可见文字（含高亮 mention）。
+   不可交互、不占布局——其高度跟随 textarea，绝不反向撑高容器。 */
 .composer-highlight-overlay {
+  position: absolute;
+  inset: 0;
   pointer-events: none;
   color: var(--color-ink);
   user-select: none;
 }
 
-/* textarea 文字透明 + caret 可见。caret-color 保留主题色让光标清晰。 */
+/* textarea 文字透明 + caret 可见。caret-color 保留主题色让光标清晰。
+   textarea 是唯一撑开容器的元素（定高 rows），覆盖层跟随它。 */
 .composer-input-wrap textarea {
   position: relative;
   color: transparent;

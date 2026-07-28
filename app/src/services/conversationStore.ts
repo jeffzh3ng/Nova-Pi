@@ -79,7 +79,7 @@ const knownAgentNames = [
   "漏洞加固数字员工",
   "分类分级数字员工",
   "报告编写数字员工",
-  "驻场安全服务数字员工",
+  "通用助手",
   "数安风评数字员工",
 ];
 
@@ -103,7 +103,7 @@ export function summaryToRecentTask(summary: ConversationSummary): RecentTask {
     status: summary.status,
     time: formatHistoryTime(summary.updatedAt),
     agentId: summary.agentId,
-    agentName: retiredAgentNames.has(summary.agentName) ? "驻场安全服务数字员工" : summary.agentName,
+    agentName: retiredAgentNames.has(summary.agentName) ? "通用助手" : summary.agentName,
     lastMessage: summary.lastMessage,
     createdAt: summary.createdAt,
     updatedAt: summary.updatedAt,
