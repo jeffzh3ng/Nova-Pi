@@ -1,5 +1,5 @@
 import { Bot, CheckCircle2, CirclePlus, Pencil, Save, Search, ShieldCheck, Trash2, X } from "lucide-react";
-import { useEffect, useMemo, useRef, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import { ConfirmModal } from "./ConfirmModal";
 import {
   getDefaultModel,
@@ -78,12 +78,14 @@ const uniqueProviderId = (providerName: string, modelId: string, providers: Prov
   return `${base}-${suffix}`;
 };
 
+/** 模型供应商数量上限。超出时需先删除现有供应商才能添加新的。 */
+const MAX_PROVIDERS = 4;
+
 function ModelSettingsPanel() {
   const [providers, setProviders] = useState<ProviderSummary[]>([]);
   const [defaultModel, setDefaultModelState] = useState<DefaultModelInfo | null>(null);
   const [editor, setEditor] = useState<EditorState | null>(null);
   const [pendingDelete, setPendingDelete] = useState<ProviderSummary | null>(null);
-  const [searchText, setSearchText] = useState("");
   const [busy, setBusy] = useState(false);
   const [editorBusy, setEditorBusy] = useState(false);
   const [busyProviderId, setBusyProviderId] = useState<string | null>(null);
@@ -167,6 +169,22 @@ function ModelSettingsPanel() {
     window.addEventListener("keydown", handleKeyDown);
     return () => window.removeEventListener("keydown", handleKeyDown);
   }, [editor, editorBusy]);
+
+  /** 打开「添加供应商」编辑器；超过上限时拦截并提示先删除现有供应商。 */
+  const handleAddProvider = () => {
+    if (providers.length >= MAX_PROVIDERS) {
+      alert(`最多支持 ${MAX_PROVIDERS} 个供应商，请先删除现有供应商再添加。`);
+      return;
+    }
+    setEditor({
+      mode: "add",
+      apiKeyDirty: false,
+      draft: {
+        ...EMPTY_DRAFT,
+        model: { ...EMPTY_DRAFT.model },
+      },
+    });
+  };
 
   const updateEditor = (key: ProviderTextField, value: string) => {
     setEditor((current) =>
@@ -313,35 +331,17 @@ function ModelSettingsPanel() {
     }
   };
 
-  const visibleProviders = useMemo(() => {
-    const query = searchText.trim().toLocaleLowerCase();
-    if (!query) return providers;
-    return providers.filter((p) =>
-      `${p.id} ${p.name} ${p.baseUrl} ${p.api}`.toLocaleLowerCase().includes(query),
-    );
-  }, [providers, searchText]);
-
   return (
-    <section className="settings-page mcp-square-page pi-settings-page" aria-label="模型配置">
-      <header className="settings-header">
+    <section className="settings-section" aria-label="模型配置">
+      <header className="settings-section-header">
         <div>
-          <span>系统设置</span>
-          <h1>模型配置</h1>
+          <h2>模型配置</h2>
           {status ? <p className="mcp-status-line" title={status}>{status}</p> : null}
         </div>
         <div className="settings-actions">
           <button
             type="button"
-            onClick={() =>
-              setEditor({
-                mode: "add",
-                apiKeyDirty: false,
-                draft: {
-                  ...EMPTY_DRAFT,
-                  model: { ...EMPTY_DRAFT.model },
-                },
-              })
-            }
+            onClick={handleAddProvider}
             disabled={busy || editorBusy}
           >
             <CirclePlus size={17} />
@@ -350,20 +350,8 @@ function ModelSettingsPanel() {
         </div>
       </header>
 
-      <div className="mcp-catalog-toolbar">
-        <label className="mcp-search-box">
-          <Search size={17} />
-          <input
-            value={searchText}
-            onChange={(event) => setSearchText(event.target.value)}
-            placeholder="搜索供应商"
-            aria-label="搜索供应商"
-          />
-        </label>
-      </div>
-
       <div className="mcp-card-grid">
-        {visibleProviders.map((provider) => {
+        {providers.map((provider) => {
           const isBusy = busyProviderId === provider.id;
           const currentProviderModel = provider.models.find(
             (model) => model.id === defaultModel?.model && model.provider === defaultModel?.provider,
@@ -470,7 +458,7 @@ function ModelSettingsPanel() {
             </article>
           );
         })}
-        {visibleProviders.length === 0 ? (
+        {providers.length === 0 ? (
           <div className="mcp-empty-result">
             <Search size={24} />
             <strong>没有供应商配置</strong>
@@ -628,18 +616,17 @@ function ModelSettingsPanel() {
 }
 
 export function SettingsPanel() {
-  const [section, setSection] = useState<"model" | "agent">("model");
   return (
-    <section className="settings-module" aria-label="系统设置">
-      <nav className="settings-module-tabs" aria-label="设置分类">
-        <button type="button" className={section === "model" ? "active" : ""} onClick={() => setSection("model")}>
-          模型配置
-        </button>
-        <button type="button" className={section === "agent" ? "active" : ""} onClick={() => setSection("agent")}>
-          智能员工
-        </button>
-      </nav>
-      {section === "model" ? <ModelSettingsPanel /> : <ComputerAgentSettingsPanel />}
+    <section className="settings-page mcp-square-page pi-settings-page" aria-label="系统设置">
+      <header className="settings-header">
+        <div>
+          <span>系统设置</span>
+          <h1>系统设置</h1>
+          <p className="mcp-status-line">配置模型供应商与内置智能员工</p>
+        </div>
+      </header>
+      <ModelSettingsPanel />
+      <ComputerAgentSettingsPanel />
     </section>
   );
 }
