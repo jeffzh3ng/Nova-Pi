@@ -149,9 +149,7 @@ pub fn start_sidecar(app: &AppHandle) -> Result<(), String> {
             // 指数退避：2, 4, 8, 16, 32s（failures=1..5），封顶 60s。
             // failures 从 1 开始（fetch_add 返回旧值，+1 后是新计数）。
             let exp = failures.min(5);
-            let backoff_secs = BASE_BACKOFF_SECS
-                .saturating_mul(1u64 << exp)
-                .min(60);
+            let backoff_secs = BASE_BACKOFF_SECS.saturating_mul(1u64 << exp).min(60);
             eprintln!(
                 "[sidecar] 意外退出（第 {failures}/{MAX_WATCHDOG_FAILURES} 次），{backoff_secs}s 后尝试 watchdog 重启"
             );

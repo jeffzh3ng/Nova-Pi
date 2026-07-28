@@ -414,20 +414,23 @@ pub async fn generate_conversation_title(
     // 先读会话标题来源与最近几条消息
     let (title_source, current_title, transcript) =
         app_database::with_database(&app, initialize_conversation_db, |connection, _| {
-            let (title_source, current_title): (String, String) =
-                match connection.query_row(
-                    "SELECT title_source, title FROM conversations WHERE id = ?1",
-                    params![conversation_id],
-                    |row| Ok((row.get(0)?, row.get(1)?)),
-                ) {
-                    Ok(value) => value,
-                    Err(rusqlite::Error::QueryReturnedNoRows) => {
-                        return Err(format!("会话不存在：{conversation_id}"));
-                    }
-                    Err(error) => return Err(format!("读取会话失败：{error}")),
-                };
+            let (title_source, current_title): (String, String) = match connection.query_row(
+                "SELECT title_source, title FROM conversations WHERE id = ?1",
+                params![conversation_id],
+                |row| Ok((row.get(0)?, row.get(1)?)),
+            ) {
+                Ok(value) => value,
+                Err(rusqlite::Error::QueryReturnedNoRows) => {
+                    return Err(format!("会话不存在：{conversation_id}"));
+                }
+                Err(error) => return Err(format!("读取会话失败：{error}")),
+            };
             let messages = load_messages(connection, &conversation_id)?;
-            Ok((title_source, current_title, build_title_transcript(&messages)))
+            Ok((
+                title_source,
+                current_title,
+                build_title_transcript(&messages),
+            ))
         })?;
 
     // 用户已手动改名或已自动提炼过：跳过，不动标题。
@@ -441,10 +444,8 @@ pub async fn generate_conversation_title(
     let proposed = generate_title_with_llm(&app, &transcript, &current_title).await?;
 
     // 条件 UPDATE：仅在仍为 pending 且未归档时更新（防竞态）。
-    let updated = app_database::with_database_mut(
-        &app,
-        initialize_conversation_db,
-        |connection, _| {
+    let updated =
+        app_database::with_database_mut(&app, initialize_conversation_db, |connection, _| {
             connection
                 .execute(
                     "UPDATE conversations SET title = ?1, title_source = 'auto', updated_at = ?2 \
@@ -453,8 +454,7 @@ pub async fn generate_conversation_title(
                 )
                 .map(|affected| affected > 0)
                 .map_err(|error| format!("更新任务名失败：{error}"))
-        },
-    )?;
+        })?;
 
     Ok(TitleResult {
         title: if updated { proposed } else { current_title },
@@ -470,7 +470,11 @@ fn build_title_transcript(messages: &[ConversationMessageRecord]) -> String {
         if message.content.trim().is_empty() {
             continue;
         }
-        let role = if message.role == "user" { "用户" } else { "助手" };
+        let role = if message.role == "user" {
+            "用户"
+        } else {
+            "助手"
+        };
         let clipped = clip_chars(&message.content, 300);
         lines.push(format!("[{role}]: {clipped}"));
     }
@@ -524,21 +528,9 @@ fn clean_title_output(raw: &str) -> String {
         let stripped = value
             .strip_prefix('"')
             .and_then(|v| v.strip_suffix('"'))
-            .or_else(|| {
-                value
-                    .strip_prefix('“')
-                    .and_then(|v| v.strip_suffix('”'))
-            })
-            .or_else(|| {
-                value
-                    .strip_prefix('「')
-                    .and_then(|v| v.strip_suffix('」'))
-            })
-            .or_else(|| {
-                value
-                    .strip_prefix('《')
-                    .and_then(|v| v.strip_suffix('》'))
-            });
+            .or_else(|| value.strip_prefix('“').and_then(|v| v.strip_suffix('”')))
+            .or_else(|| value.strip_prefix('「').and_then(|v| v.strip_suffix('」')))
+            .or_else(|| value.strip_prefix('《').and_then(|v| v.strip_suffix('》')));
         value = stripped.unwrap_or(value).trim();
     }
     // 去常见前缀
@@ -550,7 +542,10 @@ fn clean_title_output(raw: &str) -> String {
     }
     // 去尾部中英文标点
     value = value.trim_end_matches(|c: char| {
-        matches!(c, '。' | '，' | ',' | '.' | '、' | '；' | ';' | '：' | ':' | '！' | '!' | '？' | '?')
+        matches!(
+            c,
+            '。' | '，' | ',' | '.' | '、' | '；' | ';' | '：' | ':' | '！' | '!' | '？' | '?'
+        )
     });
     clip_chars(value.trim(), 24)
 }
@@ -1008,8 +1003,10 @@ mod tests {
 
         initialize_conversation_db(&connection).expect("migration should add title_source");
 
-        assert!(table_has_column(&connection, "conversations", "title_source")
-            .expect("schema should be readable"));
+        assert!(
+            table_has_column(&connection, "conversations", "title_source")
+                .expect("schema should be readable")
+        );
         let source: String = connection
             .query_row(
                 "SELECT title_source FROM conversations WHERE id = 'c1'",

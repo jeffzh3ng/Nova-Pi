@@ -30,7 +30,11 @@ fn derive_key(key_seed: &str) -> [u8; 32] {
     // 简单流式展开：每个 key 字节 = FNV(seed || salt || index) 的某字节
     for i in 0..32u8 {
         let mut h: u64 = 0xcbf29ce484222325; // FNV-1a 64 offset basis
-        for &b in seed_bytes.iter().chain(STATIC_SALT.iter()).chain(std::iter::once(&i)) {
+        for &b in seed_bytes
+            .iter()
+            .chain(STATIC_SALT.iter())
+            .chain(std::iter::once(&i))
+        {
             h ^= b as u64;
             h = h.wrapping_mul(0x100000001b3); // FNV-1a 64 prime
         }

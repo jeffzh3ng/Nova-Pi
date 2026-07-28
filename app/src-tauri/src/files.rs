@@ -23,8 +23,9 @@ const ALLOWED_ALERT_IMAGE_EXTENSIONS: &[&str] =
 const ALLOWED_TEXT_EXPORT_EXTENSIONS: &[&str] = &["md", "txt", "csv", "json", "log", "html"];
 /// write_uploaded_blob 接受的普通文档/文本扩展名（与前端 PromptComposer accept 对齐）。
 /// 这些文件走通用附件通道：存临时文件 → 作为 attachment → host 读取内容注入。
-const ALLOWED_UPLOADED_DOC_EXTENSIONS: &[&str] =
-    &["txt", "log", "md", "csv", "tsv", "json", "xml", "yaml", "yml"];
+const ALLOWED_UPLOADED_DOC_EXTENSIONS: &[&str] = &[
+    "txt", "log", "md", "csv", "tsv", "json", "xml", "yaml", "yml",
+];
 
 const ALERT_ANALYSIS_MCP_SERVICE: &str = "alert-analysis-mcp";
 
@@ -346,7 +347,12 @@ fn sanitize_uploaded_file_name(file_name: Option<&str>, extension: &str) -> Stri
     let stem: String = raw_stem
         .chars()
         .map(|character| {
-            if character.is_control() || matches!(character, '<' | '>' | ':' | '"' | '/' | '\\' | '|' | '?' | '*') {
+            if character.is_control()
+                || matches!(
+                    character,
+                    '<' | '>' | ':' | '"' | '/' | '\\' | '|' | '?' | '*'
+                )
+            {
                 '_'
             } else {
                 character
@@ -501,7 +507,10 @@ fn extract_text_result(value: serde_json::Value, operation: &str) -> Result<Stri
     // { content:[{type:"text", text:"<错误信息>"}], isError:true } 返回。
     // 若不检查 isError，会把 Python 的报错文本当成成功结果回传给前端，
     // 导致「路径越界」之类错误被伪装成 PCAP 解析成功。这里显式检查并转 Err。
-    let is_error = value.get("isError").and_then(|v| v.as_bool()).unwrap_or(false);
+    let is_error = value
+        .get("isError")
+        .and_then(|v| v.as_bool())
+        .unwrap_or(false);
     let collected = collect_mcp_text(&value);
     if is_error {
         return Err(match collected {
@@ -512,7 +521,9 @@ fn extract_text_result(value: serde_json::Value, operation: &str) -> Result<Stri
     if let Some(text) = collected {
         return Ok(text);
     }
-    Err(format!("威胁研判 MCP 返回的{operation}结果中没有文本内容。"))
+    Err(format!(
+        "威胁研判 MCP 返回的{operation}结果中没有文本内容。"
+    ))
 }
 
 /// 从 MCP callTool 响应中提取首个文本块（兼容 text / content[] / structuredContent）。
