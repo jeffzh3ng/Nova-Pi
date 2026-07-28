@@ -360,6 +360,10 @@ const resolveConversationStatus = (messages: ChatMessage[], busy: boolean): Rece
   }
   const last = messages[messages.length - 1];
   if (!last) return "paused";
+  if (
+    last.role === "assistant"
+    && ["需要授权", "工具未执行", "处理出错", "处理失败"].includes(last.title ?? "")
+  ) return "paused";
   return last.role === "assistant" ? "done" : "paused";
 };
 
@@ -2119,6 +2123,45 @@ export default function App() {
             }),
             "running",
           );
+          break;
+        }
+        case "computer_agent_blocked": {
+          const existingMessageId = streamingMessageIdRef.current[conversationId];
+          const existingMessage = existingMessageId
+            ? (conversationMessageBuffersRef.current[conversationId] ?? [])
+              .find((message) => message.id === existingMessageId)
+            : undefined;
+          const title = event.reason === "permission_required" ? "需要授权" : "工具未执行";
+          const steps = event.permissionLabels.length > 0
+            ? [`需要开启：${event.permissionLabels.join("、")}`]
+            : undefined;
+          if (existingMessageId && existingMessage) {
+            updateMessageInConversation(
+              conversationId,
+              existingMessageId,
+              (message) => ({
+                ...message,
+                title,
+                content: event.message,
+                steps,
+                suggestions: undefined,
+              }),
+              "paused",
+            );
+          } else {
+            appendMessageToConversation(
+              conversationId,
+              progressToMessage({ title, content: event.message, steps }),
+              "paused",
+            );
+          }
+          delete streamingMessageIdRef.current[conversationId];
+          setConversationRunning(conversationId, false);
+          clearBusySafetyTimeout(activeRunIdRef.current);
+          if (currentConversationIdRef.current === conversationId) {
+            setBusy(false);
+            busyRef.current = false;
+          }
           break;
         }
         case "agent_end": {

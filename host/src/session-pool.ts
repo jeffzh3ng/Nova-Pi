@@ -22,11 +22,15 @@ import { createSessionResourceLoader } from "./skills/loader.js";
 import {
   builtInToolNamesForSettings,
   COMPUTER_AGENT_ID,
+  computerAgentAuthorizationPrompt,
   createComputerAgentTools,
   customToolNamesForSettings,
   DEFAULT_COMPUTER_AGENT_SETTINGS,
+  detectComputerAgentPermissionBlock,
+  detectInvalidComputerToolCall,
   normalizeComputerAgentSettings,
   validateComputerAgentSettings,
+  type ComputerAgentBlock,
   type ComputerAgentSettings,
   type NovaConversationContext,
   type NovaRuntimeSession,
@@ -212,8 +216,11 @@ export class SessionPool {
     // 把历史对话作为 system prompt 附录灌入，让 pi 在创建时就拥有完整上下文。
     // pi 无"静默灌入 assistant 回复"的公开 API（sendUserMessage 会触发 turn），
     // 因此用 system prompt 承载历史文本，避免协议层撒谎（resumeMessages 之前收到后直接 break）。
-    const systemPromptWithHistory = this.injectHistory(human.systemPrompt, params.resumeMessages);
     const computerSetup = await this.computerAgentSetup(params.humanId, params.conversationId);
+    const systemPromptWithHistory = this.computerAgentSystemPrompt(
+      this.injectHistory(human.systemPrompt, params.resumeMessages),
+      computerSetup,
+    );
     const sessionResourceLoader = await createSessionResourceLoader(
       systemPromptWithHistory,
       human.allowedMcpServices,
@@ -287,8 +294,11 @@ export class SessionPool {
 
     const human = getDigitalHuman(params.humanId) ?? makeGenericHuman(params.humanId, params.mcpServiceId);
     const model = this.resolveCurrentModel();
-    const systemPromptWithHistory = this.injectHistory(human.systemPrompt, params.resumeMessages);
     const computerSetup = await this.computerAgentSetup(params.humanId, params.conversationId);
+    const systemPromptWithHistory = this.computerAgentSystemPrompt(
+      this.injectHistory(human.systemPrompt, params.resumeMessages),
+      computerSetup,
+    );
     const sessionResourceLoader = await createSessionResourceLoader(
       systemPromptWithHistory,
       human.allowedMcpServices,
@@ -346,9 +356,10 @@ export class SessionPool {
     const entry = this.sessions.get(sessionId);
     if (!entry || !entry.isBackground) return;
     this.updateEntryRuntime(entry, event);
+    const forwardedEvent = this.sanitizeBackgroundComputerAgentEvent(entry, event);
     for (const listener of this.backgroundListeners) {
       try {
-        listener(sessionId, event);
+        listener(sessionId, forwardedEvent);
       } catch (error) {
         console.error(`[session-pool] backgroundListener 抛错（sessionId=${sessionId}）：`, error);
       }
@@ -368,6 +379,14 @@ export class SessionPool {
   }): Promise<void> {
     const entry = this.sessions.get(params.sessionId);
     if (!entry) throw new Error(`会话不存在：${params.sessionId}`);
+
+    if (entry.humanId === COMPUTER_AGENT_ID) {
+      const blocked = detectComputerAgentPermissionBlock(params.message, this.computerAgentSettings);
+      if (blocked) {
+        this.deliverComputerAgentBlock(entry, blocked);
+        return;
+      }
+    }
 
     // 附件上下文拼到消息前（PCAP/OCR 哨兵格式，与原 Nova 一致）
     entry.status = "running";
@@ -424,6 +443,7 @@ export class SessionPool {
     cwd: string;
     tools?: string[];
     customTools?: ToolDefinition[];
+    authorizationPrompt?: string;
   }> {
     if (humanId !== COMPUTER_AGENT_ID) {
       return { isComputerAgent: false, cwd: process.cwd() };
@@ -443,7 +463,90 @@ export class SessionPool {
       cwd: settings.workingDirectory,
       tools: [...builtInToolNamesForSettings(settings), ...customToolNamesForSettings(settings)],
       customTools,
+      authorizationPrompt: computerAgentAuthorizationPrompt(settings),
     };
+  }
+
+  private computerAgentSystemPrompt(
+    basePrompt: string,
+    setup: { isComputerAgent: boolean; authorizationPrompt?: string },
+  ): string {
+    if (!setup.isComputerAgent || !setup.authorizationPrompt) return basePrompt;
+    return `${basePrompt}\n\n${setup.authorizationPrompt}`;
+  }
+
+  private assistantText(event: AgentSessionEvent): string {
+    if (event.type !== "message_end" || event.message?.role !== "assistant") return "";
+    const content = event.message.content;
+    if (typeof content === "string") return content;
+    if (!Array.isArray(content)) return "";
+    return content
+      .filter((item): item is { type: "text"; text: string } => (
+        !!item && typeof item === "object" && item.type === "text" && typeof item.text === "string"
+      ))
+      .map((item) => item.text)
+      .join("");
+  }
+
+  private syntheticAssistantMessageEnd(text: string): AgentSessionEvent {
+    return {
+      type: "message_end",
+      message: {
+        role: "assistant",
+        content: [{ type: "text", text }],
+        api: "openai-completions",
+        provider: "nova-pi",
+        model: "computer-agent-guard",
+        usage: {
+          input: 0,
+          output: 0,
+          cacheRead: 0,
+          cacheWrite: 0,
+          totalTokens: 0,
+          cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 },
+        },
+        stopReason: "stop",
+        timestamp: Date.now(),
+      },
+    } as AgentSessionEvent;
+  }
+
+  private notifyBackgroundListeners(sessionId: string, event: AgentSessionEvent): void {
+    for (const listener of this.backgroundListeners) {
+      try {
+        listener(sessionId, event);
+      } catch (error) {
+        console.error(`[session-pool] backgroundListener 抛错（sessionId=${sessionId}）：`, error);
+      }
+    }
+  }
+
+  private deliverComputerAgentBlock(entry: SessionEntry, blocked: ComputerAgentBlock): void {
+    entry.status = "idle";
+    entry.activeTool = undefined;
+    entry.lastActivityAt = Date.now();
+    if (entry.isBackground) {
+      this.notifyBackgroundListeners(entry.sessionId, this.syntheticAssistantMessageEnd(blocked.message));
+      return;
+    }
+    writeEvent({
+      type: "computer_agent_blocked",
+      sessionId: entry.sessionId,
+      reason: blocked.reason,
+      message: blocked.message,
+      permissions: blocked.permissions,
+      permissionLabels: blocked.permissionLabels,
+      invalidToolName: blocked.invalidToolName,
+    });
+  }
+
+  private sanitizeBackgroundComputerAgentEvent(
+    entry: SessionEntry,
+    event: AgentSessionEvent,
+  ): AgentSessionEvent {
+    if (entry.humanId !== COMPUTER_AGENT_ID || event.type !== "message_end") return event;
+    const blocked = detectInvalidComputerToolCall(this.assistantText(event), this.computerAgentSettings);
+    return blocked ? this.syntheticAssistantMessageEnd(blocked.message) : event;
   }
 
   private updateEntryRuntime(entry: SessionEntry, event: AgentSessionEvent): void {
@@ -537,6 +640,13 @@ export class SessionPool {
     if (!entry) return;
     this.updateEntryRuntime(entry, event);
     const conversationId = entry.conversationId;
+    if (entry.humanId === COMPUTER_AGENT_ID && event.type === "message_end") {
+      const blocked = detectInvalidComputerToolCall(this.assistantText(event), this.computerAgentSettings);
+      if (blocked) {
+        this.deliverComputerAgentBlock(entry, blocked);
+        return;
+      }
+    }
     // 透传 pi 事件的核心子集；前端按 sessionId→conversationId 映射后更新 ChatMessage。
     // 不同事件类型携带的字段不同，这里统一加 sessionId 后转发。
     const payload = { ...event, sessionId } as Record<string, unknown>;

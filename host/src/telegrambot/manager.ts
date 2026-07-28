@@ -180,14 +180,17 @@ export class TelegramBotManager {
     if (event.type === "message_end") {
       const msg = event.message;
       if (msg?.role !== "assistant") return;
-      let replyText = this.streamingText;
+      // 以 final message 为准；host 会在这里替换伪工具调用，避免把无效 XML 发到渠道。
+      let finalText = "";
       const content = msg.content;
-      if (!replyText && Array.isArray(content)) {
-        replyText = content
+      if (typeof content === "string") finalText = content;
+      if (Array.isArray(content)) {
+        finalText = content
           .filter((c): c is { type: "text"; text: string } => c.type === "text" && typeof c.text === "string")
           .map((c) => c.text)
           .join("");
       }
+      const replyText = finalText || this.streamingText;
       // reqId 解析（H3）：优先用 manager 的 streamingReqId，回退到 service 的 currentReqId。
       // 回复路由（chatId/messageId）由 service.replyToMap 维护。
       const pending = this.service.getCurrentPending();

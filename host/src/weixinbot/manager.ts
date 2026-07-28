@@ -313,15 +313,18 @@ export class WeixinBotManager {
     if (event.type === "message_end") {
       const msg = event.message;
       if (msg?.role !== "assistant") return;
-      // 兜底取 final text（流式累积为空时从 message.content 提取）
-      let replyText = this.streamingText;
+      // final message 是本轮权威结果：host 可能在此处把无效的文本工具调用替换为
+      // 权限/重试提示，因此不能让先前累积的流式文本覆盖最终内容。
+      let finalText = "";
       const content = msg.content;
-      if (!replyText && Array.isArray(content)) {
-        replyText = content
+      if (typeof content === "string") finalText = content;
+      if (Array.isArray(content)) {
+        finalText = content
           .filter((c): c is { type: "text"; text: string } => c.type === "text" && typeof c.text === "string")
           .map((c) => c.text)
           .join("");
       }
+      const replyText = finalText || this.streamingText;
       // reqId 解析（H3）：优先用 manager 的 streamingReqId（本次回复对应的请求），
       // 为空时回退到 service 的 currentReqId（防御：孤儿 message_end / 提前清理）。
       // 回复路由（fromUserId/contextToken）完全由 service.replyToMap 维护，不再重复持有。

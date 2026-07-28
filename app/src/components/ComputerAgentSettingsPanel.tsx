@@ -79,7 +79,12 @@ export function ComputerAgentSettingsPanel() {
       .then((settings) => {
         if (!alive) return;
         setDraft(settings);
-        setStatus(settings.enabled ? "Nova 智能员工已启用。" : "Nova 智能员工默认存在，当前尚未启用。");
+        const granted = PERMISSIONS.filter((item) => settings[item.key]).length;
+        setStatus(settings.enabled
+          ? granted > 0
+            ? `Nova 智能员工已启用，${granted} 项能力已授权。`
+            : "Nova 智能员工已启用，但尚未授权电脑操作能力；普通对话仍可使用。"
+          : "Nova 智能员工默认存在，当前尚未启用。");
       })
       .catch((error) => {
         if (alive) setStatus(toUserFacingError(error, "智能员工设置读取失败。"));
@@ -104,8 +109,11 @@ export function ComputerAgentSettingsPanel() {
     try {
       const saved = await saveComputerAgentSettings(draft);
       setDraft(saved);
+      const granted = PERMISSIONS.filter((item) => saved[item.key]).length;
       setStatus(saved.enabled
-        ? `已启用 ${saved.displayName}，${PERMISSIONS.filter((item) => saved[item.key]).length} 项能力已授权。新授权会从下一次会话开始生效。`
+        ? granted > 0
+          ? `已启用 ${saved.displayName}，${granted} 项能力已授权。新授权会从下一次会话开始生效。`
+          : `已启用 ${saved.displayName}，当前仅可普通对话；电脑操作会提示开启对应授权。`
         : `已停用 ${saved.displayName}，现有该员工会话已释放。`);
       await refreshRuntime();
     } catch (error) {

@@ -158,13 +158,15 @@ export class FeishuBotManager {
       return;
     }
     if (event.type !== "message_end" || event.message?.role !== "assistant") return;
-    let replyText = pending.text;
-    if (!replyText && Array.isArray(event.message.content)) {
-      replyText = event.message.content
+    // 以 final message 为准；host 可能已把无效文本工具调用替换为安全提示。
+    let finalText = typeof event.message.content === "string" ? event.message.content : "";
+    if (Array.isArray(event.message.content)) {
+      finalText = event.message.content
         .filter((item): item is { type: "text"; text: string } => item.type === "text" && typeof item.text === "string")
         .map((item) => item.text)
         .join("");
     }
+    const replyText = finalText || pending.text;
     state.current = undefined;
     void this.finishReply(state.conversationKey, pending.reqId, replyText || "数字员工未返回可发送的文本。")
       .finally(pending.resolve);

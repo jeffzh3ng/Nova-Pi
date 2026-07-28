@@ -50,6 +50,15 @@ export default defineConfig({
     "partial-json",
   ],
   banner: {
-    js: "#!/usr/bin/env node",
+    // Bundled CommonJS dependencies in the Feishu SDK still load Node built-ins
+    // (for example `util`) through require() and inspect their own package path.
+    // Recreate the CommonJS globals instead of using esbuild's throwing fallback.
+    js: `#!/usr/bin/env node
+import { createRequire as __createRequireForBundle } from "node:module";
+import { fileURLToPath as __fileURLToPathForBundle } from "node:url";
+import { dirname as __dirnameForBundle } from "node:path";
+const require = __createRequireForBundle(import.meta.url);
+const __filename = __fileURLToPathForBundle(import.meta.url);
+const __dirname = __dirnameForBundle(__filename);`,
   },
 });

@@ -350,7 +350,7 @@ export function MessageChannelsPanel() {
     return unsubscribe;
   }, []);
 
-  // 消息记录 modal 打开时滚到底
+  // 消息记录按时间顺序展示，打开或收到新消息时定位到最新记录。
   useEffect(() => {
     if (chatModalFor) {
       chatScrollRef.current?.scrollTo({ top: chatScrollRef.current.scrollHeight, behavior: "smooth" });

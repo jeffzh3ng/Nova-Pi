@@ -17,6 +17,21 @@ export type ComputerAgentSettings = {
   allowNovaManagement: boolean;
 };
 
+export type ComputerAgentPermission =
+  | "file_read"
+  | "file_write"
+  | "command_execution"
+  | "computer_info"
+  | "nova_management";
+
+export type ComputerAgentBlock = {
+  reason: "permission_required" | "invalid_tool_call";
+  message: string;
+  permissions: ComputerAgentPermission[];
+  permissionLabels: string[];
+  invalidToolName?: string;
+};
+
 export type NovaConversationContext = {
   id: string;
   title: string;
@@ -100,10 +115,132 @@ export async function validateComputerAgentSettings(settings: ComputerAgentSetti
 
 export function builtInToolNamesForSettings(settings: ComputerAgentSettings): string[] {
   const names: string[] = [];
-  if (settings.allowFileRead) names.push("read");
+  if (settings.allowFileRead) names.push("read", "grep", "find", "ls");
   if (settings.allowCommandExecution) names.push("bash");
   if (settings.allowFileWrite) names.push("edit", "write");
   return names;
+}
+
+const PERMISSION_LABELS: Record<ComputerAgentPermission, string> = {
+  file_read: "读取文件",
+  file_write: "修改文件与编程",
+  command_execution: "执行命令",
+  computer_info: "查看电脑信息",
+  nova_management: "管理 Nova-PI",
+};
+
+const permissionEnabled = (
+  settings: ComputerAgentSettings,
+  permission: ComputerAgentPermission,
+): boolean => {
+  switch (permission) {
+    case "file_read": return settings.allowFileRead;
+    case "file_write": return settings.allowFileWrite;
+    case "command_execution": return settings.allowCommandExecution;
+    case "computer_info": return settings.allowComputerInfo;
+    case "nova_management": return settings.allowNovaManagement;
+  }
+};
+
+const uniquePermissions = (permissions: ComputerAgentPermission[]) => (
+  [...new Set(permissions)]
+);
+
+const permissionLabels = (permissions: ComputerAgentPermission[]) => (
+  permissions.map((permission) => PERMISSION_LABELS[permission])
+);
+
+/**
+ * 对明显需要本机权限的请求做保守预检。
+ *
+ * 这不是自然语言路由器：只匹配“操作动作 + 本机对象”这类高置信度表达，避免阻断
+ * 普通知识问答。真正的权限边界仍由会话中实际暴露的 pi 工具决定。
+ */
+export function detectComputerAgentPermissionBlock(
+  message: string,
+  settings: ComputerAgentSettings,
+): ComputerAgentBlock | null {
+  const text = message.trim().toLowerCase();
+  if (!text) return null;
+
+  const required: ComputerAgentPermission[] = [];
+  const fileTarget = /(文件夹|文件|目录|桌面|下载|文档|源码|代码库|项目|日志|路径|folder|directory|desktop|file|source code|repository|repo|log\b|path\b)/i.test(text);
+  const readAction = /(查看|看看|读取|读一下|列出|浏览|打开|检查|分析|查找|搜索|检索|统计|扫描|有哪些|内容|list|read|show|inspect|browse|open|search|find|scan)/i.test(text);
+  const writeAction = /(创建|新建|写入|修改|编辑|删除|移除|移动|复制|重命名|整理|保存|生成|覆盖|create|write|modify|edit|delete|remove|move|copy|rename|save|generate)/i.test(text);
+  const existingFileMutation = /(修改|编辑|删除|移除|移动|复制|重命名|整理|覆盖|modify|edit|delete|remove|move|copy|rename)/i.test(text);
+  const commandAction = /(执行命令|运行命令|运行脚本|执行脚本|启动程序|停止程序|安装|卸载|编译|构建|打包|跑测试|运行测试|执行测试|powershell|cmd\b|bash\b|terminal|shell|npm\b|pnpm\b|yarn\b|cargo\b|git\b|python\b|node\b|run command|execute command|run script|build|compile|install|uninstall)/i.test(text);
+  const computerTarget = /(电脑|本机|计算机|操作系统|系统信息|cpu|内存|磁盘|网卡|网络接口|主机名|ip地址|computer|system info|memory|disk|hostname|network interface)/i.test(text);
+  const computerAction = /(查看|看看|获取|读取|显示|检查|查询|多少|配置|状态|show|get|inspect|check|status|configuration)/i.test(text);
+  const novaTarget = /(nova-?pi|nova|任务|会话|对话|消息通道)/i.test(text);
+  const novaAction = /(查看|看看|列出|查询|状态|运行中|中止|终止|停止|释放|管理|show|list|status|running|abort|stop|dispose|manage)/i.test(text);
+
+  if (fileTarget && (readAction || existingFileMutation)) required.push("file_read");
+  if (fileTarget && writeAction) required.push("file_write");
+  if (commandAction) required.push("command_execution");
+  if (computerTarget && computerAction) required.push("computer_info");
+  if (novaTarget && novaAction) required.push("nova_management");
+
+  const missing = uniquePermissions(required).filter((permission) => !permissionEnabled(settings, permission));
+  if (missing.length === 0) return null;
+  const labels = permissionLabels(missing);
+  return {
+    reason: "permission_required",
+    permissions: missing,
+    permissionLabels: labels,
+    message: `这项操作需要“${labels.join("、")}”权限，当前尚未授权，因此没有执行。请前往“设置 > 智能员工”开启对应权限并保存，然后重试。`,
+  };
+}
+
+/** 识别模型把工具调用协议当普通文本输出的情况，避免伪调用被当成成功结果。 */
+export function detectInvalidComputerToolCall(
+  text: string,
+  settings: ComputerAgentSettings,
+): ComputerAgentBlock | null {
+  const hasFunctionEnvelope = /<function_calls\b/i.test(text) && /<invoke\s+name\s*=\s*["']/i.test(text);
+  const hasToolEnvelope = /<tool_calls?\b/i.test(text) && /(?:name\s*=|"name"\s*:)/i.test(text);
+  if (!hasFunctionEnvelope && !hasToolEnvelope) return null;
+
+  const toolName = text.match(/<invoke\s+name\s*=\s*["']([^"']+)["']/i)?.[1]
+    ?? text.match(/<tool_calls?[^>]*\bname\s*=\s*["']([^"']+)["']/i)?.[1]
+    ?? text.match(/"name"\s*:\s*"([^"]+)"/i)?.[1];
+  const requestedPermissions: ComputerAgentPermission[] = [];
+  if (toolName && /^(?:list_files?|ls|find|grep|read(?:_file)?)$/i.test(toolName)) requestedPermissions.push("file_read");
+  if (toolName && /^(?:write(?:_file)?|edit(?:_file)?|delete(?:_file)?|move(?:_file)?|copy(?:_file)?)$/i.test(toolName)) requestedPermissions.push("file_write");
+  if (toolName && /^(?:bash|shell|exec|execute|run_command)$/i.test(toolName)) requestedPermissions.push("command_execution");
+  if (toolName && /^(?:computer_info|system_info)$/i.test(toolName)) requestedPermissions.push("computer_info");
+  if (toolName && /^nova_(?:status|list_tasks|manage_task)$/i.test(toolName)) requestedPermissions.push("nova_management");
+  const missing = uniquePermissions(requestedPermissions)
+    .filter((permission) => !permissionEnabled(settings, permission));
+  const labels = permissionLabels(missing);
+  const namedTool = toolName ? `“${toolName}”` : "未知工具";
+  const permissionHint = labels.length > 0
+    ? ` 当前还缺少“${labels.join("、")}”权限，请在“设置 > 智能员工”开启后重试。`
+    : " 请重试；Nova 将改用当前会话中真实可用的 pi 工具。";
+  return {
+    reason: "invalid_tool_call",
+    permissions: missing,
+    permissionLabels: labels,
+    invalidToolName: toolName,
+    message: `模型输出了文本形式的伪工具调用 ${namedTool}，它没有通过 pi 工具通道执行，本次未对电脑进行任何操作。${permissionHint}`,
+  };
+}
+
+/** 把本次授权和真实工具名写入 system prompt，降低模型臆造 list_files 等工具的概率。 */
+export function computerAgentAuthorizationPrompt(settings: ComputerAgentSettings): string {
+  const grants: Array<[string, boolean, string]> = [
+    ["读取文件", settings.allowFileRead, "read、ls、find、grep"],
+    ["修改文件与编程", settings.allowFileWrite, "edit、write"],
+    ["执行命令", settings.allowCommandExecution, "bash"],
+    ["查看电脑信息", settings.allowComputerInfo, "computer_info"],
+    ["管理 Nova-PI", settings.allowNovaManagement, "nova_status、nova_list_tasks、nova_manage_task"],
+  ];
+  const lines = grants.map(([label, enabled, tools]) => (
+    `- ${label}：${enabled ? `已授权（可用工具：${tools}）` : "未授权"}`
+  ));
+  return `【本次会话授权】\n${lines.join("\n")}\n\n` +
+    "只能通过当前会话真实注册的结构化工具调用执行操作。列出目录使用 ls，不存在 list_files 工具。" +
+    "绝不能输出 <function_calls>、<invoke> 或其他文本形式的伪工具调用；缺少权限时直接说明需要开启哪一项授权。" +
+    "不得用 bash 绕过未授予的读取、修改或管理权限。";
 }
 
 const toolResult = (data: unknown) => ({
