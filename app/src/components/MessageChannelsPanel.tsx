@@ -264,6 +264,9 @@ export function MessageChannelsPanel() {
     const unsubscribe = subscribePiEvents((event) => {
       switch (event.type) {
         case "wechat_qrcode":
+          // 同时缓存到 runtime.qrUrl：用户关掉二维码弹窗后，点「扫码」可重新打开同一张二维码，
+          // 而不必再触发一次 login（sidecar 的 loginInProgress 守卫会挡掉重复登录请求）。
+          patchRuntime("wechat", { qrUrl: event.qrUrl });
           setQrModal({ url: event.qrUrl });
           break;
         case "wechat_status":
@@ -271,6 +274,11 @@ export function MessageChannelsPanel() {
           if (wechatLoginTimeoutRef.current) {
             clearTimeout(wechatLoginTimeoutRef.current);
             wechatLoginTimeoutRef.current = null;
+          }
+          // awaiting_scan 之外的终态（online/error/offline）都清掉缓存的二维码：
+          // 登录成功或断开后旧二维码已失效，避免点「扫码」再打开过期的二维码。
+          if (event.status !== "awaiting_scan") {
+            patchRuntime("wechat", { qrUrl: undefined });
           }
           patchRuntime("wechat", {
             status: event.status,
@@ -417,14 +425,34 @@ export function MessageChannelsPanel() {
   const handleWeixinStart = async (humanId: string): Promise<void> => {
     setBusyChannel("wechat");
     try {
-      await syncComputerAgentSettingsToHost();
+      // syncComputerAgentSettingsToHost 只是顺带同步 Nova 智能员工授权（启动时已同步过），
+      // 与微信启用无依赖关系，失败不应阻断启用流程。
+      await syncComputerAgentSettingsToHost().catch((error) => {
+        console.error("[消息通道] Nova 智能员工授权同步失败（不阻断微信启用）", error);
+      });
       await startWeixinBot(humanId);
-      patchRuntime("wechat", { phase: "started", status: "offline" });
+      // 启用后自动触发 login：service 层会优先用 token 缓存恢复（免扫码），
+      // 无缓存才走扫码流程。状态由后续 wechat_status 事件驱动，这里先标 connecting。
+      patchRuntime("wechat", { phase: "started", status: "connecting" });
+      await loginWeixinBot();
+    } catch (error) {
+      // 之前只有 finally 静默吞错，导致点启用没反应也看不到原因。
+      // 这里把错误暴露成卡片状态 + 控制台，便于排查。
+      const detail = error instanceof Error ? error.message : String(error);
+      console.error("[消息通道] 微信启用失败", error);
+      patchRuntime("wechat", { phase: "started", status: "error", detail });
     } finally {
       setBusyChannel(null);
     }
   };
   const handleWeixinLogin = async (): Promise<void> => {
+    // awaiting_scan 状态下 sidecar 已有 loginInProgress 守卫，再调 login 会被 no-op。
+    // 此时若已缓存二维码（用户关掉了弹窗想再看），直接打开缓存的二维码即可，不必触发新登录。
+    const cachedQrUrl = runtime.wechat?.qrUrl;
+    if (cachedQrUrl) {
+      setQrModal({ url: cachedQrUrl });
+      return;
+    }
     setBusyChannel("wechat");
     // H4：扫码登录触发后，若 30s 内无 wechat_status 事件回流，自动清 busy，
     // 避免按钮一直 disabled 用户无法操作（收到事件时 wechat_status 分支会清这个 timer）。
@@ -732,7 +760,7 @@ export function MessageChannelsPanel() {
                   ) : null}
 
                   <div className="channel-card-links">
-                    {isWechat && rt.phase === "started" && rt.status !== "online" && rt.status !== "awaiting_scan" ? (
+                    {isWechat && rt.phase === "started" && rt.status !== "online" ? (
                       <button
                         type="button"
                         className="channel-action-link is-accent"
@@ -777,9 +805,9 @@ export function MessageChannelsPanel() {
                       type="button"
                       className="channel-action-link is-danger"
                       onClick={() => setPendingDelete(channel)}
-                      aria-label={isWechat ? "禁用" : "删除"}
+                      aria-label="删除"
                     >
-                      <Trash2 size={14} /> {isWechat ? "禁用" : "删除"}
+                      <Trash2 size={14} /> 删除
                     </button>
                   </div>
                 </div>
@@ -912,13 +940,9 @@ export function MessageChannelsPanel() {
 
       <ConfirmModal
         open={pendingDelete !== null}
-        title={pendingDelete?.channelId === "wechat" ? "禁用渠道" : "删除渠道"}
-        message={
-          pendingDelete?.channelId === "wechat"
-            ? `禁用「${pendingDelete.displayName}」？禁用后可在新建渠道时重新添加。`
-            : `确定删除「${pendingDelete?.displayName}」？此操作不可撤销。`
-        }
-        confirmLabel={pendingDelete?.channelId === "wechat" ? "禁用" : "删除"}
+        title="删除渠道"
+        message={`确定删除「${pendingDelete?.displayName}」？此操作不可撤销，需要时可在新建渠道时重新添加。`}
+        confirmLabel="删除"
         danger
         onConfirm={confirmDelete}
         onCancel={() => setPendingDelete(null)}

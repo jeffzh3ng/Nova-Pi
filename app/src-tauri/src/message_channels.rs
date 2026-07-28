@@ -1,7 +1,7 @@
 //! 消息通道（微信/飞书/...）配置：SQLite 表 + CRUD。
 //!
 //! 与 mcp_settings.rs 同风格：通过 app_database::with_database 拿连接，
-//! initialize 函数里建表 + 懒 seed 默认渠道。
+//! initialize 函数里仅建表（不 seed 任何默认渠道——所有渠道都由用户在面板手动新建）。
 //!
 //! 每个渠道一行配置：是否启用、是否自动启动、用哪个数字员工处理消息、
 //! 是否在面板显示消息记录、渠道特有配置（JSON）。
@@ -18,11 +18,8 @@ use tauri::AppHandle;
 use crate::app_database;
 use crate::secrets;
 
-/// 默认渠道：微信。首次 list 时 seed。
-pub const WECHAT_CHANNEL_ID: &str = "wechat";
-
-/// 内置渠道白名单（save 时校验 channel_id，防止前端任意构造 id 覆盖内置行）。
-/// 未来新增渠道（飞书等）在此登记。
+/// 支持的渠道类型白名单（save 时校验 channel_id，防止前端任意构造 id）。
+/// 新增渠道（飞书等）在此登记。
 const BUILTIN_CHANNEL_TYPES: &[&str] = &["wechat", "telegram", "feishu", "dingtalk"];
 
 /// config_json 中需要混淆存储的字段路径（按渠道类型）。
@@ -83,7 +80,7 @@ pub struct MessageChannelRecordList {
     pub records: Vec<MessageChannelRecord>,
 }
 
-// ── 数据库初始化（建表 + 懒 seed） ──
+// ── 数据库初始化（建表 + 旧库迁移） ──
 
 fn initialize_message_channels_db(connection: &Connection) -> Result<(), String> {
     connection
@@ -142,16 +139,8 @@ fn initialize_message_channels_db(connection: &Connection) -> Result<(), String>
         )
         .map_err(|error| format!("补全消息通道类型失败：{error}"))?;
 
-    // 懒 seed：首次初始化时插入默认微信渠道（已存在则跳过）。
-    let now = chrono::Local::now().format("%Y-%m-%d %H:%M:%S").to_string();
-    connection
-        .execute(
-            r#"INSERT OR IGNORE INTO message_channels
-               (channel_id, channel_type, display_name, enabled, auto_start, human_id, show_messages, config_json, updated_at)
-               VALUES (?1, 'wechat', ?2, 1, 1, 'general-chat', 0, '{}', ?3)"#,
-            rusqlite::params![WECHAT_CHANNEL_ID, "微信", now],
-        )
-        .map_err(|error| format!("seed 默认消息通道失败：{error}"))?;
+    // 不再 seed 任何默认渠道：所有渠道（含微信）都由用户在面板「新建渠道」手动添加。
+    // 全新安装时 message_channels 表为空，面板显示空状态引导用户新建。
 
     Ok(())
 }
@@ -491,28 +480,19 @@ pub fn persist_message_event(app: &AppHandle, event: &Value) -> Result<(), Strin
     })
 }
 
-/// 删除（或禁用）一个消息通道。
-/// 内置渠道（wechat）不真删，改为 enabled=0（避免 seed 逻辑反复重建）；
-/// 自定义渠道（未来扩展）直接 DELETE。
+/// 删除一个消息通道。
+///
+/// 所有渠道统一走 DELETE：删了就彻底移除。需要时可通过「新建渠道」重新添加。
+/// （不再有任何默认 seed，删除后不会自动复活。）
 #[tauri::command]
 pub fn delete_message_channel(app: AppHandle, channel_id: String) -> Result<(), String> {
     app_database::with_database_mut(&app, initialize_message_channels_db, |connection, _| {
-        if channel_id == WECHAT_CHANNEL_ID {
-            let now = chrono::Local::now().format("%Y-%m-%d %H:%M:%S").to_string();
-            connection
-                .execute(
-                    "UPDATE message_channels SET enabled = 0, updated_at = ?2 WHERE channel_id = ?1",
-                    rusqlite::params![channel_id, now],
-                )
-                .map_err(|error| format!("禁用消息通道失败：{error}"))?;
-        } else {
-            connection
-                .execute(
-                    "DELETE FROM message_channels WHERE channel_id = ?1",
-                    rusqlite::params![channel_id],
-                )
-                .map_err(|error| format!("删除消息通道失败：{error}"))?;
-        }
+        connection
+            .execute(
+                "DELETE FROM message_channels WHERE channel_id = ?1",
+                rusqlite::params![channel_id],
+            )
+            .map_err(|error| format!("删除消息通道失败：{error}"))?;
         Ok(())
     })
 }
@@ -528,18 +508,22 @@ mod tests {
         assert!(validate_channel_id("telegram-copy", "telegram").is_err());
     }
 
+    /// 全新数据库初始化：只建表，不 seed 任何默认渠道。
+    /// 所有渠道都应由用户在面板手动新建，init 后 message_channels 必须为空。
     #[test]
-    fn initializes_schema_and_seeds_channel_type() {
+    fn initializes_schema_without_seeding_default_channel() {
         let connection = Connection::open_in_memory().expect("open db");
         initialize_message_channels_db(&connection).expect("initialize");
-        let value: String = connection
-            .query_row(
-                "SELECT channel_type FROM message_channels WHERE channel_id = 'wechat'",
-                [],
-                |row| row.get(0),
-            )
-            .expect("seeded row");
-        assert_eq!(value, "wechat");
+        let count: i64 = connection
+            .query_row("SELECT COUNT(*) FROM message_channels", [], |row| row.get(0))
+            .expect("query");
+        assert_eq!(count, 0, "全新库 init 后不应有任何默认渠道");
+        // 反复 init 也不应插入（防止 with_database 每次调用都 seed 的回归）
+        initialize_message_channels_db(&connection).expect("re-init");
+        let count_again: i64 = connection
+            .query_row("SELECT COUNT(*) FROM message_channels", [], |row| row.get(0))
+            .expect("query");
+        assert_eq!(count_again, 0, "再次 init 仍不应 seed 任何渠道");
     }
 
     #[test]
@@ -572,5 +556,10 @@ mod tests {
             )
             .expect("legacy row remains");
         assert_eq!(channel_type, "telegram");
+        // 迁移不应新增任何渠道（不 seed wechat 等）
+        let count: i64 = connection
+            .query_row("SELECT COUNT(*) FROM message_channels", [], |row| row.get(0))
+            .expect("query");
+        assert_eq!(count, 1, "迁移不应新增渠道，只保留老库已有的行");
     }
 }
