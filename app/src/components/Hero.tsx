@@ -1,6 +1,17 @@
 import { PromptComposer } from "./PromptComposer";
 import type { DigitalHuman } from "../types";
 
+/** 按当前小时返回时段问候语（上午好 / 下午好 / 晚上好 / 凌晨好）。 */
+function greetingByHour(): string {
+  const h = new Date().getHours();
+  if (h >= 5 && h < 9) return "早上好";
+  if (h >= 9 && h < 12) return "上午好";
+  if (h >= 12 && h < 14) return "中午好";
+  if (h >= 14 && h < 18) return "下午好";
+  if (h >= 18 && h < 23) return "晚上好";
+  return "夜深了";
+}
+
 type HeroProps = {
   prompt: string;
   introduction?: string;
@@ -42,8 +53,7 @@ export function Hero({
         <img src="/assets/digital-human-blueprint.png" alt="" />
       </div>
       <div className="hero-copy">
-        <p>欢迎使用</p>
-        <h1>迪普科技驻场服务 AI 工作台</h1>
+        <h1>{greetingByHour()}，需要我帮你做点什么？</h1>
       </div>
       <PromptComposer
         value={prompt}

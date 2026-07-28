@@ -1,6 +1,6 @@
 # 变更记录
 
-本项目（Nova-PI）是基于 [earendil-works/pi](https://github.com/earendil-works/pi) 重新架构的迪普科技 AI 数字员工桌面工作台，与原 [Nova](https://github.com/jeffzh3ng/Nova)（Rust 全栈）完全独立。
+本项目（Nova-PI）是基于 [earendil-works/pi](https://github.com/earendil-works/pi) 重新架构的 AI 数字员工桌面工作台，与原 [Nova](https://github.com/jeffzh3ng/Nova)（Rust 全栈）完全独立。
 
 所有里程碑按时间倒序排列。
 

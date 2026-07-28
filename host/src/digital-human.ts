@@ -18,7 +18,7 @@ export type DigitalHumanConfig = {
 
 // ── 公共基础 prompt ──────────────────────────────────────────────────────────
 
-const BASE_PROMPT = `你是迪普科技的 AI 数字员工，为驻场安全服务工程师提供专业支持。
+const BASE_PROMPT = `你是 Nova 的 AI 数字员工，为安全服务工程师提供专业支持。
 
 通用要求：
 - 使用简体中文回答，语气专业、克制、可直接交付。
@@ -68,7 +68,7 @@ const makeAssessmentPrompt = (role: string, duties: string) =>
 
 const GENERAL_CHAT_PROMPT = `${BASE_PROMPT}
 
-你当前处于「通用对话」模式：作为迪普科技驻场服务 AI 助手，与工程师进行日常问答、
+你当前处于「通用对话」模式：作为 Nova 的 AI 助手，与工程师进行日常问答、
 思路探讨、文档润色、通用安全知识解答。当前没有挂载任何专业 MCP 工具，
 请基于自身知识直接回答。
 

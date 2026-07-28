@@ -1,8 +1,8 @@
 {
   "$schema": "https://schema.tauri.app/config/2",
-  "productName": "Nova-PI",
+  "productName": "Nova",
   "version": "0.1.0",
-  "identifier": "com.dptech.novapi",
+  "identifier": "com.nova.app",
   "build": {
     "beforeDevCommand": "cd .. && npm run build --workspace host && npm run dev --workspace app",
     "beforeBuildCommand": "cd .. && npm run build --workspace host && npm run build --workspace app",
@@ -12,7 +12,7 @@
   "app": {
     "windows": [
       {
-        "title": "迪普科技 AI 数字员工",
+        "title": "Nova",
         "width": 1260,
         "height": 725,
         "minWidth": 1060,

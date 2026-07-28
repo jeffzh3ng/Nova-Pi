@@ -238,7 +238,7 @@ export function TaskCenter({
                           </span>
                           <div className="task-row-title">
                             <strong title={task.title}>{task.title}</strong>
-                            <span>{task.agentName ?? "驻场安全服务数字员工"}</span>
+                            <span>{task.agentName ?? "通用助手"}</span>
                           </div>
                           <span className={`task-status-pill ${task.status}`}>{meta.label}</span>
                           <div className="task-row-menu" ref={menuOpen ? menuRef : undefined}>

@@ -1,9 +1,14 @@
 [package]
 name = "nova-pi"
 version = "0.1.0"
-description = "Nova-PI: 迪普科技 AI 数字员工（pi 内核版）"
+description = "Nova: AI 数字员工桌面工作台（pi 内核版）"
 authors = ["Nova-PI Team"]
 edition = "2021"
+default-run = "Nova"
+
+[[bin]]
+name = "Nova"
+path = "src/main.rs"
 
 [lib]
 name = "nova_pi_lib"

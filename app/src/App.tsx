@@ -125,7 +125,7 @@ const GENERAL_CHAT_HUMAN_ID = "general-chat";
 const GENERAL_CHAT_HUMAN: DigitalHuman = {
   id: GENERAL_CHAT_HUMAN_ID,
   name: "通用助手",
-  role: "迪普驻场 AI 助手",
+  role: "AI 助手",
   description: "通用对话助手，可回答日常问题；用 @ 可召唤专业数字员工。",
   accent: "primary",
   status: "ready",
@@ -690,18 +690,17 @@ export default function App() {
 
   const effectiveDigitalHumans = useMemo(
     () => {
-      const computerHuman: DigitalHuman = {
-        ...COMPUTER_AGENT_TEMPLATE,
-        name: computerAgentSettings?.displayName || COMPUTER_AGENT_TEMPLATE.name,
-        status: computerAgentSettings?.enabled ? "ready" : "pending",
-        disabledReason: computerAgentSettings?.enabled
-          ? undefined
-          : "请在设置 > 智能员工中开启并授权",
-      };
+      // 未启用时不显示内置智能员工（首页卡片、侧栏快捷入口、@ 召唤列表均由本数组派生）。
       const mcpHumans = catalogDigitalHumans.map((human) => {
         const resolved = resolveMcpStatus(human.status, human.mcpService);
         return { ...human, status: resolved.status, disabledReason: resolved.disabledReason ?? human.disabledReason };
       });
+      if (!computerAgentSettings?.enabled) return mcpHumans;
+      const computerHuman: DigitalHuman = {
+        ...COMPUTER_AGENT_TEMPLATE,
+        name: computerAgentSettings.displayName || COMPUTER_AGENT_TEMPLATE.name,
+        status: "ready",
+      };
       return [computerHuman, ...mcpHumans];
     },
     [catalogDigitalHumans, computerAgentSettings, mcpAvailability],
