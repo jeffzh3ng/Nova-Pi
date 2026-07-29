@@ -29,6 +29,7 @@ import {
   summaryToRecentTask,
 } from "./services/conversationStore";
 import type { ConversationSnapshot, ConversationSummary } from "./services/conversationStore";
+import { requiresNewPiSession } from "./services/conversationRouting";
 import { executeSkillPlan } from "./services/skillExecution";
 import { parseAlertFileContent } from "./services/alertFileParser";
 import type { ParsedAlertFields } from "./services/alertFileParser";
@@ -391,6 +392,11 @@ type AlertAttachmentContext = {
 
 type ConversationMetadata = Pick<ConversationSnapshot, "agentId" | "agentName">;
 
+type PiSessionIdentity = {
+  humanId: string;
+  mcpServiceId?: string;
+};
+
 const IMAGE_MIME_BY_EXT: Record<string, string> = {
   png: "image/png",
   jpg: "image/jpeg",
@@ -517,6 +523,11 @@ export default function App() {
   // conversationId ↔ pi sessionId 映射。pi 的 AgentSession 在 host 内部按 sessionId 管理，
   // 前端只持有这个映射，发 prompt 时把 sessionId 一起带给 host。
   const conversationPiSessionRef = useRef<Record<string, string>>({});
+  // A pi session is created with one fixed system prompt and MCP allowlist.
+  // Keep its identity in a separate map: the session-id map is also consumed
+  // by long-lived event listeners and must retain its stable string shape
+  // across development hot updates.
+  const conversationPiSessionIdentityRef = useRef<Record<string, PiSessionIdentity>>({});
   // 流式生成中的 assistant 消息 id（按 conversationId 索引），用于把 text_delta 拼到同一条消息。
   const streamingMessageIdRef = useRef<Record<string, string>>({});
   // 工具调用气泡的临时 id（按 conversationId + toolCallId），用于把 tool_execution_end 的结果合进同一条。
@@ -638,6 +649,7 @@ export default function App() {
       for (const conversationId of Object.keys(conversationPiSessionRef.current)) {
         if (conversationMetadataRef.current[conversationId]?.agentId === COMPUTER_AGENT_ID) {
           delete conversationPiSessionRef.current[conversationId];
+          delete conversationPiSessionIdentityRef.current[conversationId];
         }
       }
     };
@@ -660,6 +672,7 @@ export default function App() {
     window.addEventListener("nova-computer-agent-settings-changed", handleChanged);
     void listen("pi-sidecar-restarted", () => {
       conversationPiSessionRef.current = {};
+      conversationPiSessionIdentityRef.current = {};
       void refreshComputerAgent();
     }).then((unlisten) => {
       if (alive) unlistenRestart = unlisten;
@@ -1258,7 +1271,7 @@ export default function App() {
         if (!message.startsWith("会话不存在")) throw error;
       }
 
-      if (loaded) {
+      if (loaded && !conversationMetadataRef.current[conversationId]) {
         rememberConversationMetadata(conversationId, {
           agentId: loaded.summary.agentId,
           agentName: loaded.summary.agentName,
@@ -1532,10 +1545,10 @@ export default function App() {
     appendUserMessageToConversation(conversationId, content, attachments);
   };
 
-  const ensureConversation = () => {
+  const ensureConversation = (metadata = metadataFromCurrentSelection()) => {
     if (currentConversationId && activeNav === "tasks" && !conversationReadOnly) {
       conversationReadOnlyRef.current = false;
-      rememberConversationMetadata(currentConversationId, metadataFromCurrentSelection());
+      rememberConversationMetadata(currentConversationId, metadata);
       return currentConversationId;
     }
     const id = makeLocalId();
@@ -1545,7 +1558,7 @@ export default function App() {
     setConversationReadOnly(false);
     conversationReadOnlyRef.current = false;
     deletedConversationIdsRef.current.delete(id);
-    rememberConversationMetadata(id, metadataFromCurrentSelection());
+    rememberConversationMetadata(id, metadata);
     conversationMessageBuffersRef.current[id] = [];
     return id;
   };
@@ -2281,15 +2294,25 @@ export default function App() {
     const rawRequest = (override?.request ?? prompt).trim();
     const parsed = override ? { humanId: selectedHuman.id, cleanRequest: rawRequest } : parseMention(rawRequest, effectiveDigitalHumans);
     const request = parsed.cleanRequest;
+    // 无 @ 时沿用当前会话绑定的员工；有明确 @ 时以解析结果为准。
+    // 不直接依赖标题/UI 状态，确保本次发送使用的员工身份是确定的。
+    const explicitlyMentionedHuman = !override && parsed.humanId !== GENERAL_CHAT_HUMAN_ID
+      ? effectiveDigitalHumans.find((human) => human.id === parsed.humanId)
+      : undefined;
+    const targetHuman = explicitlyMentionedHuman ?? selectedHuman;
+    const targetMetadata: ConversationMetadata = {
+      agentId: targetHuman.id,
+      agentName: targetHuman.name,
+    };
     if (!request) return;
-    if (!override && selectedHuman.status !== "ready") return;
+    if (!override && targetHuman.status !== "ready") return;
     if (!override && currentConversationRunning) return;
 
     // 数安风评：「评估：<矩阵名>」走异步评估，不经 pi。
-    if (selectedHuman.id === "data-security-risk-assessment") {
+    if (targetHuman.id === "data-security-risk-assessment") {
       const matrixName = request.match(/^评估：\s*(.+)$/)?.[1]?.trim();
       if (matrixName) {
-        const conversationId = ensureConversation();
+        const conversationId = ensureConversation(targetMetadata);
         setPrompt("");
         await startRiskAssessment(
           conversationId,
@@ -2301,13 +2324,19 @@ export default function App() {
     }
 
     // 通用对话（general-chat）不计入「最近使用」，只有真正的数字员工才记。
-    if (selectedHuman.id !== GENERAL_CHAT_HUMAN_ID) {
-      recordHumanUsage(selectedHuman.id);
+    if (targetHuman.id !== GENERAL_CHAT_HUMAN_ID) {
+      recordHumanUsage(targetHuman.id);
     }
     const runId = activeRunIdRef.current + 1;
     activeRunIdRef.current = runId;
 
-    const conversationId = ensureConversation();
+    const conversationId = ensureConversation(targetMetadata);
+    // Capture only prior turns. The current user message is sent through the
+    // prompt command below and must not also be injected into rebuilt history.
+    const resumeMessages = conversationMessageBuffersRef.current[conversationId]?.map((message) => ({
+      role: message.role,
+      content: message.content,
+    }));
     setBusy(true);
     busyRef.current = true;
     setConversationRunning(conversationId, true);
@@ -2329,7 +2358,7 @@ export default function App() {
         ? attachmentContext.imageSections.join("\n\n")
         : undefined;
       const requestForAgent =
-        selectedHuman.id === "alert-analysis" && alertImageData
+        targetHuman.id === "alert-analysis" && alertImageData
           ? `${request}\n\n${alertImageData}`
           : request;
       clearAlertAttachmentContext(conversationId);
@@ -2337,23 +2366,31 @@ export default function App() {
       // 在 host 内创建/复用 pi 会话，然后把 prompt 发给 pi 的 agent loop。
       // 流式 token、工具调用、结构化结果都通过 subscribePiEvents 的事件回流。
       let piSessionId = conversationPiSessionRef.current[conversationId];
-      if (!piSessionId) {
-        if (selectedHuman.id === COMPUTER_AGENT_ID) {
+      const existingIdentity = piSessionId
+        ? conversationPiSessionIdentityRef.current[conversationId]
+        : undefined;
+      const sessionIdentityChanged = requiresNewPiSession(existingIdentity, {
+        humanId: targetHuman.id,
+        mcpServiceId: targetHuman.mcpService,
+      });
+      if (sessionIdentityChanged) {
+        if (targetHuman.id === COMPUTER_AGENT_ID) {
           const latestSettings = await syncComputerAgentSettingsToHost();
           setComputerAgentSettings(latestSettings);
         }
         piSessionId = await sendRpc<string>({
           type: "new_session",
-          humanId: selectedHuman.id,
+          humanId: targetHuman.id,
           conversationId,
           // 自定义 MCP 员工（非内置 9 个）需要 mcpServiceId 才能在 host 端获得 MCP 工具白名单。
-          mcpServiceId: selectedHuman.mcpService,
-          resumeMessages: conversationMessageBuffersRef.current[conversationId]?.map((message) => ({
-            role: message.role,
-            content: message.content,
-          })),
+          mcpServiceId: targetHuman.mcpService,
+          resumeMessages,
         });
         conversationPiSessionRef.current[conversationId] = piSessionId;
+        conversationPiSessionIdentityRef.current[conversationId] = {
+          humanId: targetHuman.id,
+          mcpServiceId: targetHuman.mcpService,
+        };
       }
 
       // 收集本会话累积的普通文件附件（write_uploaded_blob 后的临时路径），交给 host 读取注入。
@@ -3102,6 +3139,7 @@ export default function App() {
     delete conversationMessageBuffersRef.current[conversationId];
     delete conversationMetadataRef.current[conversationId];
     delete conversationPiSessionRef.current[conversationId];
+    delete conversationPiSessionIdentityRef.current[conversationId];
     delete streamingMessageIdRef.current[conversationId];
     delete conversationSaveQueuesRef.current[conversationId];
     // toolMessageIdRef 按 `${conversationId}:${toolCallId}` 索引，需按前缀清理。
@@ -3233,6 +3271,7 @@ export default function App() {
           />
         ) : (activeNav === "tasks" || (activeNav === "projects" && selectedTaskId)) ? (
           <TaskConversation
+            key={currentConversationId ?? selectedTaskId ?? "new-task"}
             messages={conversationMessages}
             prompt={prompt}
             modelName={currentModelName}

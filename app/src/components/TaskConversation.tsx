@@ -7,6 +7,7 @@ import remarkGfm from "remark-gfm";
 import { AlertAnalysisCard } from "./AlertAnalysisCard";
 import { PromptComposer } from "./PromptComposer";
 import { limitText, MAX_SUGGESTION_TEXT_LENGTH } from "../services/alertAnalysisText";
+import { isConversationNearBottom } from "../services/conversationScroll";
 import type { ChatMessage, ChatMessageAttachment, DigitalHuman, PendingSkillExecution } from "../types";
 
 type TaskConversationProps = {
@@ -339,6 +340,7 @@ export function TaskConversation({
   onConfirmSkillExecution,
 }: TaskConversationProps) {
   const threadRef = useRef<HTMLDivElement>(null);
+  const followConversationTailRef = useRef(true);
   const [showAllRelatedFiles, setShowAllRelatedFiles] = useState(false);
   const [fileContextMenu, setFileContextMenu] = useState<FileContextMenuState>(null);
   const visibleMessages = useMemo(
@@ -461,6 +463,21 @@ export function TaskConversation({
     });
   }, []);
 
+  const handleThreadScroll = useCallback(() => {
+    const thread = threadRef.current;
+    if (!thread) return;
+    followConversationTailRef.current = isConversationNearBottom(thread);
+  }, []);
+
+  const handleThreadWheel = useCallback((event: React.WheelEvent<HTMLDivElement>) => {
+    // The scroll event follows the wheel event. Disable tail following here as
+    // well so a streaming message update cannot win the race and pull the user
+    // back down before the browser has applied the upward scroll.
+    if (event.deltaY < 0) {
+      followConversationTailRef.current = false;
+    }
+  }, []);
+
   const openRelatedFileMenu = useCallback(
     (event: ReactMouseEvent<HTMLDivElement>, file: RelatedTaskFile) => {
       if (!file.path) return;
@@ -479,9 +496,9 @@ export function TaskConversation({
   );
 
   useEffect(() => {
-    if (threadRef.current) {
-      threadRef.current.scrollTop = threadRef.current.scrollHeight;
-    }
+    const thread = threadRef.current;
+    if (!thread || !followConversationTailRef.current) return;
+    thread.scrollTop = thread.scrollHeight;
   }, [messages, busy]);
 
   return (
@@ -511,7 +528,12 @@ export function TaskConversation({
         </div>
       </div>
 
-      <div className="conversation-thread" ref={threadRef}>
+      <div
+        className="conversation-thread"
+        ref={threadRef}
+        onScroll={handleThreadScroll}
+        onWheel={handleThreadWheel}
+      >
         {visibleMessages.length === 0 ? (
           <div className="conversation-empty">
             <span className="conversation-empty-icon">

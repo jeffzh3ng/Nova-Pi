@@ -6,7 +6,7 @@
   "scripts": {
     "dev": "vite --host 127.0.0.1 --port 1420",
     "build": "tsc --noEmit && vite build",
-    "test": "tsx --test --test-concurrency=1 src/services/mcpPayload.test.ts",
+    "test": "tsx --test --test-concurrency=1 src/services/*.test.ts",
     "preview": "vite preview --host 127.0.0.1 --port 4173",
     "tauri:dev": "tauri dev",
     "tauri:build": "tauri build"

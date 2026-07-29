@@ -42,6 +42,7 @@ type SessionEntry = {
   conversationId: string;
   session: AgentSession;
   humanId: string;
+  mcpServiceId?: string;
   /**
    * 后台会话标记。true 表示不写入 conversationToSession（前端主路由找不到），
    * 也不落 SQLite 历史索引。供微信机器人这类"非用户对话"场景使用。
@@ -197,12 +198,16 @@ export class SessionPool {
     mcpServiceId?: string;
     resumeMessages?: Array<{ role: string; content: string }>;
   }): Promise<string> {
-    // 若该 conversation 已有 session：仅当 humanId 一致时复用，否则销毁重建。
+    // 若该 conversation 已有 session：仅当员工与 MCP 绑定均一致时复用，否则销毁重建。
     // 否则切换数字员工后会沿用旧员工的 system prompt 和 MCP 白名单，角色错乱。
     const existingSessionId = this.conversationToSession.get(params.conversationId);
     if (existingSessionId) {
       const existingEntry = this.sessions.get(existingSessionId);
-      if (existingEntry && existingEntry.humanId === params.humanId) {
+      if (
+        existingEntry
+        && existingEntry.humanId === params.humanId
+        && existingEntry.mcpServiceId === params.mcpServiceId
+      ) {
         return existingSessionId;
       }
       // humanId 变了（用户切换员工）：销毁旧 session，下面重建。
@@ -260,6 +265,7 @@ export class SessionPool {
       conversationId: params.conversationId,
       session,
       humanId: params.humanId,
+      mcpServiceId: params.mcpServiceId,
       status: "idle",
       createdAt: now,
       lastActivityAt: now,
@@ -287,7 +293,12 @@ export class SessionPool {
   }): Promise<string> {
     // 后台会话也用 conversationId 做幂等键（service 内部维护），但不写 conversationToSession。
     for (const entry of this.sessions.values()) {
-      if (entry.isBackground && entry.conversationId === params.conversationId && entry.humanId === params.humanId) {
+      if (
+        entry.isBackground
+        && entry.conversationId === params.conversationId
+        && entry.humanId === params.humanId
+        && entry.mcpServiceId === params.mcpServiceId
+      ) {
         return entry.sessionId;
       }
     }
@@ -334,6 +345,7 @@ export class SessionPool {
       conversationId: params.conversationId,
       session,
       humanId: params.humanId,
+      mcpServiceId: params.mcpServiceId,
       isBackground: true,
       status: "idle",
       createdAt: now,
