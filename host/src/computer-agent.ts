@@ -83,7 +83,7 @@ export type ComputerAgentToolContext = {
 
 export const DEFAULT_COMPUTER_AGENT_SETTINGS: ComputerAgentSettings = {
   enabled: false,
-  displayName: "Nova 智能员工",
+  displayName: "Nova",
   workingDirectory: os.homedir(),
   allowFileRead: false,
   allowFileWrite: false,
@@ -125,8 +125,8 @@ const PERMISSION_LABELS: Record<ComputerAgentPermission, string> = {
   file_read: "读取文件",
   file_write: "修改文件与编程",
   command_execution: "执行命令",
-  computer_info: "查看电脑信息",
-  nova_management: "管理 Nova-PI",
+  computer_info: "查看设备信息",
+  nova_management: "管理 Nova",
 };
 
 const permissionEnabled = (
@@ -215,13 +215,13 @@ export function detectInvalidComputerToolCall(
   const namedTool = toolName ? `“${toolName}”` : "未知工具";
   const permissionHint = labels.length > 0
     ? ` 当前还缺少“${labels.join("、")}”权限，请在“设置 > 智能员工”开启后重试。`
-    : " 请重试；Nova 将改用当前会话中真实可用的 pi 工具。";
+    : " 请重试；Nova 将改用当前会话中真实可用的系统工具。";
   return {
     reason: "invalid_tool_call",
     permissions: missing,
     permissionLabels: labels,
     invalidToolName: toolName,
-    message: `模型输出了文本形式的伪工具调用 ${namedTool}，它没有通过 pi 工具通道执行，本次未对电脑进行任何操作。${permissionHint}`,
+    message: `模型输出了文本形式的伪工具调用 ${namedTool}，它没有通过系统工具通道执行，本次未执行任何本机操作。${permissionHint}`,
   };
 }
 
@@ -231,8 +231,8 @@ export function computerAgentAuthorizationPrompt(settings: ComputerAgentSettings
     ["读取文件", settings.allowFileRead, "read、ls、find、grep"],
     ["修改文件与编程", settings.allowFileWrite, "edit、write"],
     ["执行命令", settings.allowCommandExecution, "bash"],
-    ["查看电脑信息", settings.allowComputerInfo, "computer_info"],
-    ["管理 Nova-PI", settings.allowNovaManagement, "nova_status、nova_list_tasks、nova_manage_task"],
+    ["查看设备信息", settings.allowComputerInfo, "computer_info"],
+    ["管理 Nova", settings.allowNovaManagement, "nova_status、nova_list_tasks、nova_manage_task"],
   ];
   const lines = grants.map(([label, enabled, tools]) => (
     `- ${label}：${enabled ? `已授权（可用工具：${tools}）` : "未授权"}`
@@ -291,8 +291,8 @@ export function createComputerAgentTools(
   if (settings.allowComputerInfo) {
     tools.push({
       name: "computer_info",
-      label: "查看电脑信息",
-      description: "读取当前电脑的操作系统、CPU、内存、网络接口、用户目录和运行时间等本机信息。",
+      label: "查看设备信息",
+      description: "读取当前设备的操作系统、CPU、内存、网络接口、用户目录和运行时间等本机信息。",
       parameters: Type.Object({}),
       async execute() {
         return toolResult(computerInfo());
@@ -304,8 +304,8 @@ export function createComputerAgentTools(
     tools.push(
       {
         name: "nova_status",
-        label: "查看 Nova-PI 状态",
-        description: "查看 Nova-PI host、会话数量、运行中任务以及后台消息渠道会话的实时状态。",
+        label: "查看 Nova 运行状态",
+        description: "查看应用、会话数量、运行中任务以及后台消息渠道会话的实时状态。",
         parameters: Type.Object({}),
         async execute() {
           return toolResult(context.getNovaStatus());
@@ -313,8 +313,8 @@ export function createComputerAgentTools(
       },
       {
         name: "nova_list_tasks",
-        label: "查看 Nova-PI 对话和任务",
-        description: "列出 Nova-PI 最近对话、归档情况和当前运行时会话，可按是否运行中筛选。",
+        label: "查看 Nova 对话和任务",
+        description: "列出 Nova 最近对话、归档情况和当前运行中的会话，可按是否运行中筛选。",
         parameters: Type.Object({
           runningOnly: Type.Optional(Type.Boolean({ description: "只返回正在运行的任务" })),
           includeArchived: Type.Optional(Type.Boolean({ description: "是否包含已归档对话，默认 false" })),
@@ -335,8 +335,8 @@ export function createComputerAgentTools(
       },
       {
         name: "nova_manage_task",
-        label: "管理 Nova-PI 运行任务",
-        description: "按 conversationId 中止运行中的 Nova-PI 任务，或释放已经空闲的运行时会话。不能中止当前正在调用此工具的会话。",
+        label: "管理 Nova 运行任务",
+        description: "按对话 ID 中止运行中的 Nova 任务，或释放已经空闲的任务会话。不能中止当前正在调用此工具的会话。",
         parameters: Type.Object({
           conversationId: Type.String({ description: "目标对话 ID，可先用 nova_list_tasks 查询" }),
           action: Type.Union([

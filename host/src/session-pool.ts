@@ -462,7 +462,7 @@ export class SessionPool {
     }
     const settings = this.computerAgentSettings;
     if (!settings.enabled) {
-      throw new Error("Nova 智能员工尚未启用，请在设置 > 智能员工中开启并授权。");
+      throw new Error("Nova 尚未启用，请在设置 > 智能员工中开启并授权。");
     }
     await validateComputerAgentSettings(settings);
     const customTools = createComputerAgentTools(settings, {

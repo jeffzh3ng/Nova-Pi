@@ -41,7 +41,7 @@ fn default_working_directory() -> String {
 pub fn default_computer_agent_settings() -> ComputerAgentSettings {
     ComputerAgentSettings {
         enabled: false,
-        display_name: "Nova 智能员工".to_string(),
+        display_name: "Nova".to_string(),
         working_directory: default_working_directory(),
         allow_file_read: false,
         allow_file_write: false,
@@ -105,7 +105,7 @@ pub fn save_computer_agent_settings(
 pub async fn pick_computer_agent_working_directory() -> Result<Option<String>, String> {
     tokio::task::spawn_blocking(|| {
         Ok(rfd::FileDialog::new()
-            .set_title("选择 Nova 智能员工工作目录")
+            .set_title("选择 Nova 工作目录")
             .pick_folder()
             .map(|path| path.to_string_lossy().to_string()))
     })
@@ -144,7 +144,7 @@ fn initialize_db(connection: &Connection) -> Result<(), String> {
             CREATE TABLE IF NOT EXISTS computer_agent_settings (
                 id INTEGER PRIMARY KEY CHECK(id = 1),
                 enabled INTEGER NOT NULL DEFAULT 0,
-                display_name TEXT NOT NULL DEFAULT 'Nova 智能员工',
+                display_name TEXT NOT NULL DEFAULT 'Nova',
                 working_directory TEXT NOT NULL,
                 allow_file_read INTEGER NOT NULL DEFAULT 0,
                 allow_file_write INTEGER NOT NULL DEFAULT 0,
@@ -174,6 +174,12 @@ fn initialize_db(connection: &Connection) -> Result<(), String> {
             ],
         )
         .map_err(|error| format!("写入智能员工默认设置失败：{error}"))?;
+    connection
+        .execute(
+            "UPDATE computer_agent_settings SET display_name = 'Nova' WHERE id = 1 AND display_name = 'Nova 智能员工'",
+            [],
+        )
+        .map_err(|error| format!("更新智能员工默认名称失败：{error}"))?;
     Ok(())
 }
 
@@ -211,12 +217,29 @@ mod tests {
     #[test]
     fn defaults_are_disabled_and_unprivileged() {
         let settings = default_computer_agent_settings();
+        assert_eq!(settings.display_name, "Nova");
         assert!(!settings.enabled);
         assert!(!settings.allow_file_read);
         assert!(!settings.allow_file_write);
         assert!(!settings.allow_command_execution);
         assert!(!settings.allow_computer_info);
         assert!(!settings.allow_nova_management);
+    }
+
+    #[test]
+    fn legacy_default_display_name_is_migrated() {
+        let connection = Connection::open_in_memory().expect("open db");
+        initialize_db(&connection).expect("initialize");
+        connection
+            .execute(
+                "UPDATE computer_agent_settings SET display_name = 'Nova 智能员工' WHERE id = 1",
+                [],
+            )
+            .expect("set legacy default");
+        initialize_db(&connection).expect("migrate");
+
+        let loaded = load_settings(&connection).expect("load migrated settings");
+        assert_eq!(loaded.display_name, "Nova");
     }
 
     #[test]

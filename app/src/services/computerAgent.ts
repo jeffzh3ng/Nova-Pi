@@ -25,34 +25,6 @@ export type NovaConversationContext = {
   messageCount?: number;
 };
 
-export type NovaRuntimeSession = {
-  sessionId: string;
-  conversationId: string;
-  humanId: string;
-  status: "idle" | "running";
-  background: boolean;
-  createdAt: number;
-  lastActivityAt: number;
-  activeTool?: string;
-};
-
-export type NovaStatusSnapshot = {
-  host: {
-    pid: number;
-    uptimeSeconds: number;
-    nodeVersion: string;
-    platform: string;
-  };
-  totals: {
-    conversations: number;
-    sessions: number;
-    running: number;
-    background: number;
-  };
-  conversations: NovaConversationContext[];
-  sessions: NovaRuntimeSession[];
-};
-
 export async function getComputerAgentSettings(): Promise<ComputerAgentSettings> {
   return invoke<ComputerAgentSettings>("get_computer_agent_settings");
 }
@@ -89,15 +61,4 @@ export async function updateNovaContext(conversations: NovaConversationContext[]
     type: "update_nova_context",
     conversations: conversations as unknown as Array<Record<string, unknown>>,
   });
-}
-
-export async function getNovaStatus(): Promise<NovaStatusSnapshot> {
-  return sendRpc<NovaStatusSnapshot>({ type: "get_nova_status" });
-}
-
-export async function manageNovaTask(
-  conversationId: string,
-  action: "abort" | "dispose",
-): Promise<{ ok: boolean; message: string }> {
-  return sendRpc({ type: "manage_nova_task", conversationId, action });
 }

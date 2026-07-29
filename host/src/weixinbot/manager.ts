@@ -33,8 +33,8 @@ const BG_CONVERSATION_ID = "nova-weixin-bg";
 const HUMAN_ALIASES: Array<{ humanId: string; displayName: string; aliases: string[] }> = [
   {
     humanId: "nova-computer-agent",
-    displayName: "Nova 智能员工",
-    aliases: ["Nova 智能员工", "Nova智能员工", "智能员工", "电脑助手"],
+    displayName: "Nova",
+    aliases: ["Nova", "Nova 智能员工", "Nova智能员工", "智能员工", "电脑助手"],
   },
   {
     humanId: "general-chat",

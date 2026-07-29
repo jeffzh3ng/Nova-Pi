@@ -27,7 +27,7 @@ test("waits for agent_settled and sends the final assistant result after a tool 
     type: "message_end",
     message: {
       role: "assistant",
-      content: [{ type: "text", text: "Nova-PI 当前运行正常，共有 1 个活动会话。" }],
+      content: [{ type: "text", text: "Nova 当前运行正常，共有 1 个活动会话。" }],
     },
   })), null);
   assert.equal(collector.accept(event({
@@ -38,7 +38,7 @@ test("waits for agent_settled and sends the final assistant result after a tool 
 
   assert.deepEqual(collector.accept(event({ type: "agent_settled" })), {
     reqId: "req-tool",
-    text: "Nova-PI 当前运行正常，共有 1 个活动会话。",
+    text: "Nova 当前运行正常，共有 1 个活动会话。",
   });
 });
 

@@ -659,7 +659,7 @@ export default function App() {
         if (alive) setComputerAgentSettings(settings);
         if (syncHost) await configureComputerAgentHost(settings);
       } catch (error) {
-        if (alive) console.error("读取或同步 Nova 智能员工设置失败", error);
+        if (alive) console.error("读取或同步 Nova 设置失败", error);
       }
     };
     const handleChanged = (event: Event) => {
@@ -963,7 +963,7 @@ export default function App() {
         const ready = await waitSidecarReady();
         if (!ready || cancelled) return;
         await syncComputerAgentSettingsToHost().catch((error) => {
-          console.error("[消息通道] Nova 智能员工授权同步失败", error);
+          console.error("[消息通道] Nova 授权同步失败", error);
         });
 
         // 微信：创建后台会话 + 触发登录（token 缓存命中则秒连，否则需扫码）

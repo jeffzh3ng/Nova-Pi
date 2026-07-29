@@ -190,6 +190,7 @@ export function Sidebar({
               <div className="quick-list">
                 {visibleQuickActions.map((item) => {
                   const Icon = quickIcons[item.id as keyof typeof quickIcons] ?? Bot;
+                  const isNova = item.id === "nova-computer-agent";
                   const disabled = item.status === "pending";
                   const badge = item.badge ?? (disabled ? "待配置" : "可用");
                   const disabledTitle = item.disabledReason ?? "该数字员工暂不可用";
@@ -206,7 +207,7 @@ export function Sidebar({
                       title={disabled ? disabledTitle : item.title}
                       onClick={() => onSelectQuickAction(item)}
                     >
-                      <span className={`quick-icon ${item.tone}`}>
+                      <span className={`quick-icon ${item.tone} ${isNova ? "is-nova" : ""}`}>
                         <Icon size={15} />
                       </span>
                       <span>{item.title}</span>

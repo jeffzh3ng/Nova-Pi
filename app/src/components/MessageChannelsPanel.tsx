@@ -429,7 +429,7 @@ export function MessageChannelsPanel() {
       // syncComputerAgentSettingsToHost 只是顺带同步 Nova 智能员工授权（启动时已同步过），
       // 与微信启用无依赖关系，失败不应阻断启用流程。
       await syncComputerAgentSettingsToHost().catch((error) => {
-        console.error("[消息通道] Nova 智能员工授权同步失败（不阻断微信启用）", error);
+        console.error("[消息通道] Nova 授权同步失败（不阻断微信启用）", error);
       });
       await startWeixinBot(humanId);
       // 启用后自动触发 login：service 层会优先用 token 缓存恢复（免扫码），

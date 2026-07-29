@@ -8,10 +8,10 @@ import { COMPUTER_AGENT_ID } from "../services/computerAgent";
 export const digitalHumans: DigitalHuman[] = [
   {
     id: COMPUTER_AGENT_ID,
-    name: "Nova 智能员工",
-    role: "本机智能执行与编程",
-    description: "使用 pi 原生 Agent 能力操作文件、执行命令、编程，并查看 Nova-PI 运行状态。",
-    welcomeMessage: "我可以在授权范围内读取和修改文件、执行命令、编程，并协助管理 Nova-PI 任务。",
+    name: "Nova",
+    role: "文件处理、编程与任务执行",
+    description: "使用本机智能能力操作文件、执行命令、编程，并查看应用运行状态。",
+    welcomeMessage: "我可以在授权范围内读取和修改文件、执行命令、编程，并协助管理运行任务。",
     accent: "primary",
     status: "pending",
     disabledReason: "请在设置 > 智能员工中开启并授权",

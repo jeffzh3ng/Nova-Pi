@@ -46,7 +46,7 @@ export async function createSessionResourceLoader(
   cwd = process.cwd(),
 ): Promise<ResourceLoader> {
   if (!configuredAgentDir) {
-    throw new Error("pi ResourceLoader 尚未初始化。");
+    throw new Error("技能加载器尚未初始化。");
   }
   const loader = new DefaultResourceLoader({
     cwd,

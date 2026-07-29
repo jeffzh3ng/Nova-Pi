@@ -264,6 +264,12 @@
   border-radius: var(--radius-pill);
 }
 
+.quick-icon.is-nova {
+  color: #157e9f;
+  background: #dff3f8;
+  box-shadow: inset 0 0 0 1px rgba(21, 126, 159, 0.08);
+}
+
 .quick-icon.emerald {
   color: var(--color-emerald);
   background: var(--color-emerald-soft);
@@ -6372,15 +6378,8 @@ label.settings-toggle input {
   background: #e9f8f4;
 }
 
-.computer-agent-layout {
-  display: grid;
-  grid-template-columns: minmax(0, 1.25fr) minmax(340px, 0.75fr);
-  align-items: start;
-  gap: 18px;
-}
-
-.computer-agent-config-card,
-.computer-agent-runtime-card {
+.computer-agent-config-card {
+  width: 100%;
   min-width: 0;
   border: 1px solid var(--color-line);
   border-radius: 12px;
@@ -6395,19 +6394,27 @@ label.settings-toggle input {
 .computer-agent-card-title {
   display: flex;
   align-items: center;
-  gap: 12px;
+  justify-content: space-between;
+  gap: 24px;
   margin-bottom: 20px;
+  padding-bottom: 18px;
+  border-bottom: 1px solid #edf0f3;
 }
 
-.computer-agent-card-title h2,
-.computer-agent-runtime-card h2 {
+.computer-agent-card-title-copy {
+  display: flex;
+  min-width: 0;
+  align-items: center;
+  gap: 12px;
+}
+
+.computer-agent-card-title h2 {
   margin: 0;
   color: var(--color-ink);
   font-size: 17px;
 }
 
-.computer-agent-card-title p,
-.computer-agent-runtime-card header p {
+.computer-agent-card-title p {
   margin: 4px 0 0;
   color: var(--color-muted);
   font-size: 12px;
@@ -6415,23 +6422,24 @@ label.settings-toggle input {
 
 .computer-agent-master-toggle {
   display: flex;
+  flex: 0 0 286px;
   align-items: center;
   justify-content: space-between;
-  gap: 20px;
-  padding: 15px 16px;
+  gap: 12px;
+  padding: 8px 10px;
   border: 1px solid #bfdae4;
-  border-radius: 10px;
+  border-radius: 8px;
   background: #f2f9fb;
 }
 
 .computer-agent-master-toggle > span {
   display: grid;
-  gap: 4px;
+  gap: 2px;
 }
 
 .computer-agent-master-toggle strong {
   color: #164e63;
-  font-size: 14px;
+  font-size: 13px;
 }
 
 .computer-agent-master-toggle small,
@@ -6442,19 +6450,21 @@ label.settings-toggle input {
 }
 
 .computer-agent-master-toggle input {
-  width: 38px;
-  height: 20px;
+  flex: 0 0 auto;
+  width: 18px;
+  height: 18px;
   accent-color: #168a82;
 }
 
 .computer-agent-fields {
   display: grid;
+  grid-template-columns: minmax(200px, 0.55fr) minmax(360px, 1.45fr);
   gap: 15px;
-  margin-top: 18px;
 }
 
 .computer-agent-fields > label {
   display: grid;
+  align-content: start;
   gap: 7px;
   color: #344054;
   font-size: 12px;
@@ -6479,8 +6489,7 @@ label.settings-toggle input {
   gap: 8px;
 }
 
-.computer-agent-path-field button,
-.computer-agent-runtime-card header button {
+.computer-agent-path-field button {
   display: inline-flex;
   align-items: center;
   justify-content: center;
@@ -6527,7 +6536,7 @@ label.settings-toggle input {
 
 .computer-agent-permissions {
   display: grid;
-  grid-template-columns: repeat(2, minmax(0, 1fr));
+  grid-template-columns: repeat(3, minmax(0, 1fr));
   gap: 10px;
 }
 
@@ -6617,7 +6626,9 @@ label.settings-toggle input {
 .computer-agent-save-row {
   display: flex;
   justify-content: flex-end;
-  margin-top: 18px;
+  margin-top: 20px;
+  padding-top: 18px;
+  border-top: 1px solid #edf0f3;
 }
 
 .computer-agent-save-row button {
@@ -6634,196 +6645,20 @@ label.settings-toggle input {
   font-weight: 700;
 }
 
-.computer-agent-runtime-card {
-  overflow: hidden;
-}
-
-.computer-agent-runtime-card > header {
-  display: flex;
-  align-items: center;
-  justify-content: space-between;
-  gap: 12px;
-  padding: 18px 18px 14px;
-}
-
-.computer-agent-runtime-card > header button {
-  width: 34px;
-  height: 34px;
-}
-
-.computer-agent-metrics {
-  display: grid;
-  grid-template-columns: repeat(4, 1fr);
-  border-block: 1px solid #edf0f3;
-  background: #f8fafb;
-}
-
-.computer-agent-metrics span {
-  display: grid;
-  place-items: center;
-  gap: 2px;
-  padding: 11px 4px;
-  border-right: 1px solid #edf0f3;
-  color: #7b8794;
-  font-size: 9.5px;
-}
-
-.computer-agent-metrics span:last-child {
-  border-right: 0;
-}
-
-.computer-agent-metrics strong {
-  color: #344054;
-  font-size: 17px;
-}
-
-.computer-agent-metrics .is-running strong {
-  color: #168a82;
-}
-
-.computer-agent-runtime-section {
-  padding: 15px 16px 2px;
-}
-
-.computer-agent-runtime-heading {
-  display: flex;
-  align-items: center;
-  justify-content: space-between;
-  margin-bottom: 9px;
-  color: #344054;
-  font-size: 12px;
-}
-
-.computer-agent-runtime-heading span {
-  padding: 2px 7px;
-  border-radius: 999px;
-  color: #667085;
-  background: #eef2f5;
-  font-size: 10px;
-}
-
-.computer-agent-empty {
-  margin: 0;
-  padding: 14px 10px;
-  border: 1px dashed #dce3e8;
-  border-radius: 8px;
-  color: #98a2b3;
-  text-align: center;
-  font-size: 10.5px;
-}
-
-.computer-agent-session-list,
-.computer-agent-conversation-list {
-  display: grid;
-  gap: 7px;
-}
-
-.computer-agent-session-list article {
-  display: grid;
-  grid-template-columns: minmax(0, 1fr) auto 30px;
-  align-items: center;
-  gap: 7px;
-  padding: 9px 9px 9px 11px;
-  border: 1px solid #e7ebef;
-  border-radius: 8px;
-}
-
-.computer-agent-session-list article > div,
-.computer-agent-conversation-list article > div {
-  display: grid;
-  min-width: 0;
-  gap: 3px;
-}
-
-.computer-agent-session-list strong,
-.computer-agent-conversation-list strong {
-  overflow: hidden;
-  color: #364152;
-  font-size: 11px;
-  text-overflow: ellipsis;
-  white-space: nowrap;
-}
-
-.computer-agent-session-list article > div span,
-.computer-agent-conversation-list article > div span {
-  overflow: hidden;
-  color: #8a94a6;
-  font-size: 9.5px;
-  text-overflow: ellipsis;
-  white-space: nowrap;
-}
-
-.computer-agent-runtime-status {
-  padding: 3px 6px;
-  border-radius: 999px;
-  color: #667085;
-  background: #f0f2f4;
-  font-size: 9px;
-  font-weight: 700;
-}
-
-.computer-agent-runtime-status.running {
-  color: #087867;
-  background: #e5f7f2;
-}
-
-.computer-agent-session-list article > button {
-  display: grid;
-  place-items: center;
-  width: 28px;
-  height: 28px;
-  border: 1px solid #dde3e8;
-  border-radius: 7px;
-  color: #687586;
-  background: #fff;
-}
-
-.computer-agent-session-list article > button.is-stop {
-  border-color: #e7c3c6;
-  color: #b54851;
-  background: #fff5f5;
-}
-
-.computer-agent-conversation-list article {
-  display: grid;
-  grid-template-columns: 8px minmax(0, 1fr) auto;
-  align-items: center;
-  gap: 8px;
-  padding: 8px 3px;
-  border-bottom: 1px solid #f0f2f4;
-}
-
-.computer-agent-conversation-dot {
-  width: 7px;
-  height: 7px;
-  border-radius: 50%;
-  background: #aab4c0;
-}
-
-.computer-agent-conversation-dot.running { background: #2a9d8f; box-shadow: 0 0 0 3px #e3f6f1; }
-.computer-agent-conversation-dot.done { background: #4d88a1; }
-.computer-agent-conversation-dot.canceled { background: #b54851; }
-
-.computer-agent-conversation-list em {
-  color: #7c8796;
-  font-size: 9px;
-  font-style: normal;
-}
-
-.computer-agent-runtime-footnote {
-  display: flex;
-  align-items: center;
-  gap: 6px;
-  margin-top: 13px;
-  padding: 12px 16px;
-  color: #788493;
-  background: #f8fafb;
-  font-size: 9.5px;
-}
-
 @media (max-width: 1050px) {
-  .computer-agent-layout {
+  .computer-agent-card-title {
+    align-items: stretch;
+    flex-direction: column;
+  }
+  .computer-agent-master-toggle {
+    flex-basis: auto;
+    width: 100%;
+  }
+  .computer-agent-fields {
     grid-template-columns: 1fr;
+  }
+  .computer-agent-permissions {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
   }
 }
 

@@ -18,6 +18,7 @@ import {
 
 test("computer agent is default-present but disabled and has no privileged tools", () => {
   assert.equal(COMPUTER_AGENT_ID, "nova-computer-agent");
+  assert.equal(DEFAULT_COMPUTER_AGENT_SETTINGS.displayName, "Nova");
   assert.equal(DEFAULT_COMPUTER_AGENT_SETTINGS.enabled, false);
   assert.deepEqual(builtInToolNamesForSettings(DEFAULT_COMPUTER_AGENT_SETTINGS), []);
   assert.deepEqual(customToolNamesForSettings(DEFAULT_COMPUTER_AGENT_SETTINGS), []);
@@ -75,7 +76,7 @@ test("textual pseudo tool calls are rejected and mapped to missing authorization
   assert.equal(blocked?.reason, "invalid_tool_call");
   assert.equal(blocked?.invalidToolName, "list_files");
   assert.deepEqual(blocked?.permissions, ["file_read"]);
-  assert.match(blocked?.message ?? "", /没有通过 pi 工具通道执行/);
+  assert.match(blocked?.message ?? "", /没有通过系统工具通道执行/);
   assert.equal(detectInvalidComputerToolCall("XML 中可以使用 <invoke> 标签。", settings), null);
 });
 
