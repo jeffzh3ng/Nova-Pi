@@ -1444,6 +1444,7 @@ body.is-resizing-sidebar * {
   justify-content: flex-end;
   gap: 6px 10px;
   padding-top: 0;
+  transform: translateX(10px);
 }
 
 .conversation-header-meta > time {
@@ -2366,7 +2367,7 @@ body.is-resizing-sidebar * {
   box-shadow: 0 10px 26px rgba(18, 24, 38, 0.06);
   opacity: 1;
   pointer-events: auto;
-  transform: translateX(0);
+  transform: translateX(10px);
   visibility: visible;
   transition:
     opacity 180ms ease,
@@ -4319,6 +4320,11 @@ label.settings-toggle input {
 
   .conversation-header-meta {
     justify-content: flex-start;
+    transform: none;
+  }
+
+  .task-context-panel {
+    transform: none;
   }
 
   .conversation-header-meta > time {
@@ -6469,6 +6475,13 @@ label.settings-toggle input {
   color: #344054;
   font-size: 12px;
   font-weight: 650;
+}
+
+.computer-agent-fields > label > span {
+  display: flex;
+  min-height: 18px;
+  align-items: baseline;
+  line-height: 1.5;
 }
 
 .computer-agent-fields input {

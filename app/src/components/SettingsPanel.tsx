@@ -18,6 +18,7 @@ import type { DefaultModelInfo, ModelSummary, ProviderSummary } from "../service
 import { toUserFacingError } from "../services/uiError";
 import { showAppWarning } from "../services/appDialog";
 import { ComputerAgentSettingsPanel } from "./ComputerAgentSettingsPanel";
+import { TokenActivityCard } from "./TokenActivityCard";
 
 type ProviderDraft = {
   id: string;
@@ -885,6 +886,7 @@ export function SettingsPanel() {
       </header>
       <ModelSettingsPanel />
       <ComputerAgentSettingsPanel />
+      <TokenActivityCard />
     </section>
   );
 }

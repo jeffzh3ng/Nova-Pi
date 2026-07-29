@@ -84,6 +84,7 @@ pub struct TokenUsageSummary {
     pub total_tokens: u64,
     pub call_count: u64,
     pub records: Vec<TokenUsageRecord>,
+    pub daily_totals: Vec<TokenUsageDailyTotal>,
 }
 
 #[derive(Debug, Serialize)]
@@ -96,6 +97,14 @@ pub struct TokenUsageRecord {
     pub completion_tokens: u32,
     pub total_tokens: u32,
     pub created_at: String,
+}
+
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct TokenUsageDailyTotal {
+    pub date: String,
+    pub total_tokens: u64,
+    pub call_count: u64,
 }
 
 pub fn default_model_settings() -> ModelSettings {
@@ -432,14 +441,39 @@ pub fn list_token_usage(app: AppHandle) -> Result<TokenUsageSummary, String> {
             .collect::<Result<Vec<_>, _>>()
             .map_err(|e| e.to_string())?;
 
+        let daily_totals = load_token_usage_daily_totals(connection)?;
+
         Ok(TokenUsageSummary {
             total_prompt_tokens: total_prompt,
             total_completion_tokens: total_completion,
             total_tokens,
             call_count,
             records,
+            daily_totals,
         })
     })
+}
+
+fn load_token_usage_daily_totals(
+    connection: &Connection,
+) -> Result<Vec<TokenUsageDailyTotal>, String> {
+    let mut statement = connection
+        .prepare(
+            "SELECT substr(created_at, 1, 10) AS usage_date, COALESCE(SUM(total_tokens), 0), COUNT(*) FROM token_usage WHERE length(created_at) >= 10 GROUP BY usage_date ORDER BY usage_date ASC",
+        )
+        .map_err(|error| error.to_string())?;
+    let totals = statement
+        .query_map([], |row| {
+            Ok(TokenUsageDailyTotal {
+                date: row.get(0)?,
+                total_tokens: row.get::<_, i64>(1)? as u64,
+                call_count: row.get::<_, i64>(2)? as u64,
+            })
+        })
+        .map_err(|error| error.to_string())?
+        .collect::<Result<Vec<_>, _>>()
+        .map_err(|error| error.to_string())?;
+    Ok(totals)
 }
 
 pub fn ensure_model_is_callable(settings: &ModelSettings) -> Result<(), String> {
@@ -730,6 +764,33 @@ mod tests {
 
         settings.provider = "local".to_string();
         assert!(ensure_model_is_callable(&settings).is_ok());
+    }
+
+    #[test]
+    fn token_usage_is_grouped_by_day_for_activity_chart() {
+        let connection = Connection::open_in_memory().expect("in-memory db should open");
+        init_token_usage_db(&connection).expect("token usage schema should initialize");
+        connection
+            .execute_batch(
+                r#"
+                INSERT INTO token_usage (model, agent_name, prompt_tokens, completion_tokens, total_tokens, created_at)
+                VALUES
+                    ('model-a', 'Nova', 60, 40, 100, '2026-07-28 09:00:00'),
+                    ('model-a', 'Nova', 120, 80, 200, '2026-07-28 18:30:00'),
+                    ('model-b', '数安风评数字员工', 30, 20, 50, '2026-07-29 10:15:00');
+                "#,
+            )
+            .expect("usage fixtures should insert");
+
+        let totals = load_token_usage_daily_totals(&connection).expect("totals should load");
+
+        assert_eq!(totals.len(), 2);
+        assert_eq!(totals[0].date, "2026-07-28");
+        assert_eq!(totals[0].total_tokens, 300);
+        assert_eq!(totals[0].call_count, 2);
+        assert_eq!(totals[1].date, "2026-07-29");
+        assert_eq!(totals[1].total_tokens, 50);
+        assert_eq!(totals[1].call_count, 1);
     }
 
     #[test]

@@ -544,3 +544,236 @@ label.pi-model-reasoning input {
   gap: 18px;
 }
 
+/* ── 系统设置：Token 活动 ── */
+.token-activity-section {
+  --token-activity-inset: clamp(10px, 1vw, 14px);
+  gap: 16px;
+  padding-bottom: 10px;
+}
+
+.token-activity-header {
+  align-items: flex-start;
+  padding-inline: var(--token-activity-inset);
+}
+
+.token-activity-tabs {
+  display: inline-flex;
+  flex: 0 0 auto;
+  align-items: center;
+  gap: 20px;
+  padding-top: 2px;
+}
+
+.token-activity-tabs button {
+  padding: 2px 0;
+  color: #8a929e;
+  background: transparent;
+  border: 0;
+  border-radius: 0;
+  font-size: 14px;
+  font-weight: 650;
+  line-height: 1.4;
+  transition: color 140ms ease;
+}
+
+.token-activity-tabs button:hover,
+.token-activity-tabs button.is-active {
+  color: var(--color-ink);
+}
+
+.token-activity-tabs button:focus-visible {
+  outline: 3px solid rgba(22, 133, 173, 0.18);
+  outline-offset: 4px;
+}
+
+.token-activity-scroll {
+  box-sizing: border-box;
+  max-width: 100%;
+  overflow-x: auto;
+  padding: 2px var(--token-activity-inset) 5px;
+  scrollbar-width: thin;
+}
+
+.token-activity-chart {
+  width: 100%;
+  min-width: 880px;
+}
+
+.token-activity-chart.is-cumulative {
+  min-width: 620px;
+}
+
+.token-activity-months,
+.token-activity-grid {
+  display: grid;
+  justify-content: space-between;
+  width: 100%;
+  gap: 4px;
+}
+
+.token-activity-months {
+  min-height: 18px;
+  margin-bottom: 7px;
+  align-items: end;
+}
+
+.token-activity-months span {
+  justify-self: center;
+  color: #8a929e;
+  font-size: 11px;
+  line-height: 1;
+  white-space: nowrap;
+}
+
+.token-activity-months span:first-child {
+  justify-self: start;
+}
+
+.token-activity-months span:last-child {
+  justify-self: end;
+}
+
+.token-activity-grid {
+  grid-auto-flow: column;
+}
+
+.token-activity-cell {
+  width: 12px;
+  height: 12px;
+  background: #edf1f3;
+  border-radius: 3px;
+  box-shadow: inset 0 0 0 1px rgba(39, 67, 86, 0.025);
+}
+
+.token-activity-cell.level-1,
+.token-activity-legend i.level-1 {
+  background: #dff3ef;
+}
+
+.token-activity-cell.level-2,
+.token-activity-legend i.level-2 {
+  background: #b8e4dc;
+}
+
+.token-activity-cell.level-3,
+.token-activity-legend i.level-3 {
+  background: #73c8bb;
+}
+
+.token-activity-cell.level-4,
+.token-activity-legend i.level-4 {
+  background: var(--color-cyan);
+}
+
+.token-activity-cell.is-padding {
+  background: #f4f6f7;
+  box-shadow: none;
+}
+
+.token-activity-footer {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 14px;
+  padding: 0 var(--token-activity-inset);
+  color: #8a929e;
+  font-size: 11px;
+}
+
+.token-activity-legend {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  white-space: nowrap;
+}
+
+.token-activity-legend i {
+  display: inline-block;
+  width: 10px;
+  height: 10px;
+  background: #edf1f3;
+  border-radius: 2px;
+}
+
+.token-activity-tooltip {
+  position: fixed;
+  z-index: 120;
+  display: flex;
+  min-width: 180px;
+  padding: 10px 12px;
+  color: #f7fffd;
+  background: #174d49;
+  border: 1px solid rgba(113, 205, 191, 0.32);
+  border-radius: 8px;
+  box-shadow: 0 12px 28px rgba(18, 63, 59, 0.22);
+  pointer-events: none;
+  transform: translate(-50%, calc(-100% - 11px));
+  flex-direction: column;
+  gap: 5px;
+  animation: token-tooltip-in 120ms ease-out;
+}
+
+.token-activity-tooltip::after {
+  position: absolute;
+  left: 50%;
+  top: 100%;
+  width: 9px;
+  height: 9px;
+  background: #174d49;
+  border-right: 1px solid rgba(113, 205, 191, 0.32);
+  border-bottom: 1px solid rgba(113, 205, 191, 0.32);
+  content: "";
+  transform: translate(-50%, -5px) rotate(45deg);
+}
+
+.token-activity-tooltip strong {
+  font-size: 12px;
+  font-weight: 750;
+  line-height: 1.35;
+}
+
+.token-activity-tooltip > span {
+  display: inline-flex;
+  align-items: center;
+  color: rgba(231, 250, 246, 0.78);
+  font-size: 11px;
+  line-height: 1.35;
+}
+
+.token-activity-tooltip b {
+  margin-right: 3px;
+  color: #ffffff;
+  font-size: 13px;
+  font-weight: 800;
+}
+
+.token-activity-tooltip i {
+  width: 3px;
+  height: 3px;
+  margin: 0 8px;
+  background: rgba(190, 235, 227, 0.62);
+  border-radius: 50%;
+}
+
+@keyframes token-tooltip-in {
+  from {
+    opacity: 0;
+    transform: translate(-50%, calc(-100% - 7px));
+  }
+  to {
+    opacity: 1;
+    transform: translate(-50%, calc(-100% - 11px));
+  }
+}
+
+@media (max-width: 760px) {
+  .token-activity-header {
+    align-items: stretch;
+    flex-direction: column;
+  }
+
+  .token-activity-tabs {
+    justify-content: flex-start;
+  }
+}
+
