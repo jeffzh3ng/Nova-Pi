@@ -8,6 +8,7 @@ import { AlertAnalysisCard } from "./AlertAnalysisCard";
 import { PromptComposer } from "./PromptComposer";
 import { limitText, MAX_SUGGESTION_TEXT_LENGTH } from "../services/alertAnalysisText";
 import { isConversationNearBottom } from "../services/conversationScroll";
+import { showAppError } from "../services/appDialog";
 import type { ChatMessage, ChatMessageAttachment, DigitalHuman, PendingSkillExecution } from "../types";
 
 type TaskConversationProps = {
@@ -225,7 +226,7 @@ function FileLink({ exportedFile }: { exportedFile: { path: string; fileName: st
         // 用户取消不算错误
         const msg = String(error);
         if (msg === "已取消" || msg.includes("已取消")) return;
-        alert(String(error));
+        showAppError(error, "打开文件失败");
       });
     } else {
       clickTimer.current = setTimeout(() => {
@@ -235,7 +236,7 @@ function FileLink({ exportedFile }: { exportedFile: { path: string; fileName: st
           console.error("另存文件失败", error);
           const msg = String(error);
           if (msg === "已取消" || msg.includes("已取消")) return;
-          alert(String(error));
+          showAppError(error, "另存文件失败");
         });
       }, 280);
     }
@@ -312,6 +313,11 @@ const displayStepsForMessage = (message: ChatMessage) => {
   }
   return message.steps ?? [];
 };
+
+const isToolExecutionMessage = (message: ChatMessage) => (
+  message.kind === "tool"
+  || /^(?:正在)?调用工具[：:]|^工具调用(?:完成|失败)[：:]/.test(message.title?.trim() ?? "")
+);
 
 export function TaskConversation({
   messages,
@@ -439,7 +445,7 @@ export function TaskConversation({
     if (!file.path) return;
     invoke("open_file_path", { path: file.path }).catch((error: unknown) => {
       console.error("打开相关文件失败", error);
-      alert(String(error));
+      showAppError(error, "打开文件失败");
     });
   }, []);
 
@@ -448,7 +454,7 @@ export function TaskConversation({
     setFileContextMenu(null);
     invoke("show_file_in_folder", { path: file.path }).catch((error: unknown) => {
       console.error("打开文件所在目录失败", error);
-      alert(String(error));
+      showAppError(error, "定位文件失败");
     });
   }, []);
 
@@ -459,7 +465,7 @@ export function TaskConversation({
       const message = String(error);
       if (message === "已取消" || message.includes("已取消")) return;
       console.error("另存相关文件失败", error);
-      alert(message);
+      showAppError(message, "另存文件失败");
     });
   }, []);
 
@@ -544,9 +550,19 @@ export function TaskConversation({
           </div>
         ) : (
           visibleMessages.map((message) => {
-            const displaySteps = displayStepsForMessage(message);
+            const toolExecution = isToolExecutionMessage(message);
+            const compactToolExecution = toolExecution
+              && !message.alertAnalysisResult
+              && !message.riskAssessmentResult
+              && !message.exportedFile
+              && !message.pendingSkillExecution
+              && !message.suggestions?.length;
+            const displaySteps = toolExecution ? [] : displayStepsForMessage(message);
             return (
-            <article className={`message-row ${message.role}`} key={message.id}>
+            <article
+              className={`message-row ${message.role} ${compactToolExecution ? "tool-execution" : ""}`}
+              key={message.id}
+            >
               <div className="message-avatar" aria-hidden="true">
                 {message.role === "assistant" ? <Bot size={20} /> : <User size={20} />}
               </div>
@@ -589,6 +605,7 @@ export function TaskConversation({
                       </>
                     );
                   }
+                  if (toolExecution) return null;
                   return (
                     <CollapsibleContent
                       content={message.content}

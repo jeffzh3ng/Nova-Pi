@@ -1,4 +1,5 @@
 import { Bot, CheckCircle2, CirclePlus, Pencil, Save, Search, ShieldCheck, Trash2, X } from "lucide-react";
+import { getVersion } from "@tauri-apps/api/app";
 import { useEffect, useRef, useState } from "react";
 import { ConfirmModal } from "./ConfirmModal";
 import {
@@ -15,6 +16,7 @@ import {
 } from "../services/modelsService";
 import type { DefaultModelInfo, ModelSummary, ProviderSummary } from "../services/hostBridge";
 import { toUserFacingError } from "../services/uiError";
+import { showAppWarning } from "../services/appDialog";
 import { ComputerAgentSettingsPanel } from "./ComputerAgentSettingsPanel";
 
 type ProviderDraft = {
@@ -192,7 +194,7 @@ function ModelSettingsPanel() {
   /** 打开「添加供应商」编辑器；超过上限时拦截并提示先删除现有供应商。 */
   const handleAddProvider = () => {
     if (providers.length >= MAX_PROVIDERS) {
-      alert(`最多支持 ${MAX_PROVIDERS} 个供应商，请先删除现有供应商再添加。`);
+      showAppWarning(`最多支持 ${MAX_PROVIDERS} 个供应商，请先删除现有供应商再添加。`);
       return;
     }
     setEditor({
@@ -849,6 +851,24 @@ function ModelSettingsPanel() {
 }
 
 export function SettingsPanel() {
+  const [appVersion, setAppVersion] = useState("");
+
+  useEffect(() => {
+    let active = true;
+
+    void getVersion()
+      .then((version) => {
+        if (active) setAppVersion(version);
+      })
+      .catch(() => {
+        // Browser previews do not expose the Tauri app API. Keep the badge hidden there.
+      });
+
+    return () => {
+      active = false;
+    };
+  }, []);
+
   return (
     <section className="settings-page mcp-square-page pi-settings-page" aria-label="系统设置">
       <header className="settings-header">
@@ -857,6 +877,11 @@ export function SettingsPanel() {
           <h1>系统设置</h1>
           <p className="mcp-status-line">配置模型供应商与内置智能员工</p>
         </div>
+        {appVersion ? (
+          <p className="settings-app-version" aria-label={`当前版本 ${appVersion}`}>
+            Nova v{appVersion}
+          </p>
+        ) : null}
       </header>
       <ModelSettingsPanel />
       <ComputerAgentSettingsPanel />

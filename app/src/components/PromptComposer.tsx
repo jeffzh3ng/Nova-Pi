@@ -96,6 +96,7 @@ function renderHighlightedValue(value: string, humans: DigitalHuman[]): ReactNod
 type PromptComposerProps = {
   value: string;
   introduction?: string;
+  placeholder?: string;
   modelName: string;
   busy: boolean;
   disabled?: boolean;
@@ -116,6 +117,7 @@ type PromptComposerProps = {
 export function PromptComposer({
   value,
   introduction,
+  placeholder,
   modelName,
   busy,
   disabled = false,
@@ -280,6 +282,8 @@ export function PromptComposer({
           placeholder={
             introduction?.trim()
               ? ""
+              : placeholder?.trim()
+              ? placeholder
               : disabled
               ? "可先输入任务目标，选择可用数字员工后发送"
               : selectedEmployeeName || countCompletedMentions(value, mentionHumans) > 0

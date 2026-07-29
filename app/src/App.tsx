@@ -2086,9 +2086,9 @@ export default function App() {
             {
               id: messageId,
               role: "assistant",
-              title: `调用工具：${event.toolName}`,
+              kind: "tool",
+              title: `正在调用工具：${event.toolName}`,
               content: `正在执行 ${event.toolName}…`,
-              steps: [`参数：${JSON.stringify(event.args ?? {}).slice(0, 500)}`],
               time: formatMessageTime(),
             },
             "running",
@@ -2096,32 +2096,8 @@ export default function App() {
           break;
         }
         case "tool_execution_update": {
-          // 工具执行中的进度片段（partialResult）。把进度文本追加到工具气泡的 steps，
-          // 让用户看到长任务（如风评、研判）的实时进度，而非只有 start/end 两个状态。
-          const key = `${conversationId}:${event.toolCallId}`;
-          const messageId = toolMessageIdRef.current[key];
-          if (!messageId) break;
-          const partial = event.partialResult;
-          const partialText =
-            typeof partial === "string"
-              ? partial
-              : (partial as { text?: string; content?: unknown })?.text ??
-                (typeof (partial as { content?: unknown })?.content === "string"
-                  ? String((partial as { content: string }).content)
-                  : (() => {
-                      try {
-                        return partial == null ? "" : JSON.stringify(partial).slice(0, 300);
-                      } catch {
-                        return "";
-                      }
-                    })());
-          if (!partialText) break;
-          updateMessageInConversation(
-            conversationId,
-            messageId,
-            (message) => ({ ...message, steps: [...(message.steps ?? []), partialText] }),
-            "running",
-          );
+          // Runtime progress remains available to diagnostics, but raw tool
+          // arguments and intermediate JSON are not shown in the conversation.
           break;
         }
         case "tool_execution_end": {
@@ -2136,10 +2112,12 @@ export default function App() {
             messageId,
             (message) => ({
               ...message,
+              kind: "tool",
               title: event.isError ? `工具调用失败：${event.toolName}` : `工具调用完成：${event.toolName}`,
               content: event.isError
-                ? String((event.result as { content?: unknown })?.content ?? "工具执行失败")
+                ? `${event.toolName} 执行失败，请检查相关配置后重试。`
                 : `已完成 ${event.toolName}。`,
+              steps: undefined,
               alertAnalysisResult: interpreted.alertAnalysisResult ?? message.alertAnalysisResult,
               riskAssessmentResult: interpreted.riskAssessmentResult ?? message.riskAssessmentResult,
               riskAssessmentJob: interpreted.riskAssessmentJob ?? message.riskAssessmentJob,

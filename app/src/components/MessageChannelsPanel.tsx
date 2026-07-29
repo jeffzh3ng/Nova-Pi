@@ -58,6 +58,7 @@ import {
   type MessageChannel,
 } from "../services/messageChannels";
 import { digitalHumans } from "../config/appContent";
+import { showAppError, showAppWarning } from "../services/appDialog";
 import { ConfirmModal } from "./ConfirmModal";
 
 /**
@@ -394,7 +395,7 @@ export function MessageChannelsPanel() {
     if (!editor) return;
     const draft = finalDraft ?? editor.draft;
     if (!draft.displayName.trim()) {
-      alert("请填写显示名称");
+      showAppWarning("请填写显示名称");
       return;
     }
     const restartFeishu = channelTypeOf(draft) === "feishu"
@@ -415,7 +416,7 @@ export function MessageChannelsPanel() {
         );
       }
     } catch (err) {
-      alert(`保存失败：${err instanceof Error ? err.message : String(err)}`);
+      showAppError(err instanceof Error ? err.message : String(err), "消息渠道保存失败");
     } finally {
       setBusyChannel(null);
     }
@@ -624,7 +625,7 @@ export function MessageChannelsPanel() {
       await deleteMessageChannel(target.channelId);
       await loadChannels();
     } catch (err) {
-      alert(`删除失败：${err instanceof Error ? err.message : String(err)}`);
+      showAppError(err instanceof Error ? err.message : String(err), "消息渠道删除失败");
     }
   };
 
@@ -990,11 +991,11 @@ function ChannelEditor({ editor, existingIds, onClose, onSave, onDraftChange }: 
     // 若用户输入了新 token，合成最终 draft（含新 token）后保存。
     if (isTelegram && editingToken) {
       if (!tokenDraft.trim()) {
-        alert("请填写 Bot Token");
+        showAppWarning("请填写 Bot Token");
         return;
       }
       if (!tokenValid) {
-        alert("Bot Token 格式不正确（应为 123456789:AA... 形式）");
+        showAppWarning("Bot Token 格式不正确（应为 123456789:AA... 形式）");
         return;
       }
       const merged = { ...tgConfig, botToken: tokenDraft.trim() };
@@ -1003,12 +1004,12 @@ function ChannelEditor({ editor, existingIds, onClose, onSave, onDraftChange }: 
     }
     if (isFeishu) {
       if (!fsConfig.appId.trim()) {
-        alert("请填写飞书 App ID");
+        showAppWarning("请填写飞书 App ID");
         return;
       }
       const appSecret = editingSecret ? secretDraft.trim() : fsConfig.appSecret.trim();
       if (!appSecret) {
-        alert("请填写飞书 App Secret");
+        showAppWarning("请填写飞书 App Secret");
         return;
       }
       onSave({ ...draft, configJson: JSON.stringify({ ...fsConfig, appSecret }) });

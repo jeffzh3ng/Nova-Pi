@@ -10,6 +10,7 @@ import {
 } from "lucide-react";
 import type { AlertAnalysisResult } from "../types";
 import { normalizeAlertAnalysisResult, normalizeTextList } from "../services/alertAnalysisText";
+import { showAppError } from "../services/appDialog";
 
 /** Coerce untrusted findings into a safe array of finding objects. */
 const asFindings = (value: unknown): { title?: string; severity?: string; evidence?: string; impact?: string }[] =>
@@ -154,7 +155,7 @@ const handleExport = async (result: AlertAnalysisResult) => {
     if (message === "已取消" || message.includes("已取消")) return;
     console.error("导出告警分析报告失败", error);
     // 不再静默吞掉：把真实错误弹给用户，便于排查。
-    alert(`导出报告失败：${message}`);
+    showAppError(message, "导出报告失败");
   }
 };
 

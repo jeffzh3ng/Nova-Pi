@@ -2,6 +2,11 @@
   box-sizing: border-box;
 }
 
+::selection {
+  color: var(--color-selection-text);
+  background: var(--color-selection);
+}
+
 html,
 body,
 #root {

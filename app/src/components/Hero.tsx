@@ -47,6 +47,12 @@ export function Hero({
   onSubmit,
   onCancel,
 }: HeroProps) {
+  const composerPlaceholder = disabled
+    ? "先描述任务目标、相关背景和期望结果\n选择可用数字员工后即可发送"
+    : selectedEmployeeName
+      ? `告诉${selectedEmployeeName}你想完成什么\n建议补充任务背景、处理要求和期望结果，也可以上传相关文件`
+      : "描述你的目标、背景和期望结果\n例如：整理材料、分析数据或生成报告；也可以上传文件，或使用 @ 召唤数字员工";
+
   return (
     <section className="hero-section">
       <div className="hero-backdrop" aria-hidden="true">
@@ -58,6 +64,7 @@ export function Hero({
       <PromptComposer
         value={prompt}
         introduction={introduction}
+        placeholder={composerPlaceholder}
         modelName={modelName}
         busy={busy}
         disabled={disabled}

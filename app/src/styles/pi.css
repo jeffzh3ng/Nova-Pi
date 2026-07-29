@@ -32,6 +32,21 @@ body,
   min-width: 0;
 }
 
+.settings-app-version {
+  flex: 0 0 auto;
+  align-self: flex-start;
+  margin: 20px 0 0;
+  padding: 6px 10px;
+  border: 1px solid var(--color-line);
+  border-radius: 999px;
+  color: var(--color-ink-muted);
+  background: rgba(255, 255, 255, 0.72);
+  font-size: 12px;
+  font-weight: 700;
+  line-height: 1;
+  white-space: nowrap;
+}
+
 .pi-settings-page .mcp-status-line,
 .pi-extensions-page .mcp-status-line {
   display: -webkit-box;
@@ -461,6 +476,10 @@ label.pi-model-reasoning input {
   .pi-settings-page .mcp-status-line,
   .pi-extensions-page .mcp-status-line {
     max-width: 100%;
+  }
+
+  .settings-app-version {
+    margin-top: 0;
   }
 
   .pi-settings-page .mcp-card-grid {

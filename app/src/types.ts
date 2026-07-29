@@ -129,6 +129,7 @@ export type PendingSkillExecution = {
 export type ChatMessage = {
   id: string;
   role: "assistant" | "user";
+  kind?: "tool";
   title?: string;
   content: string;
   time: string;
