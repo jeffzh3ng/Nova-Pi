@@ -2,8 +2,8 @@
  * Pi 模型管理：直接读写 pi 的 models.json，并通过 ModelRuntime 反映变更。
  *
  * pi 的模型配置完全基于 ~/.pi/agent/models.json（pi 每次 /model 时重载）。
- * 我们把它作为单一事实源：增删 provider/model 都直接改写该文件，然后重建
- * ModelRuntime 让变更即时生效（无需重启 sidecar）。
+ * 自定义 provider/model 直接改写该文件；pi 内置 OAuth provider 则由 ModelRuntime
+ * 和 auth.json 管理。两类配置均无需重启 sidecar即可生效。
  *
  * models.json 格式（见 pi packages/coding-agent/src/core/model-config.ts）：
  * {
@@ -72,6 +72,7 @@ export type ProviderSummary = {
   name: string;
   baseUrl: string;
   api: string;
+  authType: "api_key" | "oauth";
   hasApiKey: boolean;
   apiKeyHint: string; // 脱敏：sk-***1234
   modelCount: number;
@@ -145,6 +146,7 @@ async function writeModelsJson(config: ModelsJson): Promise<void> {
 /** 列出所有 provider + 模型（结合 ModelRuntime 的可用性判断）。 */
 export async function listProviders(runtime: ModelRuntime): Promise<ProviderSummary[]> {
   const config = await readModelsJson();
+  const settings = await readSettingsJson();
   const summaries: ProviderSummary[] = [];
   for (const [id, provider] of Object.entries(config.providers)) {
     const models: ModelSummary[] = (provider.models ?? []).map((m) => ({
@@ -162,10 +164,40 @@ export async function listProviders(runtime: ModelRuntime): Promise<ProviderSumm
       name: provider.name ?? id,
       baseUrl: provider.baseUrl ?? "",
       api: provider.api ?? "openai-completions",
+      authType: "api_key",
       hasApiKey: Boolean(provider.apiKey),
       apiKeyHint: maskApiKey(provider.apiKey),
       modelCount: models.length,
       available: runtime.hasConfiguredAuth(id),
+      models,
+    });
+  }
+  if (runtime.hasConfiguredAuth("openai-codex")) {
+    const provider = runtime.getProvider("openai-codex");
+    let oauthAvailable = true;
+    let availableModels: readonly Model<Api>[];
+    try {
+      availableModels = await runtime.getAvailable("openai-codex");
+    } catch {
+      oauthAvailable = false;
+      availableModels = runtime.getModels("openai-codex");
+    }
+    const preferredModelId = settings.novaProviderModels?.["openai-codex"]
+      ?? (settings.defaultProvider === "openai-codex" ? settings.defaultModel : undefined)
+      ?? "gpt-5.5";
+    const models = availableModels
+      .map(modelToSummary(runtime))
+      .sort((left, right) => Number(right.id === preferredModelId) - Number(left.id === preferredModelId));
+    summaries.push({
+      id: "openai-codex",
+      name: provider?.name ?? "OpenAI Codex",
+      baseUrl: provider?.baseUrl ?? "https://chatgpt.com/backend-api",
+      api: "openai-codex",
+      authType: "oauth",
+      hasApiKey: false,
+      apiKeyHint: "ChatGPT OAuth",
+      modelCount: models.length,
+      available: oauthAvailable,
       models,
     });
   }
@@ -183,7 +215,7 @@ export async function upsertProvider(
     apiKey?: string;
     models?: ModelsJsonModel[];
   },
-): Promise<void> {
+): Promise<DefaultModelInfo | null> {
   return withWriteLock(async () => {
     const id = params.id.trim();
     if (!id) throw new Error("Provider ID 不能为空。");
@@ -219,14 +251,32 @@ export async function upsertProvider(
         `应用 provider ${id} 到 runtime 失败，已回滚 models.json：${error instanceof Error ? error.message : String(error)}`,
       );
     }
+
+    // 初始配置没有默认供应商。首次新增供应商时，将它的第一个有效模型
+    // 自动设为默认模型；后续新增或编辑供应商都不改变用户已有的选择。
+    if (!existing && !(await getDefaultModel())) {
+      const firstModel = provider.models?.find((model) => model.id.trim());
+      if (firstModel) {
+        const settings = await readSettingsJson();
+        settings.defaultProvider = id;
+        settings.defaultModel = firstModel.id;
+        await writeSettingsJson(settings);
+        return { provider: id, model: firstModel.id };
+      }
+    }
+    return null;
   });
 }
 
 /** 删除一个 provider。 */
-export async function removeProvider(runtime: ModelRuntime, providerId: string): Promise<void> {
+export async function removeProvider(runtime: ModelRuntime, providerId: string): Promise<boolean> {
   return withWriteLock(async () => {
+    if (providerId === "openai-codex") {
+      await runtime.logout(providerId);
+      return clearDefaultModelIfProvider(providerId);
+    }
     const config = await readModelsJson();
-    if (!config.providers[providerId]) return;
+    if (!config.providers[providerId]) return false;
     delete config.providers[providerId];
     await writeModelsJson(config);
     try {
@@ -234,6 +284,7 @@ export async function removeProvider(runtime: ModelRuntime, providerId: string):
     } catch {
       // ignore
     }
+    return clearDefaultModelIfProvider(providerId);
   });
 }
 
@@ -306,12 +357,26 @@ export async function getDefaultModel(): Promise<DefaultModelInfo | null> {
 
 /** 把 models.json 中的供应商配置转换为 SessionPool 可直接应用的模型设置。 */
 export async function getProviderModelSettings(
+  runtime: ModelRuntime,
   providerId: string,
   modelId: string,
 ): Promise<HostModelSettings> {
   const config = await readModelsJson();
   const provider = config.providers[providerId];
-  if (!provider) throw new Error(`供应商不存在：${providerId}`);
+  if (!provider) {
+    const model = runtime.getModel(providerId, modelId);
+    if (!model) throw new Error(`模型不存在：${providerId}/${modelId}`);
+    if (!(await runtime.getAuth(model))) throw new Error("尚未完成账号授权。");
+    return {
+      provider: providerId,
+      apiKey: "",
+      baseUrl: "",
+      model: modelId,
+      temperature: 0.2,
+      maxTokens: model.maxTokens,
+      proxyUrl: "",
+    };
+  }
   const model = provider.models?.find((item) => item.id === modelId);
   if (!model) throw new Error(`模型不存在：${providerId}/${modelId}`);
   const apiKey = resolveApiKey(provider.apiKey ?? "");
@@ -331,32 +396,64 @@ export async function setDefaultModel(provider: string, model: string): Promise<
   const settings = await readSettingsJson();
   settings.defaultProvider = provider;
   settings.defaultModel = model;
+  settings.novaProviderModels = { ...settings.novaProviderModels, [provider]: model };
   await writeSettingsJson(settings);
 }
 
 /** 列出 runtime 中所有可用模型（含 pi 内置 + models.json 自定义），供默认模型选择。 */
 export function listAllModels(runtime: ModelRuntime): ModelSummary[] {
-  const models = runtime.getModels();
-  return models.map((m) => ({
-    id: m.id,
-    name: m.name,
-    provider: m.provider,
-    api: m.api,
-    reasoning: m.reasoning,
-    contextWindow: m.contextWindow,
-    maxTokens: m.maxTokens,
-    available: runtime.hasConfiguredAuth(m.provider),
-  }));
+  return runtime.getModels().map(modelToSummary(runtime));
+}
+
+/** 运行 pi 内置 OAuth，并在没有默认模型时把本次供应商设为默认。 */
+export async function loginOAuthProvider(
+  runtime: ModelRuntime,
+  providerId: string,
+  requestedModelId: string | undefined,
+  interaction: Parameters<ModelRuntime["login"]>[2],
+): Promise<DefaultModelInfo> {
+  const provider = runtime.getProvider(providerId);
+  if (!provider?.auth.oauth) throw new Error(`供应商不支持 OAuth：${providerId}`);
+  if (!runtime.hasConfiguredAuth(providerId)) {
+    await runtime.login(providerId, "oauth", interaction);
+  }
+
+  const models = await runtime.getAvailable(providerId);
+  const model = models.find((item) => item.id === requestedModelId)
+    ?? models.find((item) => item.id === "gpt-5.5")
+    ?? models[0];
+  if (!model) throw new Error(`供应商没有可用模型：${providerId}`);
+
+  const selected = { provider: providerId, model: model.id };
+  const currentDefault = await getDefaultModel();
+  const settings = await readSettingsJson();
+  settings.novaProviderModels = { ...settings.novaProviderModels, [providerId]: model.id };
+  if (!currentDefault || currentDefault.provider === providerId) {
+    settings.defaultProvider = selected.provider;
+    settings.defaultModel = selected.model;
+  }
+  await writeSettingsJson(settings);
+  return selected;
 }
 
 /**
  * 发起一次极小的真实请求，验证 provider 的 Key、Base URL 和模型 ID。
  * hasConfiguredAuth 只能说明“存在凭据”，不能证明凭据有效，因此卡片状态必须使用本结果。
  */
-export async function testProviderConnection(providerId: string, modelId?: string): Promise<void> {
+export async function testProviderConnection(
+  runtime: ModelRuntime,
+  providerId: string,
+  modelId?: string,
+): Promise<void> {
   const config = await readModelsJson();
   const provider = config.providers[providerId];
-  if (!provider) throw new Error(`供应商不存在：${providerId}`);
+  if (!provider) {
+    const model = modelId ? runtime.getModel(providerId, modelId) : runtime.getModels(providerId)[0];
+    if (!model) throw new Error(`供应商或模型不存在：${providerId}/${modelId ?? ""}`);
+    if (!(await runtime.getAuth(model))) throw new Error("尚未完成账号授权。");
+    await completeConnectionTest(runtime, model);
+    return;
+  }
 
   const modelConfig = modelId
     ? provider.models?.find((model) => model.id === modelId)
@@ -417,7 +514,10 @@ export async function testProviderConnection(providerId: string, modelId?: strin
  *
  * 失败时返回 null，由调用方（Rust）决定回退策略。
  */
-export async function generateTitleWithLlm(transcript: string): Promise<string | null> {
+export async function generateTitleWithLlm(
+  runtime: ModelRuntime,
+  transcript: string,
+): Promise<string | null> {
   const text = transcript.trim();
   if (!text) return null;
 
@@ -425,14 +525,33 @@ export async function generateTitleWithLlm(transcript: string): Promise<string |
   if (!defaultModel) {
     throw new Error("未配置默认模型，请在设置面板选择默认供应商和模型。");
   }
-  const settings = await getProviderModelSettings(defaultModel.provider, defaultModel.model);
+  const settings = await getProviderModelSettings(runtime, defaultModel.provider, defaultModel.model);
   const model = resolveModel(settings);
   applyApiKey(settings);
 
   const controller = new AbortController();
   const timeout = setTimeout(() => controller.abort(), 20_000);
   try {
-    const response = await completeSimple(
+    const response = runtime.isUsingOAuth(model.provider)
+      ? await runtime.completeSimple(
+          model,
+          {
+            systemPrompt:
+              "你是任务命名助手。根据对话内容提炼一个简明扼要的任务名称。" +
+              "要求：8-20 个字，概括核心目标与关键对象，信息要丰富完整；" +
+              "不要包含时间、序号、客套话；" +
+              "不要加引号、书名号或「任务」「标题」等前缀；不要带标点；" +
+              "只输出名称本身，不要任何解释。",
+            messages: [{ role: "user", content: `对话内容：\n${text}`, timestamp: Date.now() }],
+          },
+          {
+            maxTokens: 32,
+            maxRetries: 0,
+            timeoutMs: 18_000,
+            signal: controller.signal,
+          },
+        )
+      : await completeSimple(
       model,
       {
         systemPrompt:
@@ -476,6 +595,7 @@ type PiSettings = {
   defaultModel?: string;
   extensions?: string[];
   packages?: unknown[];
+  novaProviderModels?: Record<string, string>;
 };
 
 async function readSettingsJson(): Promise<PiSettings> {
@@ -491,6 +611,54 @@ async function readSettingsJson(): Promise<PiSettings> {
 async function writeSettingsJson(settings: PiSettings): Promise<void> {
   await mkdir(join(settingsJsonPath, ".."), { recursive: true });
   await writeFile(settingsJsonPath, JSON.stringify(settings, null, 2), "utf8");
+}
+
+async function clearDefaultModelIfProvider(providerId: string): Promise<boolean> {
+  const settings = await readSettingsJson();
+  const wasDefault = settings.defaultProvider === providerId;
+  if (wasDefault) {
+    delete settings.defaultProvider;
+    delete settings.defaultModel;
+  }
+  const hadPreferredModel = Boolean(settings.novaProviderModels?.[providerId]);
+  if (hadPreferredModel && settings.novaProviderModels) {
+    delete settings.novaProviderModels[providerId];
+  }
+  if (wasDefault || hadPreferredModel) await writeSettingsJson(settings);
+  return wasDefault;
+}
+
+function modelToSummary(runtime: ModelRuntime) {
+  return (model: Model<Api>): ModelSummary => ({
+    id: model.id,
+    name: model.name,
+    provider: model.provider,
+    api: model.api,
+    reasoning: model.reasoning,
+    contextWindow: model.contextWindow,
+    maxTokens: model.maxTokens,
+    available: runtime.hasConfiguredAuth(model.provider),
+  });
+}
+
+async function completeConnectionTest(runtime: ModelRuntime, model: Model<Api>): Promise<void> {
+  const controller = new AbortController();
+  const timeout = setTimeout(() => controller.abort(), 12_000);
+  try {
+    const response = await runtime.completeSimple(
+      model,
+      { messages: [{ role: "user", content: "Reply OK.", timestamp: Date.now() }] },
+      { maxTokens: 8, maxRetries: 0, timeoutMs: 10_000, signal: controller.signal },
+    );
+    if (response.stopReason === "error" || response.stopReason === "aborted") {
+      throw new Error(response.errorMessage || "模型连接验证失败。");
+    }
+  } catch (error) {
+    if (controller.signal.aborted) throw new Error("模型连接验证超时。");
+    throw error;
+  } finally {
+    clearTimeout(timeout);
+  }
 }
 
 /**

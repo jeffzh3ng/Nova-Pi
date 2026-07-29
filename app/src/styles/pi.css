@@ -252,6 +252,74 @@ body,
   border-radius: 10px;
 }
 
+.pi-oauth-note {
+  display: grid;
+  gap: 5px;
+  padding: 11px 12px;
+  color: #31546a;
+  background: #eef8fb;
+  border: 1px solid #c5e4ec;
+  border-radius: 9px;
+  font-size: 12px;
+  line-height: 1.5;
+}
+
+.pi-oauth-note strong {
+  color: #176e90;
+  font-size: 13px;
+}
+
+.pi-oauth-note code {
+  width: fit-content;
+  padding: 4px 7px;
+  color: #174d63;
+  background: #ffffff;
+  border: 1px solid #b9dce6;
+  border-radius: 5px;
+  font-size: 14px;
+  font-weight: 800;
+  letter-spacing: 0.08em;
+}
+
+.pi-oauth-note small {
+  color: #567485;
+}
+
+.pi-oauth-url-row {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
+  gap: 8px;
+  align-items: center;
+}
+
+.pi-oauth-url {
+  min-width: 0;
+  height: 34px;
+  padding: 0 9px;
+  color: #29485a;
+  background: #ffffff;
+  border: 1px solid #b9dce6;
+  border-radius: 6px;
+  font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+  font-size: 11px;
+}
+
+.pi-oauth-url-row button {
+  height: 34px;
+  padding: 0 12px;
+  color: #ffffff;
+  background: #176e90;
+  border: 0;
+  border-radius: 6px;
+  font-size: 12px;
+  font-weight: 750;
+  white-space: nowrap;
+}
+
+.pi-oauth-url-row button:hover {
+  background: #125d7b;
+}
+
 .pi-model-field-full {
   grid-column: 1 / -1;
 }

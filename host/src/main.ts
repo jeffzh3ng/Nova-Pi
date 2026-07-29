@@ -13,8 +13,12 @@
  */
 
 import { createInterface } from "node:readline";
+import { randomUUID } from "node:crypto";
 import { mkdirSync } from "node:fs";
 import { join } from "node:path";
+// ModelRuntime 来自 coding-agent 自带的 pi-ai 实例。显式注册同一实例的静态 OAuth
+// loaders，确保 tsup 的单文件安装包不会保留运行时无法解析的动态 import。
+import { registerBunOAuthFlows } from "../../node_modules/@earendil-works/pi-coding-agent/node_modules/@earendil-works/pi-ai/dist/bun-oauth.js";
 import { SessionPool } from "./session-pool.js";
 import { initModelRuntime, getModelRuntime } from "./model-setup.js";
 import { mcpRegistry } from "./mcp/registry.js";
@@ -28,6 +32,7 @@ import {
   getProviderModelSettings,
   setDefaultModel,
   testProviderConnection,
+  loginOAuthProvider,
   upsertProvider,
   removeProvider,
   setProviderApiKey,
@@ -56,6 +61,7 @@ import { normalizeFeishuConfig, type FeishuConfig } from "./feishubot/types.js";
 
 const agentDir = process.argv[2] || join(process.env.HOME || process.cwd(), ".nova-pi", "agent");
 mkdirSync(agentDir, { recursive: true });
+registerBunOAuthFlows();
 
 let pool: SessionPool | null = null;
 let weixinBot: WeixinBotManager | null = null;
@@ -64,6 +70,7 @@ let telegramBot: TelegramBotManager | null = null;
 /** 飞书按渠道实例 ID 管理，允许多个应用同时连接并分别绑定数字员工。 */
 const feishuBots = new Map<string, FeishuBotManager>();
 let shuttingDown = false;
+const pendingOAuthLogins = new Map<string, AbortController>();
 
 async function bootstrap(): Promise<void> {
   stderrLog(`[nova-pi-host] agentDir=${agentDir}`);
@@ -77,13 +84,124 @@ async function bootstrap(): Promise<void> {
     const defaultModel = await getDefaultModel();
     if (defaultModel) {
       await pool.setModelSettings(
-        await getProviderModelSettings(defaultModel.provider, defaultModel.model),
+        await getProviderModelSettings(getModelRuntime(), defaultModel.provider, defaultModel.model),
       );
     }
   } catch (error) {
     stderrLog(`[nova-pi-host] 默认模型加载失败：${error instanceof Error ? error.message : String(error)}`);
   }
   stderrLog("[nova-pi-host] pi runtime ready");
+}
+
+async function runOAuthLogin(
+  loginId: string,
+  providerId: string,
+  modelId: string | undefined,
+  controller: AbortController,
+): Promise<void> {
+  let timedOut = false;
+  const timeout = setTimeout(() => {
+    timedOut = true;
+    controller.abort();
+  }, 5 * 60_000);
+  try {
+    await loginOAuthProvider(getModelRuntime(), providerId, modelId, {
+      signal: controller.signal,
+      prompt: async (prompt) => {
+        if (prompt.type === "select") return "browser";
+        if (prompt.type === "manual_code") {
+          return waitForOAuthAbort(controller.signal, prompt.signal);
+        }
+        throw new Error("当前 OAuth 流程要求了未支持的输入。请重试授权。");
+      },
+      notify: (event) => {
+        if (event.type === "auth_url") {
+          writeEvent({
+            type: "model_auth",
+            loginId,
+            providerId,
+            phase: "auth_url",
+            url: event.url,
+            message: event.instructions ?? "请在浏览器中完成 ChatGPT 授权。",
+          });
+        } else if (event.type === "device_code") {
+          writeEvent({
+            type: "model_auth",
+            loginId,
+            providerId,
+            phase: "device_code",
+            url: event.verificationUri,
+            userCode: event.userCode,
+            message: "请在浏览器中输入设备码完成授权。",
+          });
+        } else if (event.type === "progress" || event.type === "info") {
+          writeEvent({
+            type: "model_auth",
+            loginId,
+            providerId,
+            phase: "progress",
+            message: event.message,
+            url: event.type === "info" ? event.links?.[0]?.url : undefined,
+          });
+        }
+      },
+    });
+
+    const defaultModel = await getDefaultModel();
+    if (defaultModel?.provider === providerId) {
+      await pool?.setModelSettings(
+        await getProviderModelSettings(
+          getModelRuntime(),
+          defaultModel.provider,
+          defaultModel.model,
+        ),
+      );
+    }
+    writeEvent({
+      type: "model_auth",
+      loginId,
+      providerId,
+      phase: "complete",
+      message: "ChatGPT 账号授权成功。",
+      defaultModel,
+    });
+  } catch (error) {
+    const cancelled = controller.signal.aborted;
+    writeEvent({
+      type: "model_auth",
+      loginId,
+      providerId,
+      phase: cancelled ? "cancelled" : "error",
+      message: timedOut
+        ? "等待账号授权超时，请重新保存配置后再试。"
+        : cancelled
+          ? "已取消账号授权。"
+          : error instanceof Error
+            ? error.message
+            : String(error),
+    });
+  } finally {
+    clearTimeout(timeout);
+    pendingOAuthLogins.delete(loginId);
+  }
+}
+
+function waitForOAuthAbort(...signals: Array<AbortSignal | undefined>): Promise<string> {
+  return new Promise((_resolve, reject) => {
+    const activeSignals = signals.filter((signal): signal is AbortSignal => Boolean(signal));
+    const cleanup = () => {
+      for (const signal of activeSignals) signal.removeEventListener("abort", onAbort);
+    };
+    const onAbort = () => {
+      cleanup();
+      reject(new Error("授权等待已取消。"));
+    };
+    if (activeSignals.some((signal) => signal.aborted)) {
+      onAbort();
+      return;
+    }
+    for (const signal of activeSignals) signal.addEventListener("abort", onAbort, { once: true });
+  });
 }
 
 // ── 命令分发 ─────────────────────────────────────────────────────────────────
@@ -268,25 +386,52 @@ async function handleCommand(command: RpcCommand): Promise<void> {
         return;
       }
       case "models_set_default": {
-        const settings = await getProviderModelSettings(command.provider, command.model);
+        const settings = await getProviderModelSettings(getModelRuntime(), command.provider, command.model);
         await setDefaultModel(command.provider, command.model);
         await pool?.setModelSettings(settings);
         writeResponse(id, true);
         return;
       }
       case "models_test_provider": {
-        await testProviderConnection(command.providerId, command.modelId);
+        await testProviderConnection(getModelRuntime(), command.providerId, command.modelId);
         writeResponse(id, true, "连接成功");
         return;
       }
+      case "models_login_oauth": {
+        if (command.providerId !== "openai-codex") {
+          throw new Error(`暂不支持该 OAuth 供应商：${command.providerId}`);
+        }
+        const loginId = randomUUID();
+        const controller = new AbortController();
+        pendingOAuthLogins.set(loginId, controller);
+        writeResponse(id, true, { loginId });
+        setImmediate(() => {
+          void runOAuthLogin(loginId, command.providerId, command.modelId, controller);
+        });
+        return;
+      }
+      case "models_cancel_oauth": {
+        const controller = pendingOAuthLogins.get(command.loginId);
+        controller?.abort();
+        writeResponse(id, true, Boolean(controller));
+        return;
+      }
       case "models_upsert_provider": {
-        await upsertProvider(getModelRuntime(), command.provider as Parameters<typeof upsertProvider>[1]);
-        writeResponse(id, true);
+        const autoDefault = await upsertProvider(
+          getModelRuntime(),
+          command.provider as Parameters<typeof upsertProvider>[1],
+        );
+        if (autoDefault) {
+          await pool?.setModelSettings(
+            await getProviderModelSettings(getModelRuntime(), autoDefault.provider, autoDefault.model),
+          );
+        }
+        writeResponse(id, true, autoDefault);
         return;
       }
       case "models_remove_provider": {
-        await removeProvider(getModelRuntime(), command.providerId);
-        writeResponse(id, true);
+        const defaultCleared = await removeProvider(getModelRuntime(), command.providerId);
+        writeResponse(id, true, { defaultCleared });
         return;
       }
       case "models_set_api_key": {
@@ -308,7 +453,7 @@ async function handleCommand(command: RpcCommand): Promise<void> {
         // transcript 由 Rust 拼好（取自 SQLite 会话消息）；host 只负责用默认模型调一次 LLM。
         // 失败时返回 null，Rust 端回退到首条用户消息截断。
         try {
-          const title = await generateTitleWithLlm(command.transcript);
+          const title = await generateTitleWithLlm(getModelRuntime(), command.transcript);
           writeResponse(id, true, { title });
         } catch (error) {
           writeResponse(id, true, { title: null, error: error instanceof Error ? error.message : String(error) });
@@ -504,6 +649,8 @@ async function gracefulShutdown(): Promise<void> {
   shuttingDown = true;
   stderrLog("[nova-pi-host] shutting down");
   try {
+    for (const controller of pendingOAuthLogins.values()) controller.abort();
+    pendingOAuthLogins.clear();
     await weixinBot?.stop();
     await telegramBot?.stop();
     await Promise.all([...feishuBots.values()].map((manager) => manager.stop().catch(() => {})));

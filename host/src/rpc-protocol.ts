@@ -63,6 +63,8 @@ export type RpcCommand =
   | { id?: string; type: "models_get_default" }
   | { id?: string; type: "models_set_default"; provider: string; model: string }
   | { id?: string; type: "models_test_provider"; providerId: string; modelId: string }
+  | { id?: string; type: "models_login_oauth"; providerId: string; modelId?: string }
+  | { id?: string; type: "models_cancel_oauth"; loginId: string }
   | { id?: string; type: "models_upsert_provider"; provider: { id: string; name?: string; baseUrl: string; api: string; apiKey?: string; models?: unknown[] } }
   | { id?: string; type: "models_remove_provider"; providerId: string }
   | { id?: string; type: "models_set_api_key"; providerId: string; apiKey: string }
@@ -127,6 +129,16 @@ export type RpcEvent =
   | { type: "computer_agent_blocked"; sessionId: string; reason: "permission_required" | "invalid_tool_call"; message: string; permissions: string[]; permissionLabels: string[]; invalidToolName?: string }
   | { type: "risk_job_update"; sessionId: string; job: unknown }
   | { type: "session_saved"; conversationId: string; title?: string }
+  | {
+      type: "model_auth";
+      loginId: string;
+      providerId: string;
+      phase: "auth_url" | "device_code" | "progress" | "complete" | "error" | "cancelled";
+      message?: string;
+      url?: string;
+      userCode?: string;
+      defaultModel?: { provider: string; model: string } | null;
+    }
   // 微信机器人事件（前端 MessageChannelsPanel 微信卡片订阅）
   | { type: "wechat_qrcode"; qrUrl: string }
   | { type: "wechat_status"; status: "offline" | "awaiting_scan" | "online" | "error"; account?: string; accountName?: string; detail?: string }

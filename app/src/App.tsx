@@ -493,7 +493,7 @@ const interpretToolResult = (
 
 export default function App() {
   const [prompt, setPrompt] = useState("");
-  const [currentModelName, setCurrentModelName] = useState("deepseek-v4-pro");
+  const [currentModelName, setCurrentModelName] = useState("未配置模型");
   const [busy, setBusy] = useState(false);
   const [modelStatus, setModelStatus] = useState<"ok" | "error" | "idle">("idle");
   const [modelError, setModelError] = useState("");
@@ -1123,13 +1123,9 @@ export default function App() {
             setModelError(error instanceof Error ? error.message : String(error));
           }
         } else {
-          // 没有默认模型时，尝试列举可用模型取第一个
-          const models = await sendRpc<Array<{ id: string; provider: string; available: boolean }>>({ type: "models_list_all" });
-          if (!alive || sequence !== refreshSequence) return;
-          const first = models.find((m) => m.available) ?? models[0];
-          setCurrentModelName(first ? `${first.id}` : "未配置模型");
-          setModelStatus(first?.available ? "ok" : "error");
-          setModelError(first?.available ? "" : "未检测到可用模型。");
+          setCurrentModelName("未配置模型");
+          setModelStatus("error");
+          setModelError("请先在设置中添加模型供应商。");
         }
       } catch (error) {
         if (!alive || sequence !== refreshSequence) return;

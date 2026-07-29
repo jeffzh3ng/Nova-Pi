@@ -1,4 +1,4 @@
-import { copyFile, mkdtemp, rm } from "node:fs/promises";
+import { copyFile, mkdtemp, readFile, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { createInterface } from "node:readline";
@@ -23,6 +23,10 @@ const waitForExit = async (process, timeoutMs = 5_000) => {
 };
 
 try {
+  const bundleSource = await readFile(sourceEntry, "utf8");
+  if (!bundleSource.includes("Select OpenAI Codex login method")) {
+    throw new Error("standalone host did not statically bundle the OpenAI Codex OAuth flow");
+  }
   await copyFile(sourceEntry, isolatedEntry);
   child = spawn(process.execPath, [isolatedEntry, agentDir], {
     cwd: isolatedDir,
@@ -37,10 +41,22 @@ try {
   });
 
   const pending = new Map();
+  const receivedEvents = [];
+  const eventWaiters = new Set();
   const output = createInterface({ input: child.stdout });
   output.on("line", (line) => {
     try {
       const message = JSON.parse(line);
+      if (message.type === "event" && message.event) {
+        receivedEvents.push(message.event);
+        for (const waiter of eventWaiters) {
+          if (!waiter.predicate(message.event)) continue;
+          eventWaiters.delete(waiter);
+          clearTimeout(waiter.timer);
+          waiter.resolve(message.event);
+        }
+        return;
+      }
       if (message.type !== "response" || typeof message.id !== "string") return;
       const waiter = pending.get(message.id);
       if (!waiter) return;
@@ -73,6 +89,22 @@ try {
       child.stdin.write(`${JSON.stringify({ ...command, id })}\n`);
     });
 
+  const waitForEvent = (predicate, timeoutMs = 15_000) => {
+    const existing = receivedEvents.find(predicate);
+    if (existing) return Promise.resolve(existing);
+    return new Promise((resolve, reject) => {
+      const waiter = {
+        predicate,
+        resolve,
+        timer: setTimeout(() => {
+          eventWaiters.delete(waiter);
+          reject(new Error(`standalone host event timeout\n${stderr}`));
+        }, timeoutMs),
+      };
+      eventWaiters.add(waiter);
+    });
+  };
+
   const state = await rpc({ type: "get_state" });
   if (state?.status !== "ready") throw new Error("standalone host did not become ready");
 
@@ -91,6 +123,19 @@ try {
   if (!providers?.some((provider) => provider.id === "bundle-smoke")) {
     throw new Error("standalone host did not persist the provider");
   }
+  const defaultModel = await rpc({ type: "models_get_default" });
+  if (defaultModel?.provider !== "bundle-smoke" || defaultModel?.model !== "bundle-smoke-model") {
+    throw new Error("standalone host did not make the first provider model the default");
+  }
+
+  const oauth = await rpc({
+    type: "models_login_oauth",
+    providerId: "openai-codex",
+    modelId: "gpt-5.5",
+  });
+  await waitForEvent((event) => event.type === "model_auth" && event.loginId === oauth.loginId && event.phase === "auth_url");
+  await rpc({ type: "models_cancel_oauth", loginId: oauth.loginId });
+  await waitForEvent((event) => event.type === "model_auth" && event.loginId === oauth.loginId && event.phase === "cancelled");
 
   await rpc({ type: "shutdown" });
   await waitForExit(child);

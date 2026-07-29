@@ -2,8 +2,11 @@ import { Bot, CheckCircle2, CirclePlus, Pencil, Save, Search, ShieldCheck, Trash
 import { useEffect, useRef, useState } from "react";
 import { ConfirmModal } from "./ConfirmModal";
 import {
+  cancelOAuthLogin,
   getDefaultModel,
+  listAllModels,
   listProviders,
+  loginOAuthProvider,
   removeProvider,
   setDefaultModel,
   testProviderConnection,
@@ -61,6 +64,16 @@ const EMPTY_MODEL_DRAFT: ModelDraft = {
   reasoning: false,
 };
 
+const OPENAI_CODEX_PROVIDER_ID = "openai-codex";
+const OPENAI_CODEX_BASE_URL = "https://chatgpt.com/backend-api";
+const OPENAI_CODEX_MODEL_FALLBACK: ModelDraft = {
+  id: "gpt-5.5",
+  name: "GPT-5.5",
+  contextWindow: "272000",
+  maxTokens: "128000",
+  reasoning: true,
+};
+
 const providerSlug = (providerName: string, modelId: string) => {
   const normalize = (value: string) => value
     .toLowerCase()
@@ -91,14 +104,18 @@ function ModelSettingsPanel() {
   const [busyProviderId, setBusyProviderId] = useState<string | null>(null);
   const [providerConnections, setProviderConnections] = useState<Record<string, ProviderConnectionState>>({});
   const [status, setStatus] = useState("正在读取模型配置...");
+  const [codexModels, setCodexModels] = useState<ModelSummary[]>([]);
+  const [oauthStatus, setOauthStatus] = useState<{ message: string; url?: string; userCode?: string } | null>(null);
   const connectionCheckRunRef = useRef(0);
+  const activeOAuthLoginIdRef = useRef<string | null>(null);
+  const oauthUrlInputRef = useRef<HTMLInputElement>(null);
 
   const verifyProviderConnections = (providerList: ProviderSummary[]) => {
     const runId = ++connectionCheckRunRef.current;
     const initial = Object.fromEntries(
       providerList.map((provider) => [
         provider.id,
-        provider.hasApiKey
+        provider.authType === "oauth" || provider.hasApiKey
           ? { state: "checking", message: "正在验证模型连接..." }
           : { state: "unconfigured", message: "尚未配置 API Key。" },
       ]),
@@ -106,7 +123,7 @@ function ModelSettingsPanel() {
     setProviderConnections(initial);
 
     for (const provider of providerList) {
-      if (!provider.hasApiKey) continue;
+      if (provider.authType !== "oauth" && !provider.hasApiKey) continue;
       const model = provider.models[0];
       if (!model) {
         initial[provider.id] = { state: "error", message: "尚未配置模型 ID。" };
@@ -158,6 +175,8 @@ function ModelSettingsPanel() {
     void refresh();
     return () => {
       connectionCheckRunRef.current += 1;
+      const loginId = activeOAuthLoginIdRef.current;
+      if (loginId) void cancelOAuthLogin(loginId);
     };
   }, []);
 
@@ -184,12 +203,100 @@ function ModelSettingsPanel() {
         model: { ...EMPTY_DRAFT.model },
       },
     });
+    setOauthStatus(null);
+  };
+
+  const closeEditor = () => {
+    const loginId = activeOAuthLoginIdRef.current;
+    if (loginId) {
+      activeOAuthLoginIdRef.current = null;
+      void cancelOAuthLogin(loginId);
+    }
+    setEditor(null);
+    setOauthStatus(null);
   };
 
   const updateEditor = (key: ProviderTextField, value: string) => {
     setEditor((current) =>
       current ? { ...current, draft: { ...current.draft, [key]: value } } : current,
     );
+  };
+
+  const handleApiTypeChange = (api: string) => {
+    setOauthStatus(null);
+    if (api !== OPENAI_CODEX_PROVIDER_ID) {
+      setEditor((current) => {
+        if (!current) return current;
+        const wasOAuth = current.draft.api === OPENAI_CODEX_PROVIDER_ID;
+        return {
+          ...current,
+          apiKeyDirty: wasOAuth ? false : current.apiKeyDirty,
+          draft: {
+            ...current.draft,
+            api,
+            name: wasOAuth ? "" : current.draft.name,
+            baseUrl: wasOAuth ? "" : current.draft.baseUrl,
+            apiKey: wasOAuth ? "" : current.draft.apiKey,
+            model: wasOAuth ? { ...EMPTY_MODEL_DRAFT } : current.draft.model,
+          },
+        };
+      });
+      return;
+    }
+
+    const applyModels = (models: ModelSummary[]) => {
+      const preferred = models.find((model) => model.id === "gpt-5.5") ?? models[0];
+      setEditor((current) => {
+        if (!current || current.draft.api !== OPENAI_CODEX_PROVIDER_ID) return current;
+        return {
+          ...current,
+          apiKeyDirty: false,
+          draft: {
+            ...current.draft,
+            id: OPENAI_CODEX_PROVIDER_ID,
+            name: "OpenAI Codex",
+            baseUrl: OPENAI_CODEX_BASE_URL,
+            apiKey: "",
+            model: preferred
+              ? {
+                  id: preferred.id,
+                  name: preferred.name,
+                  contextWindow: String(preferred.contextWindow),
+                  maxTokens: String(preferred.maxTokens),
+                  reasoning: preferred.reasoning,
+                }
+              : { ...OPENAI_CODEX_MODEL_FALLBACK },
+          },
+        };
+      });
+    };
+
+    setEditor((current) => current ? {
+      ...current,
+      apiKeyDirty: false,
+      draft: {
+        ...current.draft,
+        id: OPENAI_CODEX_PROVIDER_ID,
+        name: "OpenAI Codex",
+        baseUrl: OPENAI_CODEX_BASE_URL,
+        api: OPENAI_CODEX_PROVIDER_ID,
+        apiKey: "",
+        model: { ...OPENAI_CODEX_MODEL_FALLBACK },
+      },
+    } : current);
+    if (codexModels.length > 0) {
+      applyModels(codexModels);
+      return;
+    }
+    void listAllModels()
+      .then((models) => {
+        const filtered = models.filter((model) => model.provider === OPENAI_CODEX_PROVIDER_ID);
+        setCodexModels(filtered);
+        applyModels(filtered);
+      })
+      .catch(() => {
+        // 内置目录读取失败时仍保留与当前 pi 版本匹配的预填模型。
+      });
   };
 
   const beginApiKeyEdit = () => {
@@ -229,8 +336,29 @@ function ModelSettingsPanel() {
     );
   };
 
+  const copyOAuthUrl = async () => {
+    const url = oauthStatus?.url;
+    if (!url) return;
+    try {
+      if (!navigator.clipboard) throw new Error("clipboard unavailable");
+      await navigator.clipboard.writeText(url);
+      setOauthStatus((current) => current ? {
+        ...current,
+        message: "授权地址已复制，请粘贴到浏览器并完成登录。",
+      } : current);
+    } catch {
+      oauthUrlInputRef.current?.focus();
+      oauthUrlInputRef.current?.select();
+      setOauthStatus((current) => current ? {
+        ...current,
+        message: "请按 Ctrl+C 复制已选中的授权地址，再粘贴到浏览器。",
+      } : current);
+    }
+  };
+
   const saveEditor = async () => {
     if (!editor) return;
+    const isOAuth = editor.draft.api === OPENAI_CODEX_PROVIDER_ID;
     const providerName = editor.draft.name.trim();
     if (!providerName) {
       setStatus("请填写供应商名称。");
@@ -248,7 +376,7 @@ function ModelSettingsPanel() {
       setStatus("Base URL 必须是有效的 http 或 https 地址。");
       return;
     }
-    if (editor.mode === "add" && !editor.draft.apiKey.trim()) {
+    if (!isOAuth && editor.mode === "add" && !editor.draft.apiKey.trim()) {
       setStatus("请填写 API Key。");
       return;
     }
@@ -267,9 +395,40 @@ function ModelSettingsPanel() {
       ? editor.draft.id.trim()
       : uniqueProviderId(providerName, modelId, providers);
     setEditorBusy(true);
-    setStatus("正在保存供应商配置...");
+    setStatus(isOAuth ? "正在生成 ChatGPT 账号授权地址..." : "正在保存供应商配置...");
     try {
-      await upsertProvider({
+      if (isOAuth) {
+        const alreadyAuthorized = providers.some((provider) => provider.id === OPENAI_CODEX_PROVIDER_ID);
+        const resolvedDefault = await loginOAuthProvider(
+          OPENAI_CODEX_PROVIDER_ID,
+          modelId,
+          {
+            onStarted: (loginId) => {
+              activeOAuthLoginIdRef.current = loginId;
+              setOauthStatus({
+                message: alreadyAuthorized
+                  ? "正在更新 OpenAI Codex 模型配置。"
+                  : "正在生成授权地址，请稍候。",
+              });
+            },
+            onEvent: (event) => {
+              setOauthStatus((current) => ({
+                message: event.message ?? "正在等待账号授权...",
+                url: event.url ?? current?.url,
+                userCode: event.userCode ?? current?.userCode,
+              }));
+            },
+          },
+        );
+        activeOAuthLoginIdRef.current = null;
+        setDefaultModelState(resolvedDefault);
+        setEditor(null);
+        setOauthStatus(null);
+        setStatus("OpenAI Codex 已通过 ChatGPT 账号授权并添加。");
+        await refresh();
+        return;
+      }
+      const autoDefault = await upsertProvider({
         id,
         name: providerName,
         baseUrl,
@@ -286,7 +445,9 @@ function ModelSettingsPanel() {
           reasoning: editor.draft.model.reasoning,
         }],
       });
-      if (defaultModel?.provider === id) {
+      if (autoDefault) {
+        setDefaultModelState(autoDefault);
+      } else if (defaultModel?.provider === id) {
         await setDefaultModel(id, modelId);
         setDefaultModelState({ provider: id, model: modelId });
       }
@@ -296,6 +457,7 @@ function ModelSettingsPanel() {
     } catch (error) {
       setStatus(toUserFacingError(error, "供应商配置保存失败，请稍后重试。"));
     } finally {
+      activeOAuthLoginIdRef.current = null;
       setEditorBusy(false);
     }
   };
@@ -359,7 +521,7 @@ function ModelSettingsPanel() {
           const configuredModel = currentProviderModel ?? provider.models[0];
           const isDefaultProvider = Boolean(currentProviderModel);
           const connection = providerConnections[provider.id] ?? (
-            provider.hasApiKey
+            provider.authType === "oauth" || provider.hasApiKey
               ? { state: "checking", message: "正在验证模型连接..." }
               : { state: "unconfigured", message: "尚未配置 API Key。" }
           );
@@ -418,7 +580,9 @@ function ModelSettingsPanel() {
                     type="button"
                     className="mcp-edit-button"
                     disabled={busy || isBusy}
-                    onClick={() =>
+                    onClick={() => {
+                      setOauthStatus(null);
+                      if (provider.authType === "oauth") setCodexModels(provider.models);
                       setEditor({
                         mode: "edit",
                         apiKeyDirty: false,
@@ -438,8 +602,8 @@ function ModelSettingsPanel() {
                               }
                             : { ...EMPTY_MODEL_DRAFT },
                         },
-                      })
-                    }
+                      });
+                    }}
                   >
                     <Pencil size={16} />
                     编辑
@@ -472,7 +636,7 @@ function ModelSettingsPanel() {
         <div
           className="mcp-editor-overlay"
           onMouseDown={(event) => {
-            if (event.target === event.currentTarget && !editorBusy) setEditor(null);
+            if (event.target === event.currentTarget && !editorBusy) closeEditor();
           }}
         >
           <section className="mcp-editor-dialog" role="dialog" aria-modal="true">
@@ -486,7 +650,7 @@ function ModelSettingsPanel() {
                   <h2>{editor.mode === "add" ? "添加模型供应商" : editor.draft.name || "供应商配置"}</h2>
                 </div>
               </div>
-              <button type="button" aria-label="关闭" onClick={() => setEditor(null)} disabled={editorBusy}>
+              <button type="button" aria-label="关闭" onClick={closeEditor}>
                 <X size={19} />
               </button>
             </header>
@@ -497,14 +661,23 @@ function ModelSettingsPanel() {
                 <input
                   value={editor.draft.name}
                   placeholder="例如：DeepSeek"
+                  readOnly={editor.draft.api === OPENAI_CODEX_PROVIDER_ID}
                   onChange={(event) => updateEditor("name", event.target.value)}
                 />
               </label>
               <label>
                 <span>API 类型 <b>*</b></span>
-                <select value={editor.draft.api} onChange={(event) => updateEditor("api", event.target.value)}>
+                <select
+                  value={editor.draft.api}
+                  disabled={editor.mode === "edit" && editor.draft.api === OPENAI_CODEX_PROVIDER_ID}
+                  onChange={(event) => handleApiTypeChange(event.target.value)}
+                >
                   {PI_API_TYPES.map((item) => (
-                    <option key={item.value} value={item.value}>
+                    <option
+                      key={item.value}
+                      value={item.value}
+                      disabled={editor.mode === "edit" && item.value === OPENAI_CODEX_PROVIDER_ID}
+                    >
                       {item.label}
                     </option>
                   ))}
@@ -515,10 +688,11 @@ function ModelSettingsPanel() {
                 <input
                   value={editor.draft.baseUrl}
                   placeholder="https://api.deepseek.com"
+                  readOnly={editor.draft.api === OPENAI_CODEX_PROVIDER_ID}
                   onChange={(event) => updateEditor("baseUrl", event.target.value)}
                 />
               </label>
-              <label>
+              {editor.draft.api !== OPENAI_CODEX_PROVIDER_ID ? <label>
                 <span>API Key <b>{editor.mode === "add" ? "*" : ""}</b>{editor.mode === "edit" ? "（留空保留原值）" : ""}</span>
                 <input
                   type={editor.mode === "edit" && !editor.apiKeyDirty ? "text" : "password"}
@@ -527,24 +701,79 @@ function ModelSettingsPanel() {
                   onFocus={beginApiKeyEdit}
                   onChange={(event) => updateApiKey(event.target.value)}
                 />
-              </label>
+              </label> : (
+                <div className="pi-oauth-note" role="status">
+                  <strong>ChatGPT 账号授权</strong>
+                  <span>{oauthStatus?.message ?? "保存配置后会显示授权地址，无需填写 API Key。"}</span>
+                  {oauthStatus?.userCode ? <code>{oauthStatus.userCode}</code> : null}
+                  {oauthStatus?.url ? (
+                    <div className="pi-oauth-url-row">
+                      <input
+                        ref={oauthUrlInputRef}
+                        className="pi-oauth-url"
+                        value={oauthStatus.url}
+                        readOnly
+                        aria-label="OpenAI 授权地址"
+                        onFocus={(event) => event.currentTarget.select()}
+                        onClick={(event) => event.currentTarget.select()}
+                      />
+                      <button
+                        type="button"
+                        onClick={() => void copyOAuthUrl()}
+                      >
+                        复制授权地址
+                      </button>
+                    </div>
+                  ) : null}
+                </div>
+              )}
               <section className="pi-model-editor" aria-label="模型配置">
                 <header>
                   <div>
                     <strong>模型 <b>*</b></strong>
-                    <span>每个供应商配置一个模型，需要更换时直接修改模型 ID。</span>
+                    <span>{editor.draft.api === OPENAI_CODEX_PROVIDER_ID
+                      ? "模型来自 OpenAI Codex 内置目录，保存时一并完成账号授权。"
+                      : "每个供应商配置一个模型，需要更换时直接修改模型 ID。"}</span>
                   </div>
                 </header>
                 <article className="pi-model-editor-item">
                   <label>
                     <span>模型 ID <b>*</b></span>
-                    <input
-                      value={editor.draft.model.id}
-                      placeholder="例如：deepseek-chat"
-                      onChange={(event) => updateEditorModel("id", event.target.value)}
-                    />
+                    {editor.draft.api === OPENAI_CODEX_PROVIDER_ID && codexModels.length > 0 ? (
+                      <select
+                        value={editor.draft.model.id}
+                        onChange={(event) => {
+                          const selected = codexModels.find((model) => model.id === event.target.value);
+                          if (!selected) return;
+                          setEditor((current) => current ? {
+                            ...current,
+                            draft: {
+                              ...current.draft,
+                              model: {
+                                id: selected.id,
+                                name: selected.name,
+                                contextWindow: String(selected.contextWindow),
+                                maxTokens: String(selected.maxTokens),
+                                reasoning: selected.reasoning,
+                              },
+                            },
+                          } : current);
+                        }}
+                      >
+                        {codexModels.map((model) => (
+                          <option key={model.id} value={model.id}>{model.name}</option>
+                        ))}
+                      </select>
+                    ) : (
+                      <input
+                        value={editor.draft.model.id}
+                        placeholder="例如：deepseek-chat"
+                        readOnly={editor.draft.api === OPENAI_CODEX_PROVIDER_ID}
+                        onChange={(event) => updateEditorModel("id", event.target.value)}
+                      />
+                    )}
                   </label>
-                  <details className="pi-model-advanced">
+                  {editor.draft.api !== OPENAI_CODEX_PROVIDER_ID ? <details className="pi-model-advanced">
                     <summary>高级参数</summary>
                     <div className="pi-model-advanced-fields">
                       <label className="pi-model-field-full">
@@ -584,18 +813,20 @@ function ModelSettingsPanel() {
                         <span>推理模型</span>
                       </label>
                     </div>
-                  </details>
+                  </details> : null}
                 </article>
               </section>
             </div>
 
             <footer className="mcp-editor-footer">
-              <button type="button" onClick={() => setEditor(null)} disabled={editorBusy}>
+              <button type="button" onClick={closeEditor}>
                 取消
               </button>
               <button className="primary" type="button" onClick={() => void saveEditor()} disabled={editorBusy}>
                 <Save size={17} />
-                {editorBusy ? "正在保存" : "保存配置"}
+                {editorBusy
+                  ? editor.draft.api === OPENAI_CODEX_PROVIDER_ID ? "正在授权" : "正在保存"
+                  : "保存配置"}
               </button>
             </footer>
           </section>
@@ -605,7 +836,9 @@ function ModelSettingsPanel() {
       <ConfirmModal
         open={pendingDelete !== null}
         title="删除供应商"
-        message={`确认删除供应商「${pendingDelete?.name ?? ""}」？该操作会从 models.json 移除该供应商及其全部模型，不可恢复。`}
+        message={pendingDelete?.authType === "oauth"
+          ? `确认删除供应商「${pendingDelete.name}」？该操作会清除本机保存的 ChatGPT 账号授权。`
+          : `确认删除供应商「${pendingDelete?.name ?? ""}」？该操作会移除该供应商及其全部模型配置，不可恢复。`}
         confirmLabel="删除"
         danger
         onConfirm={() => void confirmDelete()}
