@@ -51,7 +51,7 @@ export function Hero({
     ? "先描述任务目标、相关背景和期望结果\n选择可用数字员工后即可发送"
     : selectedEmployeeName
       ? `告诉${selectedEmployeeName}你想完成什么\n建议补充任务背景、处理要求和期望结果，也可以上传相关文件`
-      : "描述你的目标、背景和期望结果\n例如：整理材料、分析数据或生成报告；也可以上传文件，或使用 @ 召唤数字员工";
+      : "请描述你的任务背景、具体需求和期望结果，也可以使用 @ 召唤数字员工，我会据此为你提供更准确的帮助。";
 
   return (
     <section className="hero-section">
