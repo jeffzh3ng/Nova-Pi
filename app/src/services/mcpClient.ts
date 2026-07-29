@@ -1,4 +1,5 @@
 import { sendRpc } from "./hostBridge";
+import { unwrapMcpToolResult } from "./mcpPayload";
 
 /**
  * 通过 Node sidecar 调用 MCP 工具。
@@ -15,11 +16,12 @@ export async function callMcpTool<T>(
   args: Record<string, unknown>,
   options?: { timeoutSecs?: number },
 ): Promise<T> {
-  return await sendRpc<T>({
+  const raw = await sendRpc<unknown>({
     type: "mcp_call",
     serviceId,
     toolName,
     args,
     timeoutSecs: options?.timeoutSecs,
   });
+  return unwrapMcpToolResult(raw) as T;
 }

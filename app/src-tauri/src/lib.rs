@@ -46,7 +46,10 @@ use message_channels::{
     delete_message_channel, get_message_channel, list_message_channel_records,
     list_message_channels, save_message_channel,
 };
-use risk_http::{download_risk_assessment_result, upload_risk_assessment_material};
+use risk_http::{
+    download_risk_assessment_matrix_template, download_risk_assessment_result,
+    upload_risk_assessment_material,
+};
 use rpc::send_rpc;
 use serde_json::json;
 use skill_registry::{
@@ -243,6 +246,7 @@ pub fn run() {
             execute_skill_plan,
             // 风评大文件
             upload_risk_assessment_material,
+            download_risk_assessment_matrix_template,
             download_risk_assessment_result
         ])
         .run(tauri::generate_context!())

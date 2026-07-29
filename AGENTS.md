@@ -109,7 +109,7 @@ JSON-line over stdin/stdout。详见 `host/src/rpc-protocol.ts`。
 | `get_model_settings` / `save_model_settings` / `reset_model_settings` | llm_settings | LLM 配置 CRUD |
 | `test_model_connection` | llm_settings | 模型连通性测试 |
 | `list_token_usage` | llm_settings | token 统计（pi 的真实用量由 rpc.rs 拦截 usage 事件写入）|
-| `upload_risk_assessment_material` / `download_risk_assessment_result` | risk_http | 风评大文件 |
+| `upload_risk_assessment_material` / `download_risk_assessment_matrix_template` / `download_risk_assessment_result` | risk_http | 风评材料、空白矩阵和结果文件 |
 | `open_file_path` / `show_file_in_folder` / `save_file_as` | files | 文件操作 |
 | `write_temp_text_file` / `write_uploaded_blob` | files | 临时文件 |
 | `parse_pcap_file_cmd` / `extract_alert_image_text_cmd` | files | PCAP/OCR 解析 |

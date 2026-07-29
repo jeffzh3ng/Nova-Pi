@@ -39,6 +39,7 @@ import type { ConversationAttachments, PiEvent } from "./services/hostBridge";
 import {
   cancelRiskAssessment,
   contextFromMessages,
+  downloadRiskAssessmentMatrixTemplate,
   downloadRiskAssessmentResult,
   getRiskAssessmentStatus,
   listRiskAssessmentMatrices,
@@ -452,6 +453,7 @@ const interpretToolResult = (
   usedSkill?: UsedSkill;
   pendingSkillExecution?: PendingSkillExecution;
   suggestions?: string[];
+  riskMatrixTemplate?: { matrixName: string; fileName: string };
 } => {
   if (!result || typeof result !== "object") return {};
   const details = (result as { details?: unknown }).details;
@@ -462,6 +464,22 @@ const interpretToolResult = (
     }
     if (det.module === "data-risk-assessment") {
       return { riskAssessmentResult: det as unknown as RiskAssessmentResult };
+    }
+    const exported = det.exported_file;
+    if (exported && typeof exported === "object" && !Array.isArray(exported)) {
+      const file = exported as Record<string, unknown>;
+      if (
+        file.download_available === true
+        && typeof file.matrix_name === "string"
+        && typeof file.file_name === "string"
+      ) {
+        return {
+          riskMatrixTemplate: {
+            matrixName: file.matrix_name,
+            fileName: file.file_name,
+          },
+        };
+      }
     }
   }
   return {};
@@ -2122,6 +2140,35 @@ export default function App() {
             }),
             "running",
           );
+          if (interpreted.riskMatrixTemplate) {
+            const template = interpreted.riskMatrixTemplate;
+            void downloadRiskAssessmentMatrixTemplate(template.matrixName, template.fileName).then(
+              (downloaded) => {
+                updateMessageInConversation(
+                  conversationId,
+                  messageId,
+                  (message) => ({
+                    ...message,
+                    title: "空白评估表已导出",
+                    content: "空白评估表已下载到本地，可点击下方文件另存或打开。",
+                    exportedFile: downloaded,
+                  }),
+                  "running",
+                );
+              },
+              (error: unknown) => {
+                updateMessageInConversation(
+                  conversationId,
+                  messageId,
+                  (message) => ({
+                    ...message,
+                    content: `评估矩阵已获取，但空白评估表下载失败：${error instanceof Error ? error.message : String(error)}`,
+                  }),
+                  "running",
+                );
+              },
+            );
+          }
           break;
         }
         case "computer_agent_blocked": {

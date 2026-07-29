@@ -9,6 +9,7 @@ use crate::mcp_settings::load_mcp_connection_settings;
 
 const MAX_RISK_ARCHIVE_BYTES: u64 = 200 * 1024 * 1024;
 const MAX_RISK_RESULT_BYTES: u64 = 300 * 1024 * 1024;
+const MAX_RISK_MATRIX_BYTES: u64 = 50 * 1024 * 1024;
 
 #[derive(Debug, Deserialize)]
 struct RemoteMaterialResponse {
@@ -41,6 +42,108 @@ struct RiskUploadStarted {
 pub struct DownloadedRiskResult {
     path: String,
     file_name: String,
+}
+
+#[tauri::command]
+pub async fn download_risk_assessment_matrix_template(
+    app: AppHandle,
+    service_id: String,
+    matrix_name: String,
+    file_name: String,
+) -> Result<DownloadedRiskResult, String> {
+    let settings = load_http_settings(&app, service_id.trim())?;
+    let matrix_name = matrix_name.trim();
+    if matrix_name.is_empty()
+        || matrix_name.len() > 300
+        || matrix_name.chars().any(char::is_control)
+    {
+        return Err("评估矩阵名称无效。".to_string());
+    }
+
+    let requested_name = file_name.trim();
+    let safe_file_name = if !requested_name.is_empty()
+        && requested_name.chars().count() <= 120
+        && !requested_name.contains('/')
+        && !requested_name.contains('\\')
+        && requested_name.to_ascii_lowercase().ends_with(".xlsx")
+    {
+        requested_name.to_string()
+    } else {
+        "数据安全风险评估矩阵.xlsx".to_string()
+    };
+    let exports_dir = app
+        .path()
+        .app_data_dir()
+        .map_err(|error| format!("获取导出目录失败：{error}"))?
+        .join("exports");
+    tokio::fs::create_dir_all(&exports_dir)
+        .await
+        .map_err(|error| format!("创建导出目录失败：{error}"))?;
+    let path = exports_dir.join(&safe_file_name);
+    if path.is_file() {
+        return Ok(DownloadedRiskResult {
+            path: path.to_string_lossy().to_string(),
+            file_name: safe_file_name,
+        });
+    }
+
+    let mut endpoint = risk_api_url(&settings.http_url, "matrices/template")?;
+    endpoint
+        .query_pairs_mut()
+        .append_pair("matrix_name", matrix_name);
+    let client = reqwest::Client::builder()
+        .timeout(Duration::from_secs(2 * 60))
+        .redirect(reqwest::redirect::Policy::none())
+        .build()
+        .map_err(|error| format!("创建下载请求失败：{error}"))?;
+    let mut response = client
+        .get(endpoint)
+        .send()
+        .await
+        .map_err(|error| format!("下载空白评估表失败：{error}"))?;
+    if !response.status().is_success() {
+        return Err(response_error(response, "下载空白评估表").await);
+    }
+    if response
+        .content_length()
+        .is_some_and(|length| length > MAX_RISK_MATRIX_BYTES)
+    {
+        return Err("空白评估表超过 50 MB 上限。".to_string());
+    }
+
+    let part_path = exports_dir.join(format!(".{safe_file_name}.part"));
+    let mut output = tokio::fs::File::create(&part_path)
+        .await
+        .map_err(|error| format!("创建空白评估表失败：{error}"))?;
+    let mut written = 0_u64;
+    while let Some(chunk) = response
+        .chunk()
+        .await
+        .map_err(|error| format!("读取空白评估表失败：{error}"))?
+    {
+        written = written.saturating_add(chunk.len() as u64);
+        if written > MAX_RISK_MATRIX_BYTES {
+            let _ = tokio::fs::remove_file(&part_path).await;
+            return Err("空白评估表超过 50 MB 上限。".to_string());
+        }
+        output
+            .write_all(&chunk)
+            .await
+            .map_err(|error| format!("写入空白评估表失败：{error}"))?;
+    }
+    output
+        .flush()
+        .await
+        .map_err(|error| format!("保存空白评估表失败：{error}"))?;
+    drop(output);
+    tokio::fs::rename(&part_path, &path)
+        .await
+        .map_err(|error| format!("保存空白评估表失败：{error}"))?;
+
+    Ok(DownloadedRiskResult {
+        path: path.to_string_lossy().to_string(),
+        file_name: safe_file_name,
+    })
 }
 
 fn load_http_settings(

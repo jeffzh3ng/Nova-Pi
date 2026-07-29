@@ -167,6 +167,17 @@ export async function downloadRiskAssessmentResult(
   });
 }
 
+export async function downloadRiskAssessmentMatrixTemplate(
+  matrixName: string,
+  fileName: string,
+): Promise<DownloadedRiskResult> {
+  return await invoke<DownloadedRiskResult>("download_risk_assessment_matrix_template", {
+    serviceId: DATA_RISK_ASSESSMENT_MCP_SERVICE,
+    matrixName,
+    fileName,
+  });
+}
+
 const normalizeTaskStatus = (record: Record<string, unknown>): RiskTaskStatus => {
   const status = requiredString(record, "status", " status") as RiskTaskStatus["status"];
   if (!["pending", "running", "completed", "failed", "canceled"].includes(status)) {
