@@ -6,6 +6,7 @@ dist/
 build/
 app/dist/
 host/dist/
+host/runtime/
 src-tauri/target/
 app/src-tauri/target/
 

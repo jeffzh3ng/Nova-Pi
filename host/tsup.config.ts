@@ -10,45 +10,12 @@ export default defineConfig({
   // baseUrl deprecation 报错。类型检查由 npm run typecheck 单独保证。
   dts: false,
   splitting: false,
-  sourcemap: true,
+  sourcemap: false,
   clean: true,
-  // 飞书 SDK 必须随 host/dist 打包；生产安装包只携带 dist，不携带工作区 node_modules。
-  noExternal: ["@larksuiteoapi/node-sdk"],
-  // pi-coding-agent and pi-ai ship ESM + native deps; keep them external
-  // so the sidecar resolves them at runtime from node_modules.
-  external: [
-    "@earendil-works/pi-coding-agent",
-    "@earendil-works/pi-ai",
-    "@earendil-works/pi-ai/compat",
-    "@earendil-works/pi-ai/oauth",
-    "@earendil-works/pi-ai/providers/all",
-    "@modelcontextprotocol/sdk",
-    "typebox",
-    "jiti",
-    "undici",
-    "chalk",
-    "cross-spawn",
-    "diff",
-    "glob",
-    "highlight.js",
-    "hosted-git-info",
-    "ignore",
-    "minimatch",
-    "proper-lockfile",
-    "semver",
-    "yaml",
-    "@silvia-oddywerr/photon-node",
-    "@anthropic-ai/sdk",
-    "@aws-sdk/client-bedrock-runtime",
-    "@google/genai",
-    "@mistralai/mistralai",
-    "@opentelemetry/api",
-    "@smithy/node-http-handler",
-    "http-proxy-agent",
-    "https-proxy-agent",
-    "openai",
-    "partial-json",
-  ],
+  // 安装包只携带 host/dist，不携带工作区 node_modules。所有 JS 运行时依赖都必须
+  // 进入单文件 bundle，否则开发模式会从仓库 node_modules 偷跑成功，安装版却在启动时
+  // 报 ERR_MODULE_NOT_FOUND。Node 内置模块仍由 esbuild 自动保留为 external。
+  noExternal: [/.*/],
   banner: {
     // Bundled CommonJS dependencies in the Feishu SDK still load Node built-ins
     // (for example `util`) through require() and inspect their own package path.

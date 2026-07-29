@@ -3,8 +3,9 @@
 //! sidecar 是 pi 内核（host/dist/main.js 或开发期 tsx），通过 stdin/stdout 的
 //! newline-delimited JSON 与 Rust 通信（见 rpc.rs）。
 
+use std::fs::OpenOptions;
 use std::io::{BufRead, BufReader, Write};
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::process::{Child, Command, Stdio};
 use std::sync::atomic::{AtomicU32, Ordering};
 use std::sync::{Mutex, OnceLock};
@@ -14,6 +15,7 @@ use std::time::Duration;
 #[cfg(windows)]
 use std::os::windows::process::CommandExt;
 
+use chrono::Local;
 use tauri::{AppHandle, Emitter, Manager};
 
 /// 全局 sidecar 句柄（整个应用生命周期共享一个 Node 进程）。
@@ -26,6 +28,7 @@ struct SidecarHandle {
 }
 
 static SIDECAR: OnceLock<SidecarHandle> = OnceLock::new();
+static SIDECAR_LOG_LOCK: OnceLock<Mutex<()>> = OnceLock::new();
 
 /// watchdog 连续失败计数器：用于指数退避与熔断。
 ///
@@ -47,20 +50,71 @@ fn sidecar() -> &'static SidecarHandle {
     })
 }
 
+fn prepare_sidecar_log(app_data_dir: &Path) -> Option<PathBuf> {
+    let log_dir = app_data_dir.join("logs");
+    std::fs::create_dir_all(&log_dir).ok()?;
+    let log_path = log_dir.join("sidecar.log");
+    if log_path.metadata().map(|meta| meta.len()).unwrap_or(0) > 4 * 1024 * 1024 {
+        let _ = OpenOptions::new()
+            .write(true)
+            .truncate(true)
+            .open(&log_path);
+    }
+    Some(log_path)
+}
+
+fn write_sidecar_log(log_path: Option<&Path>, message: &str) {
+    let Some(log_path) = log_path else {
+        return;
+    };
+    let Ok(_guard) = SIDECAR_LOG_LOCK.get_or_init(|| Mutex::new(())).lock() else {
+        return;
+    };
+    let Ok(mut file) = OpenOptions::new().create(true).append(true).open(log_path) else {
+        return;
+    };
+    let timestamp = Local::now().format("%Y-%m-%d %H:%M:%S%.3f");
+    let _ = writeln!(file, "[{timestamp}] {message}");
+}
+
 /// 启动 sidecar。重复调用会先 kill 旧进程再 spawn 新进程。
 pub fn start_sidecar(app: &AppHandle) -> Result<(), String> {
-    let agent_dir = app
+    start_sidecar_internal(app, true)
+}
+
+fn start_sidecar_internal(app: &AppHandle, reset_watchdog_failures: bool) -> Result<(), String> {
+    let app_data_dir = app
         .path()
         .app_data_dir()
-        .map_err(|e| format!("无法定位应用数据目录：{e}"))?
-        .join(".pi")
-        .join("agent");
+        .map_err(|e| format!("无法定位应用数据目录：{e}"))?;
+    let log_path = prepare_sidecar_log(&app_data_dir);
+    let agent_dir = app_data_dir.join(".pi").join("agent");
     std::fs::create_dir_all(&agent_dir).map_err(|e| format!("无法创建 agent 目录：{e}"))?;
 
     // 开发期：直接 tsx 跑 host/src/main.ts；生产期：跑打包后的 host/dist/main.js。
     // 通过环境变量 NOVA_PI_HOST_MODE 控制（dev=tsx，prod=node）。
     let mode = std::env::var("NOVA_PI_HOST_MODE").unwrap_or_else(|_| "node".to_string());
-    let (program, args) = resolve_sidecar_command(&mode, &agent_dir)?;
+    write_sidecar_log(
+        log_path.as_deref(),
+        &format!(
+            "starting sidecar mode={mode} cwd={} resource_dir={}",
+            std::env::current_dir()
+                .map(|path| path.to_string_lossy().into_owned())
+                .unwrap_or_else(|error| format!("<unavailable: {error}>")),
+            app.path()
+                .resource_dir()
+                .map(|path| path.to_string_lossy().into_owned())
+                .unwrap_or_else(|error| format!("<unavailable: {error}>"))
+        ),
+    );
+    let (program, args) = resolve_sidecar_command(app, &mode).map_err(|error| {
+        write_sidecar_log(log_path.as_deref(), &format!("resolve failed: {error}"));
+        error
+    })?;
+    write_sidecar_log(
+        log_path.as_deref(),
+        &format!("resolved program={program} args={args:?}"),
+    );
 
     // 先关闭旧实例，避免重复调用产生孤儿进程。
     kill_existing();
@@ -68,7 +122,7 @@ pub fn start_sidecar(app: &AppHandle) -> Result<(), String> {
     let mut command = Command::new(&program);
     command
         .args(&args)
-        .arg(agent_dir.to_string_lossy().as_ref())
+        .arg(process_compatible_path(&agent_dir))
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
@@ -78,9 +132,15 @@ pub fn start_sidecar(app: &AppHandle) -> Result<(), String> {
     #[cfg(windows)]
     command.creation_flags(0x0800_0000); // CREATE_NO_WINDOW
 
-    let mut child = command
-        .spawn()
-        .map_err(|e| format!("启动 Node sidecar 失败：{e}。请确认已安装 Node.js 22.19+。"))?;
+    let mut child = command.spawn().map_err(|error| {
+        let message = format!("启动 Node sidecar 失败：{error}。请重新安装完整安装包。");
+        write_sidecar_log(log_path.as_deref(), &format!("spawn failed: {message}"));
+        message
+    })?;
+    write_sidecar_log(
+        log_path.as_deref(),
+        &format!("spawned sidecar pid={}", child.id()),
+    );
 
     let stdin = child
         .stdin
@@ -100,6 +160,7 @@ pub fn start_sidecar(app: &AppHandle) -> Result<(), String> {
 
     // stdout 行读取线程：解析 JSON-line，分发响应/事件；stdout EOF 时触发 watchdog 重启。
     let app_handle = app.clone();
+    let stdout_log_path = log_path.clone();
     std::thread::spawn(move || {
         let reader = BufReader::new(stdout);
         for line in reader.lines() {
@@ -113,12 +174,20 @@ pub fn start_sidecar(app: &AppHandle) -> Result<(), String> {
                         Ok(value) => crate::rpc::handle_sidecar_message(&app_handle, value),
                         Err(error) => {
                             eprintln!("[sidecar] 无效 JSON 行：{error}");
+                            write_sidecar_log(
+                                stdout_log_path.as_deref(),
+                                &format!("invalid stdout JSON: {error}"),
+                            );
                         }
                     }
                 }
                 Err(error) => {
                     // IO 错误：管道破裂等。区分正常 EOF 与异常，便于排查。
                     eprintln!("[sidecar] stdout 读取错误：{error}");
+                    write_sidecar_log(
+                        stdout_log_path.as_deref(),
+                        &format!("stdout read failed: {error}"),
+                    );
                     break;
                 }
             }
@@ -131,6 +200,10 @@ pub fn start_sidecar(app: &AppHandle) -> Result<(), String> {
             .map(|guard| guard.is_some())
             .unwrap_or(false);
         let _ = app_handle.emit("pi-sidecar-exited", ());
+        write_sidecar_log(
+            stdout_log_path.as_deref(),
+            &format!("sidecar stdout closed unexpected={unexpected}"),
+        );
         if unexpected {
             // 指数退避：连续失败越多，下次重启前等得越久（上限 ~60s）。
             // 防止 host 文件损坏时陷入「立即崩→立即重启→立即崩」的 tight loop，
@@ -143,6 +216,7 @@ pub fn start_sidecar(app: &AppHandle) -> Result<(), String> {
                     "sidecar 连续崩溃 {failures} 次，已停止自动重启。请检查日志或重启应用。"
                 );
                 eprintln!("[sidecar] {msg}");
+                write_sidecar_log(stdout_log_path.as_deref(), &msg);
                 let _ = app_handle.emit("pi-sidecar-fatal", msg);
                 return;
             }
@@ -153,6 +227,12 @@ pub fn start_sidecar(app: &AppHandle) -> Result<(), String> {
             eprintln!(
                 "[sidecar] 意外退出（第 {failures}/{MAX_WATCHDOG_FAILURES} 次），{backoff_secs}s 后尝试 watchdog 重启"
             );
+            write_sidecar_log(
+                stdout_log_path.as_deref(),
+                &format!(
+                    "watchdog scheduled failure={failures}/{MAX_WATCHDOG_FAILURES} backoff={backoff_secs}s"
+                ),
+            );
             thread::sleep(Duration::from_secs(backoff_secs));
             // 退避期间若应用已退出（stop_sidecar 把 child 置 None），放弃重启避免无谓 spawn。
             let still_unexpected = sidecar()
@@ -162,15 +242,24 @@ pub fn start_sidecar(app: &AppHandle) -> Result<(), String> {
                 .unwrap_or(false);
             if !still_unexpected {
                 eprintln!("[sidecar] 退避期间应用已关闭，放弃重启");
+                write_sidecar_log(
+                    stdout_log_path.as_deref(),
+                    "watchdog cancelled because application is closing",
+                );
                 return;
             }
-            match start_sidecar(&app_handle) {
+            match start_sidecar_internal(&app_handle, false) {
                 Ok(()) => {
                     let _ = app_handle.emit("pi-sidecar-restarted", ());
                     eprintln!("[sidecar] watchdog 重启成功");
+                    write_sidecar_log(stdout_log_path.as_deref(), "watchdog restart succeeded");
                 }
                 Err(error) => {
                     eprintln!("[sidecar] watchdog 重启失败：{error}");
+                    write_sidecar_log(
+                        stdout_log_path.as_deref(),
+                        &format!("watchdog restart failed: {error}"),
+                    );
                     let _ = app_handle.emit("pi-sidecar-fatal", error);
                 }
             }
@@ -178,13 +267,21 @@ pub fn start_sidecar(app: &AppHandle) -> Result<(), String> {
     });
 
     // stderr 收集线程：转写到 Rust 的 stderr（便于调试）
+    let stderr_log_path = log_path.clone();
     std::thread::spawn(move || {
         let reader = BufReader::new(stderr);
         for line in reader.lines() {
             match line {
-                Ok(text) => eprintln!("[sidecar] {text}"),
+                Ok(text) => {
+                    eprintln!("[sidecar] {text}");
+                    write_sidecar_log(stderr_log_path.as_deref(), &format!("host: {text}"));
+                }
                 Err(error) => {
                     eprintln!("[sidecar] stderr 读取错误：{error}");
+                    write_sidecar_log(
+                        stderr_log_path.as_deref(),
+                        &format!("stderr read failed: {error}"),
+                    );
                     break;
                 }
             }
@@ -199,14 +296,21 @@ pub fn start_sidecar(app: &AppHandle) -> Result<(), String> {
     // - watchdog 重启时 Node 进程被整个替换，mcpRegistry.configs 清空，必须重新同步。
     // 异步执行不阻塞 start_sidecar 返回；失败仅记日志（后续 parse_pcap_file_cmd 等会再 sync 兜底）。
     let app_for_sync = app.clone();
+    let sync_log_path = log_path;
     tauri::async_runtime::spawn(async move {
         if let Err(error) = crate::sync_mcp_config_to_sidecar(&app_for_sync).await {
             eprintln!("[sidecar] 启动后同步 MCP 配置失败：{error}");
+            write_sidecar_log(
+                sync_log_path.as_deref(),
+                &format!("initial MCP sync failed: {error}"),
+            );
         }
     });
 
     // spawn 成功：清零 watchdog 失败计数（无论本次是首次启动还是重启）。
-    WATCHDOG_FAILURES.store(0, Ordering::Relaxed);
+    if reset_watchdog_failures {
+        WATCHDOG_FAILURES.store(0, Ordering::Relaxed);
+    }
 
     Ok(())
 }
@@ -226,42 +330,114 @@ fn kill_existing() {
 }
 
 /// 解析 sidecar 启动命令。
-fn resolve_sidecar_command(
-    mode: &str,
-    _agent_dir: &PathBuf,
-) -> Result<(String, Vec<String>), String> {
-    let host_dir = match std::env::var("NOVA_PI_HOST_DIR") {
-        Ok(value) if !value.trim().is_empty() => value,
-        _ => find_host_dir()?,
-    };
+fn resolve_sidecar_command(app: &AppHandle, mode: &str) -> Result<(String, Vec<String>), String> {
+    let host_dir = find_host_dir(app, mode)?;
     if mode == "dev" {
         // 开发期：npx tsx host/src/main.ts
         Ok((
             "npx".to_string(),
-            vec!["tsx".to_string(), format!("{host_dir}/src/main.ts")],
+            vec![
+                "tsx".to_string(),
+                process_compatible_path(&host_dir.join("src/main.ts")),
+            ],
         ))
     } else {
-        // 生产期：node host/dist/main.js
-        Ok(("node".to_string(), vec![format!("{host_dir}/dist/main.js")]))
+        // 仓库构建布局为 host/dist/main.js；Tauri resources 把 dist 的内容
+        // 映射到安装目录的 host/，因此安装布局为 host/main.js。
+        let entry = resolve_production_entry(&host_dir).ok_or_else(|| {
+            format!(
+                "host 目录缺少生产入口 main.js：{}",
+                host_dir.to_string_lossy()
+            )
+        })?;
+        Ok((
+            resolve_node_program(app),
+            vec![process_compatible_path(&entry)],
+        ))
     }
 }
 
-/// 定位 host 目录（相对于 src-tauri）。
-fn find_host_dir() -> Result<String, String> {
-    // 编译期已知的相对路径：app/src-tauri → 上溯两级到 Nova-PI，再进 host。
-    // 不硬编码开发者本机绝对路径（移植性差且会随目录调整失效）。
-    let candidates = [
-        "../host".to_string(),    // 标准：从 src-tauri 工作目录相对
-        "../../host".to_string(), // 某些构建布局
-    ];
-    for candidate in &candidates {
-        if std::path::Path::new(candidate).is_dir() {
-            return Ok(std::path::absolute(candidate)
-                .map(|p| p.to_string_lossy().to_string())
-                .unwrap_or_else(|_| candidate.clone()));
+/// 生产安装包优先使用随应用分发的 Node，避免从 Explorer/开始菜单启动时 PATH 与
+/// 开发终端不同。环境变量仅作为诊断覆盖；开发仓库仍可回退到系统 `node`。
+fn resolve_node_program(app: &AppHandle) -> String {
+    if let Ok(value) = std::env::var("NOVA_PI_NODE_PATH") {
+        let path = PathBuf::from(value.trim());
+        if path.is_file() {
+            return process_compatible_path(&path);
         }
     }
-    Err("无法定位 host 目录。请设置 NOVA_PI_HOST_DIR 环境变量。".to_string())
+    if let Ok(resource_dir) = app.path().resource_dir() {
+        if let Some(path) = find_bundled_node(&resource_dir.join("runtime")) {
+            return process_compatible_path(&path);
+        }
+    }
+    "node".to_string()
+}
+
+fn find_bundled_node(runtime_dir: &Path) -> Option<PathBuf> {
+    [runtime_dir.join("node.exe"), runtime_dir.join("node")]
+        .into_iter()
+        .find(|path| path.is_file())
+}
+
+/// Node 在 Windows 上不能可靠地把 `\\?\C:\...` 当作入口脚本参数解析；它会把路径
+/// 截断为 `C:` 并以 EISDIR 退出。启动外部进程前转换回 Win32 常规绝对路径。
+fn process_compatible_path(path: &Path) -> String {
+    let raw = path.to_string_lossy();
+    #[cfg(windows)]
+    {
+        if let Some(unc) = raw.strip_prefix(r"\\?\UNC\") {
+            return format!(r"\\{unc}");
+        }
+        if let Some(regular) = raw.strip_prefix(r"\\?\") {
+            return regular.to_string();
+        }
+    }
+    raw.into_owned()
+}
+
+/// 定位 host 目录。
+///
+/// 安装版必须优先从 Tauri resource_dir 读取，不能依赖进程当前工作目录；从开始菜单
+/// 启动时 cwd 并不指向仓库或安装目录。相对路径仅作为开发态兼容回退。
+fn find_host_dir(app: &AppHandle, mode: &str) -> Result<PathBuf, String> {
+    let mut candidates = Vec::new();
+    if let Ok(value) = std::env::var("NOVA_PI_HOST_DIR") {
+        if !value.trim().is_empty() {
+            candidates.push(PathBuf::from(value));
+        }
+    }
+    if let Ok(resource_dir) = app.path().resource_dir() {
+        candidates.push(resource_dir.join("host"));
+    }
+    candidates.push(PathBuf::from("../host"));
+    candidates.push(PathBuf::from("../../host"));
+
+    for candidate in &candidates {
+        let has_entry = if mode == "dev" {
+            candidate.join("src/main.ts").is_file()
+        } else {
+            resolve_production_entry(candidate).is_some()
+        };
+        if has_entry {
+            return Ok(std::path::absolute(candidate).unwrap_or_else(|_| candidate.clone()));
+        }
+    }
+
+    let searched = candidates
+        .iter()
+        .map(|path| path.to_string_lossy())
+        .collect::<Vec<_>>()
+        .join("、");
+    Err(format!(
+        "无法定位 Node sidecar 入口（已检查：{searched}）。请重新安装完整安装包，或设置 NOVA_PI_HOST_DIR。"
+    ))
+}
+
+fn resolve_production_entry(host_dir: &std::path::Path) -> Option<PathBuf> {
+    [host_dir.join("main.js"), host_dir.join("dist/main.js")]
+        .into_iter()
+        .find(|path| path.is_file())
 }
 
 /// 向 sidecar stdin 写入一条 JSON-line 命令。
@@ -300,5 +476,72 @@ pub fn stop_sidecar() {
     if let Some(mut child) = killed_child {
         let _ = child.kill();
         let _ = child.wait();
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    #[cfg(windows)]
+    use super::process_compatible_path;
+    use super::{find_bundled_node, resolve_production_entry};
+    use std::fs;
+    use std::path::PathBuf;
+    use std::time::{SystemTime, UNIX_EPOCH};
+
+    fn temp_host_dir(name: &str) -> PathBuf {
+        let nonce = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .expect("system clock should be after unix epoch")
+            .as_nanos();
+        std::env::temp_dir().join(format!("nova-pi-sidecar-{name}-{nonce}"))
+    }
+
+    #[test]
+    fn resolves_tauri_bundled_host_layout() {
+        let host_dir = temp_host_dir("bundled");
+        fs::create_dir_all(&host_dir).expect("temp host dir should be created");
+        let bundled_entry = host_dir.join("main.js");
+        fs::write(&bundled_entry, "").expect("bundled entry should be created");
+
+        assert_eq!(resolve_production_entry(&host_dir), Some(bundled_entry));
+        fs::remove_dir_all(host_dir).expect("temp host dir should be removed");
+    }
+
+    #[test]
+    fn resolves_repository_host_layout() {
+        let host_dir = temp_host_dir("repository");
+        let dist_dir = host_dir.join("dist");
+        fs::create_dir_all(&dist_dir).expect("temp dist dir should be created");
+        let repository_entry = dist_dir.join("main.js");
+        fs::write(&repository_entry, "").expect("repository entry should be created");
+
+        assert_eq!(resolve_production_entry(&host_dir), Some(repository_entry));
+        fs::remove_dir_all(host_dir).expect("temp host dir should be removed");
+    }
+
+    #[test]
+    fn resolves_bundled_node_runtime() {
+        let runtime_dir = temp_host_dir("runtime");
+        fs::create_dir_all(&runtime_dir).expect("temp runtime dir should be created");
+        let executable = runtime_dir.join(if cfg!(windows) { "node.exe" } else { "node" });
+        fs::write(&executable, "").expect("runtime executable should be created");
+
+        assert_eq!(find_bundled_node(&runtime_dir), Some(executable));
+        fs::remove_dir_all(runtime_dir).expect("temp runtime dir should be removed");
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn strips_windows_verbatim_prefix_for_node_arguments() {
+        assert_eq!(
+            process_compatible_path(std::path::Path::new(
+                r"\\?\C:\Users\DP\AppData\Local\Nova\host\main.js"
+            )),
+            r"C:\Users\DP\AppData\Local\Nova\host\main.js"
+        );
+        assert_eq!(
+            process_compatible_path(std::path::Path::new(r"\\?\UNC\server\share\host\main.js")),
+            r"\\server\share\host\main.js"
+        );
     }
 }
