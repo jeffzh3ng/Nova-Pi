@@ -9,6 +9,7 @@
  */
 
 import type { AgentSessionEvent } from "@earendil-works/pi-coding-agent";
+import { ChannelReplyCollector } from "../channel-reply-collector.js";
 import type { SessionPool } from "../session-pool.js";
 import { writeEvent } from "../rpc-protocol.js";
 import {
@@ -27,12 +28,8 @@ export class TelegramBotManager {
   private bgSessionId: string | null = null;
   private currentHumanId: string | null = null;
   private unsubscribeBackground: (() => void) | null = null;
-  /**
-   * 当前流式累积所属的 reqId（H3 修复，与微信 manager 对称）。
-   * 回复路由（chatId/messageId）由 service.replyToMap 维护，manager 不重复持有。
-   */
-  private streamingReqId: string | null = null;
-  private streamingText = "";
+  /** 回复路由由 service 维护；manager 只聚合到 agent_settled 的最终文本。 */
+  private readonly replyCollector = new ChannelReplyCollector();
 
   constructor(
     pool: SessionPool,
@@ -86,14 +83,8 @@ export class TelegramBotManager {
     if (bgSessionId) {
       await this.pool.dispose(bgSessionId).catch(() => {});
     }
-    this.clearStreaming();
+    this.replyCollector.reset();
     this.service.stop();
-  }
-
-  /** 清空流式累积状态（多处复用）。 */
-  private clearStreaming(): void {
-    this.streamingReqId = null;
-    this.streamingText = "";
   }
 
   /** 更新配置（用户在面板改了 botToken 时调用，需重启 service 生效）。 */
@@ -127,8 +118,7 @@ export class TelegramBotManager {
 
   /** 收到 Telegram 消息：记录 + 推前端 + prompt 后台 session。 */
   private async handleIncoming(msg: TelegramIncomingMessage): Promise<void> {
-    this.streamingReqId = msg.reqId;
-    this.streamingText = "";
+    this.replyCollector.begin(msg.reqId);
     writeEvent({
       type: "telegram_message",
       role: "incoming",
@@ -147,12 +137,12 @@ export class TelegramBotManager {
       }
     } catch (error) {
       const reason = error instanceof Error ? error.message : String(error);
-      this.clearStreaming();
+      this.replyCollector.reset();
       this.service.failCurrent(msg.reqId, `数字员工不可用：${reason}`);
       return;
     }
     if (!sessionId) {
-      this.clearStreaming();
+      this.replyCollector.reset();
       this.service.failCurrent(msg.reqId, "后台会话已停止");
       return;
     }
@@ -161,56 +151,28 @@ export class TelegramBotManager {
     } catch (error) {
       const reason = error instanceof Error ? error.message : String(error);
       console.error("[telegram-manager] prompt 后台会话失败：", reason);
-      this.clearStreaming();
+      this.replyCollector.reset();
       this.service.failCurrent(msg.reqId, `AI 处理失败：${reason}`);
     }
   }
 
-  /** 后台会话事件：累积 AI 回复文本，message_end 时发回 Telegram + 推前端。 */
+  /** 后台会话事件：聚合多轮 AI 输出，仅在 agent_settled 后发回 Telegram + 推前端。 */
   private handleBackgroundEvent(event: AgentSessionEvent): void {
-    if (event.type === "message_update") {
-      const sub = event.assistantMessageEvent;
-      if (sub.type === "text_delta" && sub.delta && this.streamingReqId) {
-        this.streamingText += sub.delta;
-      } else if (sub.type === "text_end" && sub.content) {
-        if (this.streamingReqId && !this.streamingText) this.streamingText = sub.content;
-      }
+    const completion = this.replyCollector.accept(event);
+    if (!completion) return;
+    if (!completion.text.trim()) {
+      this.service.failCurrent(completion.reqId, "AI 返回空回复");
       return;
     }
-    if (event.type === "message_end") {
-      const msg = event.message;
-      if (msg?.role !== "assistant") return;
-      // 以 final message 为准；host 会在这里替换伪工具调用，避免把无效 XML 发到渠道。
-      let finalText = "";
-      const content = msg.content;
-      if (typeof content === "string") finalText = content;
-      if (Array.isArray(content)) {
-        finalText = content
-          .filter((c): c is { type: "text"; text: string } => c.type === "text" && typeof c.text === "string")
-          .map((c) => c.text)
-          .join("");
-      }
-      const replyText = finalText || this.streamingText;
-      // reqId 解析（H3）：优先用 manager 的 streamingReqId，回退到 service 的 currentReqId。
-      // 回复路由（chatId/messageId）由 service.replyToMap 维护。
-      const pending = this.service.getCurrentPending();
-      const reqId = this.streamingReqId ?? pending?.reqId;
-      this.clearStreaming();
-      if (!reqId) return;
-      if (!replyText.trim()) {
-        this.service.failCurrent(reqId, "AI 返回空回复");
-        return;
-      }
-      writeEvent({
-        type: "telegram_message",
-        role: "assistant",
-        reqId,
-        text: replyText,
-      });
-      void this.service.sendReply(reqId, replyText).catch((err) => {
-        console.error("[telegram-manager] sendReply 失败：", err);
-      });
-    }
+    writeEvent({
+      type: "telegram_message",
+      role: "assistant",
+      reqId: completion.reqId,
+      text: completion.text,
+    });
+    void this.service.sendReply(completion.reqId, completion.text).catch((err) => {
+      console.error("[telegram-manager] sendReply 失败：", err);
+    });
   }
 
   private emitStatus(status: TelegramStatus): void {

@@ -14,7 +14,7 @@
     "verify:bundle": "node scripts/verify-standalone-bundle.mjs",
     "start": "node dist/main.js",
     "typecheck": "tsc --noEmit",
-    "test": "tsx --test --test-concurrency=1 src/computer-agent.test.ts src/models-manager.test.ts src/mcp/client.test.ts src/mcp/client.integration.test.ts src/mcp/extension.integration.test.ts src/mcp/payload.test.ts src/feishubot/transport.test.ts"
+    "test": "tsx --test --test-concurrency=1 src/channel-reply-collector.test.ts src/computer-agent.test.ts src/models-manager.test.ts src/mcp/client.test.ts src/mcp/client.integration.test.ts src/mcp/extension.integration.test.ts src/mcp/payload.test.ts src/feishubot/transport.test.ts"
   },
   "dependencies": {
     "@earendil-works/pi-ai": "^0.82.1",

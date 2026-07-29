@@ -1441,6 +1441,7 @@ body.is-resizing-sidebar * {
 
 .conversation-header-meta > time {
   flex-basis: 100%;
+  padding-right: 8px;
   color: var(--color-muted);
   font-size: 11px;
   text-align: right;
@@ -4190,6 +4191,7 @@ label.settings-toggle input {
 
   .conversation-header-meta > time {
     flex-basis: auto;
+    padding-right: 0;
     text-align: left;
   }
 

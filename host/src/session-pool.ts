@@ -282,7 +282,7 @@ export class SessionPool {
    *   - 不写 conversationToSession，前端主路由（按 conversationId 找 sessionId）找不到它，
    *     避免污染用户当前对话视图的事件流。
    *   - 不落 SQLite 历史索引（host 不发 session_saved 类事件）。
-   *   - 事件由 backgroundListeners 单独订阅，service 模块据此拿到 message_end 回复。
+   *   - 事件由 backgroundListeners 单独订阅，service 模块据此聚合到 agent_settled 后回复。
    * 复用：同一 conversationId 已有同 humanId 的后台会话则复用。
    */
   async createBackgroundSession(params: {
@@ -539,6 +539,9 @@ export class SessionPool {
     entry.lastActivityAt = Date.now();
     if (entry.isBackground) {
       this.notifyBackgroundListeners(entry.sessionId, this.syntheticAssistantMessageEnd(blocked.message));
+      // 正常 pi prompt 会在整轮处理结束后发 agent_settled；权限预检在模型调用前返回，
+      // 因此需要补发 settled，让消息渠道释放回复并推进队列。
+      this.notifyBackgroundListeners(entry.sessionId, { type: "agent_settled" });
       return;
     }
     writeEvent({

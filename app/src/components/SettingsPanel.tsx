@@ -512,7 +512,7 @@ function ModelSettingsPanel() {
         </div>
       </header>
 
-      <div className="mcp-card-grid">
+      <div className={`mcp-card-grid ${providers.length === 0 ? "is-empty" : ""}`}>
         {providers.map((provider) => {
           const isBusy = busyProviderId === provider.id;
           const currentProviderModel = provider.models.find(

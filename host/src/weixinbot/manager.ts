@@ -3,7 +3,7 @@
  *
  * 职责：
  *   1. start(humanId) 时创建后台 session（createBackgroundSession），并订阅它的
- *      message_end —— 把 AI 回复通过 service.sendReply 发回微信。
+ *      agent_settled —— 把完整 AI 回复通过 service.sendReply 发回微信。
  *   2. service 收到微信消息时（onIncomingMessage），把文本 prompt 到后台 session。
  *   3. 把 service 的状态/二维码/消息事件转成 RpcEvent（writeEvent）发给前端。
  *
@@ -11,6 +11,7 @@
  */
 
 import type { AgentSessionEvent } from "@earendil-works/pi-coding-agent";
+import { ChannelReplyCollector } from "../channel-reply-collector.js";
 import type { SessionPool } from "../session-pool.js";
 import { writeEvent } from "../rpc-protocol.js";
 import {
@@ -67,7 +68,7 @@ export class WeixinBotManager {
   private currentHumanId: string | null = null;
   private unsubscribeBackground: (() => void) | null = null;
   /**
-   * 当前流式累积所属的 reqId（H3 修复）。
+   * 当前渠道请求的完整回复聚合器。
    *
    * 之前用单例 currentIncoming 既存 reqId 又存 fromUserId/contextToken，连续两条
    * 消息时若上一条 message_end 延迟到达，会读到当前条的上下文，把回复发错对象。
@@ -75,12 +76,9 @@ export class WeixinBotManager {
    * 现在的职责拆分：
    *   - 回复路由（fromUserId/contextToken）完全由 service.replyToMap 维护
    *     （service 入队时 set、advanceQueue 时 delete），manager 不再重复持有。
-   *   - manager 只保留 streamingReqId（仅用于限定 delta 累积属于哪条消息），
-   *     message_end 时按它取 streamingText，再用 service.getCurrentPending 兜底。
+   *   - manager 在 agent_settled 前持续接收多轮 assistant 消息，只发送最后一条结果。
    */
-  private streamingReqId: string | null = null;
-  /** 流式累积 AI 回复文本（message_update delta 累积）。 */
-  private streamingText = "";
+  private readonly replyCollector = new ChannelReplyCollector();
 
   constructor(pool: SessionPool, agentDir: string) {
     this.pool = pool;
@@ -127,9 +125,10 @@ export class WeixinBotManager {
   async switchHuman(humanId: string): Promise<boolean> {
     if (humanId === this.currentHumanId) return true;
     // 切换前若有消息在等 AI 回复，先推进队列避免孤儿 prompt（旧 session 即将 dispose）
-    if (this.streamingReqId) {
-      this.service.failCurrent(this.streamingReqId, "切换员工中");
-      this.clearStreaming();
+    const activeReqId = this.replyCollector.currentReqId();
+    if (activeReqId) {
+      this.service.failCurrent(activeReqId, "切换员工中");
+      this.replyCollector.reset();
     }
     const oldId = this.bgSessionId;
     if (oldId) {
@@ -157,14 +156,8 @@ export class WeixinBotManager {
     if (bgSessionId) {
       await this.pool.dispose(bgSessionId).catch(() => {});
     }
-    this.clearStreaming();
+    this.replyCollector.reset();
     await this.service.stop();
-  }
-
-  /** 清空流式累积状态（多处复用）。 */
-  private clearStreaming(): void {
-    this.streamingReqId = null;
-    this.streamingText = "";
   }
 
   /** 触发扫码登录（或从缓存恢复）。 */
@@ -223,9 +216,7 @@ export class WeixinBotManager {
     }
 
     // 2. 正常流程
-    // 记录本次流式所属 reqId（H3：用 streamingReqId 取代单例，限定 delta 累积范围）
-    this.streamingReqId = msg.reqId;
-    this.streamingText = "";
+    this.replyCollector.begin(msg.reqId);
     writeEvent({
       type: "wechat_message",
       role: "incoming",
@@ -244,13 +235,13 @@ export class WeixinBotManager {
       }
     } catch (error) {
       const reason = error instanceof Error ? error.message : String(error);
-      this.clearStreaming();
+      this.replyCollector.reset();
       this.service.failCurrent(msg.reqId, `数字员工不可用：${reason}`);
       return;
     }
     if (!sessionId) {
       // session 已停止：让队列推进，否则这条消息会永久卡住。
-      this.clearStreaming();
+      this.replyCollector.reset();
       this.service.failCurrent(msg.reqId, "后台会话已停止");
       return;
     }
@@ -261,7 +252,7 @@ export class WeixinBotManager {
       // 必须通知 service 推进队列，否则 isProcessing 永不复位，整条管线死锁。
       const reason = error instanceof Error ? error.message : String(error);
       console.error("[weixinbot-manager] prompt 后台会话失败：", reason);
-      this.clearStreaming();
+      this.replyCollector.reset();
       this.service.failCurrent(msg.reqId, `AI 处理失败：${reason}`);
     }
   }
@@ -297,57 +288,24 @@ export class WeixinBotManager {
     return { remainingText: text };
   }
 
-  /** 后台会话事件：累积 AI 回复文本，message_end 时发回微信 + 推前端。 */
+  /** 后台会话事件：聚合多轮 AI 输出，仅在 agent_settled 后发回微信 + 推前端。 */
   private handleBackgroundEvent(event: AgentSessionEvent): void {
-    if (event.type === "message_update") {
-      const sub = event.assistantMessageEvent;
-      // text_delta 是流式 token 增量；累积到 streamingText（仅当属于当前流式 reqId）
-      if (sub.type === "text_delta" && sub.delta && this.streamingReqId) {
-        this.streamingText += sub.delta;
-      } else if (sub.type === "text_end" && sub.content) {
-        // 兜底：某些 provider 不发 delta 只发 text_end
-        if (this.streamingReqId && !this.streamingText) this.streamingText = sub.content;
-      }
+    const completion = this.replyCollector.accept(event);
+    if (!completion) return;
+    if (!completion.text.trim()) {
+      this.service.failCurrent(completion.reqId, "AI 返回空回复");
       return;
     }
-    if (event.type === "message_end") {
-      const msg = event.message;
-      if (msg?.role !== "assistant") return;
-      // final message 是本轮权威结果：host 可能在此处把无效的文本工具调用替换为
-      // 权限/重试提示，因此不能让先前累积的流式文本覆盖最终内容。
-      let finalText = "";
-      const content = msg.content;
-      if (typeof content === "string") finalText = content;
-      if (Array.isArray(content)) {
-        finalText = content
-          .filter((c): c is { type: "text"; text: string } => c.type === "text" && typeof c.text === "string")
-          .map((c) => c.text)
-          .join("");
-      }
-      const replyText = finalText || this.streamingText;
-      // reqId 解析（H3）：优先用 manager 的 streamingReqId（本次回复对应的请求），
-      // 为空时回退到 service 的 currentReqId（防御：孤儿 message_end / 提前清理）。
-      // 回复路由（fromUserId/contextToken）完全由 service.replyToMap 维护，不再重复持有。
-      const pending = this.service.getCurrentPending();
-      const reqId = this.streamingReqId ?? pending?.reqId;
-      this.clearStreaming();
-      if (!reqId) return;
-      if (!replyText.trim()) {
-        // 无回复文本：直接推进队列（service.sendReply 内部也会 advance，但空文本走 fail 更明确）
-        this.service.failCurrent(reqId, "AI 返回空回复");
-        return;
-      }
-      writeEvent({
-        type: "wechat_message",
-        role: "assistant",
-        reqId,
-        text: replyText,
-      });
-      // 发回微信 + 推进队列（service 内部会 shift 当前消息）
-      void this.service.sendReply(reqId, replyText).catch((err) => {
-        console.error("[weixinbot-manager] sendReply 失败：", err);
-      });
-    }
+    writeEvent({
+      type: "wechat_message",
+      role: "assistant",
+      reqId: completion.reqId,
+      text: completion.text,
+    });
+    // 发回微信 + 推进队列（service 内部会 shift 当前消息）
+    void this.service.sendReply(completion.reqId, completion.text).catch((err) => {
+      console.error("[weixinbot-manager] sendReply 失败：", err);
+    });
   }
 
   private emitStatus(status: WeixinStatus): void {

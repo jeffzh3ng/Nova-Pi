@@ -68,6 +68,12 @@ body,
   overflow: visible;
 }
 
+.pi-settings-page .mcp-card-grid.is-empty {
+  grid-template-columns: minmax(0, 1fr);
+  padding-right: 0;
+  scrollbar-gutter: auto;
+}
+
 .pi-extensions-page .mcp-service-card {
   contain: paint;
 }

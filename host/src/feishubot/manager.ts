@@ -1,5 +1,6 @@
 import { createHash } from "node:crypto";
 import type { AgentSessionEvent } from "@earendil-works/pi-coding-agent";
+import { ChannelReplyCollector } from "../channel-reply-collector.js";
 import type { SessionPool } from "../session-pool.js";
 import { writeEvent } from "../rpc-protocol.js";
 import { FeishuChannelStore } from "./store.js";
@@ -7,8 +8,7 @@ import { FeishuTransport } from "./transport.js";
 import type { FeishuConfig, FeishuIncomingMessage, FeishuStatus } from "./types.js";
 
 type PendingReply = {
-  reqId: string;
-  text: string;
+  collector: ChannelReplyCollector;
   resolve: () => void;
   done: Promise<void>;
 };
@@ -113,7 +113,9 @@ export class FeishuBotManager {
     const done = new Promise<void>((resolve) => {
       resolveDone = resolve;
     });
-    state.current = { reqId: message.messageId, text: "", resolve: resolveDone, done };
+    const collector = new ChannelReplyCollector();
+    collector.begin(message.messageId);
+    state.current = { collector, resolve: resolveDone, done };
     try {
       await this.pool.prompt({ sessionId: state.sessionId, message: message.text });
       await Promise.race([done, new Promise<void>((resolve) => setTimeout(resolve, 10_000))]);
@@ -151,24 +153,14 @@ export class FeishuBotManager {
     const state = this.sessionToConversation.get(sessionId);
     const pending = state?.current;
     if (!state || !pending) return;
-    if (event.type === "message_update") {
-      const update = event.assistantMessageEvent;
-      if (update.type === "text_delta" && update.delta) pending.text += update.delta;
-      else if (update.type === "text_end" && update.content && !pending.text) pending.text = update.content;
-      return;
-    }
-    if (event.type !== "message_end" || event.message?.role !== "assistant") return;
-    // 以 final message 为准；host 可能已把无效文本工具调用替换为安全提示。
-    let finalText = typeof event.message.content === "string" ? event.message.content : "";
-    if (Array.isArray(event.message.content)) {
-      finalText = event.message.content
-        .filter((item): item is { type: "text"; text: string } => item.type === "text" && typeof item.text === "string")
-        .map((item) => item.text)
-        .join("");
-    }
-    const replyText = finalText || pending.text;
+    const completion = pending.collector.accept(event);
+    if (!completion) return;
     state.current = undefined;
-    void this.finishReply(state.conversationKey, pending.reqId, replyText || "数字员工未返回可发送的文本。")
+    void this.finishReply(
+      state.conversationKey,
+      completion.reqId,
+      completion.text || "数字员工未返回可发送的文本。",
+    )
       .finally(pending.resolve);
   }
 
