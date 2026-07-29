@@ -159,6 +159,10 @@ JSON-line over stdin/stdout。详见 `host/src/rpc-protocol.ts`。
 
 ## Build & Run
 
+### GitHub 同步规则
+
+- 每次向 GitHub 推送代码前，必须先更新 `app/src-tauri/tauri.conf.json` 中的应用版本号；默认按语义化版本递增，并确保版本号变更包含在同一次推送中。
+
 ```bash
 # 安装依赖（根目录）
 npm install

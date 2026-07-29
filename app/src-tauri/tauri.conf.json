@@ -1,10 +1,10 @@
 {
   "$schema": "https://schema.tauri.app/config/2",
   "productName": "Nova",
-  "version": "0.1.5",
+  "version": "0.1.6",
   "identifier": "com.nova.app",
   "build": {
-    "beforeDevCommand": "cd .. && npm run build --workspace host && npm run dev --workspace app",
+    "beforeDevCommand": "cd .. && npm run build --workspace host && npm run prepare:runtime --workspace host && npm run dev --workspace app",
     "beforeBuildCommand": "cd .. && npm run build --workspace host && npm run prepare:runtime --workspace host && npm run build --workspace app",
     "devUrl": "http://127.0.0.1:1420",
     "frontendDist": "../dist"
