@@ -25,7 +25,7 @@ React UI ──invoke──► Rust ──spawn──► Node sidecar(nova-pi-ho
 ### 关键设计
 
 - **pi 是纯 Node SDK**（依赖 `node:fs`/`jiti`），不能跑在 webview → 用 Tauri sidecar 子进程嵌入。
-- **pi 无原生 MCP 支持** → 用 `@modelcontextprotocol/sdk` JS 自建桥接，通过 `DefaultResourceLoader.extensionFactories` 把每个 MCP 工具注册为 pi 扩展工具，让 LLM 原生按需调用（取代原 Nova 的 `agentRuntime.ts` 路由）。
+- **pi 无原生 MCP 支持** → 用 `@modelcontextprotocol/client` v2 自建桥接，通过 `DefaultResourceLoader.extensionFactories` 把每个 MCP 工具注册为 pi 扩展工具，让 LLM 原生按需调用（取代原 Nova 的 `agentRuntime.ts` 路由）。客户端以 `versionNegotiation: auto` 兼容 MCP 2026 `server/discover` 与 2025 `initialize`，并兼容旧 HTTP+SSE 服务。
 - **pi 内置 DeepSeek provider**（`api.deepseek.com`），与原 Nova 默认 LLM 一致。
 - **Rust 退化为薄壳**：窗口、文件对话框、sidecar 进程管理、RPC 编排、SQLite 会话索引、大文件 HTTP（风评 zip/xlsx）。
 - **混合传输**：风评大文件走 Rust 直连 HTTP（`/mcp`→`/api` 推导），其余走 MCP。
@@ -37,7 +37,7 @@ React UI ──invoke──► Rust ──spawn──► Node sidecar(nova-pi-ho
 | Desktop Shell | Tauri 2.x（macOS/Windows，WebView2/WebKit） |
 | Frontend | React 19, TypeScript 5, Vite 8 |
 | Agent Core | Node.js sidecar + `@earendil-works/pi-coding-agent` |
-| MCP Client | `@modelcontextprotocol/sdk`（Node 层，stdio + Streamable HTTP） |
+| MCP Client | `@modelcontextprotocol/client` v2（Node 层，stdio + Streamable HTTP + 旧 SSE 回退） |
 | Rust Backend | Tauri 2 + reqwest + rusqlite（薄壳：sidecar 管理、RPC、SQLite 索引、大文件 HTTP） |
 | Database | SQLite `nova-pi.sqlite3`（会话索引 + token 统计 + LLM 设置） |
 | Icons | lucide-react |
@@ -196,7 +196,7 @@ npm run tauri:build  # Tauri 打包（含 sidecar + skills）
 | 维度 | Nova | Nova-PI |
 |---|---|---|
 | Agent 内核 | Rust 手写编排（agentRuntime/workbenchAgent） | pi SDK（createAgentSession + agent loop） |
-| MCP 客户端 | Rust（external_mcp_client.rs） | Node（@modelcontextprotocol/sdk） |
+| MCP 客户端 | Rust（external_mcp_client.rs） | Node（@modelcontextprotocol/client v2） |
 | 工具调用决策 | 前端路由 + LLM 决策 | pi LLM 原生 tool calling |
 | LLM 网关 | Rust（llm.rs call_llm） | pi（pi-ai ModelRuntime） |
 | 会话存储 | Rust SQLite（消息快照） | pi JSONL + Rust SQLite 索引 |

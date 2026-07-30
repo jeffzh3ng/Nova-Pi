@@ -8,7 +8,12 @@
 
 import type { InlineExtension } from "@earendil-works/pi-coding-agent";
 import { Type, type TSchema } from "typebox";
-import { extractMcpError, extractMcpPayload, isMcpCallError } from "./payload.js";
+import {
+  extractMcpError,
+  extractMcpModelContent,
+  extractMcpPayload,
+  isMcpCallError,
+} from "./payload.js";
 import { mcpRegistry, type RegisteredMcpTool } from "./registry.js";
 
 function parametersFromMcp(schema: unknown): TSchema {
@@ -56,14 +61,14 @@ export function createMcpExtension(allowedMcpServices: string[]): InlineExtensio
 
         for (const entry of current) {
           const { serviceId, tool, registeredName } = entry;
-          const fingerprint = JSON.stringify([serviceId, tool.name, tool.description, tool.inputSchema]);
+          const fingerprint = JSON.stringify([serviceId, tool]);
           knownNames.add(registeredName);
           if (fingerprints.get(registeredName) === fingerprint) continue;
           fingerprints.set(registeredName, fingerprint);
 
           pi.registerTool({
             name: registeredName,
-            label: tool.name,
+            label: tool.title || tool.name,
             description: tool.description || `${serviceId} MCP 工具：${tool.name}`,
             parameters: parametersFromMcp(tool.inputSchema),
             async execute(_toolCallId, args, signal) {
@@ -79,8 +84,9 @@ export function createMcpExtension(allowedMcpServices: string[]): InlineExtensio
               if (isMcpCallError(raw) || domainError) {
                 throw new Error(domainError || text || `MCP 工具 ${tool.name} 返回失败`);
               }
+              const modelText = text || stringifyForModel(data);
               return {
-                content: [{ type: "text", text: text || stringifyForModel(data) }],
+                content: extractMcpModelContent(raw, modelText),
                 // Keep the existing Nova front-end contract: details is the
                 // unwrapped business payload, not an adapter-specific envelope.
                 details: data,

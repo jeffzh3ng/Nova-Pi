@@ -129,6 +129,9 @@ export class McpRegistry {
         throw new Error(`MCP 服务配置已变化，请重试：${serviceId}`);
       }
       this.servers.set(serviceId, server);
+      server.onToolsChanged = () => {
+        if (this.servers.get(serviceId) === server) this.notifyChanged();
+      };
       this.notifyChanged();
       return server;
     }).finally(() => {

@@ -350,13 +350,23 @@ async function handleCommand(command: RpcCommand): Promise<void> {
       }
       case "test_mcp": {
         const server = await mcpRegistry.getOrConnect(command.serviceId);
-        writeResponse(id, true, { toolCount: server.tools.length });
+        writeResponse(id, true, {
+          toolCount: server.tools.length,
+          transportKind: server.transportKind,
+          protocolEra: server.protocolEra,
+          protocolVersion: server.protocolVersion,
+        });
         return;
       }
       case "reconnect_mcp": {
         // 强制断开旧子进程后重新 spawn；用于 Python 侧 config.local.json 变化后让用户手动重启。
         const server = await mcpRegistry.reconnect(command.serviceId);
-        writeResponse(id, true, { toolCount: server.tools.length });
+        writeResponse(id, true, {
+          toolCount: server.tools.length,
+          transportKind: server.transportKind,
+          protocolEra: server.protocolEra,
+          protocolVersion: server.protocolVersion,
+        });
         return;
       }
       case "mcp_call": {

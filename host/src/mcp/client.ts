@@ -1,31 +1,35 @@
 /**
  * MCP transport layer shared by pi extensions and imperative RPC calls.
  *
- * The implementation follows the compatibility model used by pi-mcp-adapter:
- * stdio is spawned without a shell, Streamable HTTP falls back to legacy SSE,
- * and MCP JSON Schemas/results pass through without provider-specific rewriting.
+ * The implementation follows the official MCP TypeScript SDK v2 compatibility
+ * model: negotiate the 2026 protocol automatically, fall back to the 2025
+ * initialize handshake, and retain legacy HTTP+SSE as a transport fallback.
  */
 
 import { existsSync, statSync } from "node:fs";
 import path from "node:path";
-import { Client } from "@modelcontextprotocol/sdk/client/index.js";
-import { SSEClientTransport } from "@modelcontextprotocol/sdk/client/sse.js";
-import { StdioClientTransport } from "@modelcontextprotocol/sdk/client/stdio.js";
-import { StreamableHTTPClientTransport } from "@modelcontextprotocol/sdk/client/streamableHttp.js";
-import type { Transport } from "@modelcontextprotocol/sdk/shared/transport.js";
+import {
+  Client,
+  SSEClientTransport,
+  StreamableHTTPClientTransport,
+  type CallToolResult,
+  type ProtocolEra,
+  type Tool,
+  type Transport,
+} from "@modelcontextprotocol/client";
+import { StdioClientTransport } from "@modelcontextprotocol/client/stdio";
 import type { McpServerConfig } from "../rpc-protocol.js";
 
-export type McpToolInfo = {
-  name: string;
-  description?: string;
-  inputSchema: unknown;
-};
+export type McpToolInfo = Tool;
 
 export type ConnectedMcpServer = {
   config: McpServerConfig;
   client: Client;
   tools: McpToolInfo[];
   transportKind: "stdio" | "streamable-http" | "sse";
+  protocolEra: ProtocolEra;
+  protocolVersion?: string;
+  onToolsChanged?: (tools: McpToolInfo[]) => void;
 };
 
 export type StdioCommandSpec = {
@@ -36,6 +40,7 @@ export type StdioCommandSpec = {
 };
 
 const HANDSHAKE_TIMEOUT_MS = 30_000;
+const MODERN_PROTOCOL_PROBE_TIMEOUT_MS = 10_000;
 const BLOCKED_PROGRAMS = new Set([
   "cmd",
   "cmd.exe",
@@ -212,8 +217,34 @@ function validateHttpUrl(url: string): URL {
   return parsed;
 }
 
-function makeClient(): Client {
-  return new Client({ name: "nova-pi-host", version: "0.1.0" }, { capabilities: {} });
+function makeClient(
+  transportKind: ConnectedMcpServer["transportKind"],
+  onToolsChanged: (error: Error | null, tools: Tool[] | null) => void,
+): Client {
+  return new Client(
+    { name: "nova-pi-host", version: "0.1.0" },
+    {
+      capabilities: {},
+      // HTTP+SSE is a frozen pre-Streamable-HTTP transport and cannot speak
+      // the 2026 era. stdio and Streamable HTTP probe modern discovery first,
+      // then transparently retry the 2025 initialize handshake when needed.
+      versionNegotiation: transportKind === "sse"
+        ? { mode: "legacy" }
+        : {
+            mode: "auto",
+            probe: { timeoutMs: MODERN_PROTOCOL_PROBE_TIMEOUT_MS, maxRetries: 0 },
+          },
+      // v2 maps this to legacy tools/list_changed notifications or the modern
+      // subscriptions/listen stream and returns an already aggregated list.
+      listChanged: {
+        tools: {
+          autoRefresh: true,
+          debounceMs: 100,
+          onChanged: onToolsChanged,
+        },
+      },
+    },
+  );
 }
 
 async function connectTransport(
@@ -221,16 +252,32 @@ async function connectTransport(
   transport: Transport,
   transportKind: ConnectedMcpServer["transportKind"],
 ): Promise<ConnectedMcpServer> {
-  const client = makeClient();
+  let connected: ConnectedMcpServer | undefined;
+  const client = makeClient(transportKind, (error, tools) => {
+    if (error) {
+      console.error(`[mcp-client] ${config.serviceId} 工具列表刷新失败：`, error);
+      return;
+    }
+    if (!connected || !tools) return;
+    connected.tools = tools;
+    connected.onToolsChanged?.(tools);
+  });
   try {
     await client.connect(transport, { timeout: HANDSHAKE_TIMEOUT_MS });
+    const protocolEra = client.getProtocolEra();
+    if (!protocolEra) throw new Error("MCP 协议协商完成后未返回协议时代。");
+    // With no cursor, SDK v2 walks all tools/list pages and stores the complete
+    // definition set for output-schema validation and x-mcp-header mirroring.
     const toolsList = await client.listTools(undefined, { timeout: HANDSHAKE_TIMEOUT_MS });
-    const tools: McpToolInfo[] = (toolsList.tools ?? []).map((tool) => ({
-      name: tool.name,
-      description: tool.description,
-      inputSchema: tool.inputSchema ?? { type: "object", properties: {} },
-    }));
-    return { config, client, tools, transportKind };
+    connected = {
+      config,
+      client,
+      tools: toolsList.tools,
+      transportKind,
+      protocolEra,
+      protocolVersion: client.getNegotiatedProtocolVersion(),
+    };
+    return connected;
   } catch (error) {
     await client.close().catch(() => {});
     throw error;
@@ -297,16 +344,20 @@ export async function callMcpToolWithTimeout(
   args: Record<string, unknown>,
   timeoutSecs?: number,
   signal?: AbortSignal,
-): Promise<unknown> {
+): Promise<CallToolResult> {
   const timeoutMs = Math.max(1, timeoutSecs ?? 14_400) * 1_000;
+  const toolDefinition = server.tools.find((tool) => tool.name === toolName);
   return await server.client.callTool(
     { name: toolName, arguments: args },
-    undefined,
     {
       signal,
       timeout: timeoutMs,
       resetTimeoutOnProgress: true,
       maxTotalTimeout: timeoutMs,
+      // Supplying the exact advertised definition keeps v2 output validation
+      // and 2026 Streamable HTTP x-mcp-header mirroring deterministic even if
+      // the response cache has just been invalidated by list_changed.
+      toolDefinition,
     },
   );
 }
