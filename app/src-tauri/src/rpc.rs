@@ -109,7 +109,14 @@ pub async fn send_rpc_blocking_with_timeout(
         .unwrap_or_else(|e| e.into_inner())
         .insert(id.clone(), tx);
 
-    crate::sidecar::write_command(&full_command)?;
+    if let Err(error) = crate::sidecar::write_command(&full_command) {
+        pending()
+            .map
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .remove(&id);
+        return Err(error);
+    }
 
     match tokio::time::timeout(timeout, rx).await {
         Ok(Ok(result)) => result,
@@ -136,6 +143,26 @@ pub async fn send_rpc_blocking_with_timeout(
 #[tauri::command]
 pub async fn send_rpc(app: AppHandle, command: Value) -> Result<Value, String> {
     send_rpc_blocking(&app, command).await
+}
+
+/// 设置页使用的 sidecar 存活探针。
+///
+/// 不复用默认 5 分钟超时：健康检测必须尽快区分“进程存在但 RPC 已卡死”的情况，
+/// 同时在超时后清理 pending 请求，避免周期检测不断积压等待项。
+#[tauri::command]
+pub async fn get_sidecar_health(app: AppHandle) -> Result<Value, String> {
+    let response = send_rpc_blocking_with_timeout(
+        &app,
+        serde_json::json!({ "type": "get_state", "sessionId": "__healthcheck__" }),
+        Duration::from_secs(2),
+    )
+    .await?;
+
+    if response.get("status").and_then(Value::as_str) == Some("ready") {
+        Ok(response)
+    } else {
+        Err("sidecar 返回了异常状态".to_string())
+    }
 }
 
 /// 简易 ID（时间戳 + 进程内计数器），无需外部依赖。

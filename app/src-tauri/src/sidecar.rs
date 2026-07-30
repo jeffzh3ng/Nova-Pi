@@ -366,14 +366,27 @@ fn resolve_node_program(app: &AppHandle) -> String {
             return process_compatible_path(&path);
         }
     }
-    if let Ok(resource_dir) = app.path().resource_dir() {
-        if let Some(path) = find_bundled_node(&resource_dir.join("runtime")) {
-            return process_compatible_path(&path);
-        }
+    // 开发态必须使用 PATH 中的系统 Node。Tauri 热重载会重新同步 target/debug
+    // 下的资源文件；若 sidecar 正在执行该目录里的 bundled node，覆盖可执行文件会
+    // 让 macOS 进程卡在不可中断状态，继而导致全部 RPC 超时。
+    #[cfg(debug_assertions)]
+    {
+        let _ = app;
+        "node".to_string()
     }
-    "node".to_string()
+
+    #[cfg(not(debug_assertions))]
+    {
+        if let Ok(resource_dir) = app.path().resource_dir() {
+            if let Some(path) = find_bundled_node(&resource_dir.join("runtime")) {
+                return process_compatible_path(&path);
+            }
+        }
+        "node".to_string()
+    }
 }
 
+#[cfg_attr(debug_assertions, allow(dead_code))]
 fn find_bundled_node(runtime_dir: &Path) -> Option<PathBuf> {
     [runtime_dir.join("node.exe"), runtime_dir.join("node")]
         .into_iter()

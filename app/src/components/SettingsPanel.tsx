@@ -1,5 +1,6 @@
 import { Bot, CheckCircle2, CirclePlus, Pencil, Save, Search, ShieldCheck, Trash2, X } from "lucide-react";
 import { getVersion } from "@tauri-apps/api/app";
+import { listen } from "@tauri-apps/api/event";
 import { useEffect, useRef, useState } from "react";
 import { ConfirmModal } from "./ConfirmModal";
 import {
@@ -14,10 +15,12 @@ import {
   upsertProvider,
   PI_API_TYPES,
 } from "../services/modelsService";
+import { getSidecarHealth } from "../services/hostBridge";
 import type { DefaultModelInfo, ModelSummary, ProviderSummary } from "../services/hostBridge";
 import { toUserFacingError } from "../services/uiError";
 import { showAppWarning } from "../services/appDialog";
 import { ComputerAgentSettingsPanel } from "./ComputerAgentSettingsPanel";
+import { MessageChannelsPanel } from "./MessageChannelsPanel";
 import { TokenActivityCard } from "./TokenActivityCard";
 
 type ProviderDraft = {
@@ -853,6 +856,8 @@ function ModelSettingsPanel() {
 
 export function SettingsPanel() {
   const [appVersion, setAppVersion] = useState("");
+  const [sidecarHealth, setSidecarHealth] = useState<"checking" | "online" | "offline">("checking");
+  const [sidecarHealthDetail, setSidecarHealthDetail] = useState("正在检测 Sidecar 响应状态");
 
   useEffect(() => {
     let active = true;
@@ -870,21 +875,112 @@ export function SettingsPanel() {
     };
   }, []);
 
+  useEffect(() => {
+    let active = true;
+    let probeSequence = 0;
+    let probeTimer: number | undefined;
+    const unlisteners: Array<() => void> = [];
+
+    const scheduleProbe = (delayMs = 10_000) => {
+      if (!active) return;
+      if (probeTimer !== undefined) window.clearTimeout(probeTimer);
+      probeTimer = window.setTimeout(() => {
+        probeTimer = undefined;
+        void probeSidecar();
+      }, delayMs);
+    };
+
+    const probeSidecar = async () => {
+      if (!active) return;
+      const sequence = ++probeSequence;
+      try {
+        await getSidecarHealth();
+        if (active && sequence === probeSequence) {
+          setSidecarHealth("online");
+          setSidecarHealthDetail("Sidecar RPC 响应正常");
+        }
+      } catch {
+        if (active && sequence === probeSequence) {
+          setSidecarHealth("offline");
+          setSidecarHealthDetail("Sidecar 未在 2 秒内正常响应，请重启应用");
+        }
+      } finally {
+        if (sequence === probeSequence) scheduleProbe();
+      }
+    };
+
+    const subscribe = (eventName: string, listener: () => void) => {
+      void listen(eventName, listener).then((unlisten) => {
+        if (active) unlisteners.push(unlisten);
+        else unlisten();
+      }).catch(() => {
+        // Browser previews do not expose the Tauri event API.
+      });
+    };
+
+    subscribe("pi-sidecar-exited", () => {
+      if (!active) return;
+      probeSequence += 1;
+      setSidecarHealth("offline");
+      setSidecarHealthDetail("Sidecar 已退出，正在等待自动恢复");
+      scheduleProbe(2_500);
+    });
+    subscribe("pi-sidecar-restarted", () => {
+      if (!active) return;
+      setSidecarHealth("checking");
+      setSidecarHealthDetail("Sidecar 已重启，正在验证 RPC 响应");
+      void probeSidecar();
+    });
+    subscribe("pi-sidecar-fatal", () => {
+      if (!active) return;
+      probeSequence += 1;
+      setSidecarHealth("offline");
+      setSidecarHealthDetail("Sidecar 自动恢复失败，请重启应用");
+      scheduleProbe();
+    });
+
+    void probeSidecar();
+
+    return () => {
+      active = false;
+      if (probeTimer !== undefined) window.clearTimeout(probeTimer);
+      unlisteners.forEach((unlisten) => unlisten());
+    };
+  }, []);
+
+  const sidecarHealthLabel = sidecarHealth === "online"
+    ? "Sidecar 正常"
+    : sidecarHealth === "offline"
+      ? "Sidecar 异常"
+      : "Sidecar 检测中";
+
   return (
     <section className="settings-page mcp-square-page pi-settings-page" aria-label="系统设置">
       <header className="settings-header">
         <div>
           <span>系统设置</span>
           <h1>系统设置</h1>
-          <p className="mcp-status-line">配置模型供应商与内置智能员工</p>
+          <p className="mcp-status-line">配置模型供应商、消息通道与内置智能员工</p>
         </div>
-        {appVersion ? (
-          <p className="settings-app-version" aria-label={`当前版本 ${appVersion}`}>
-            Nova v{appVersion}
-          </p>
-        ) : null}
+        <div className="settings-runtime-status">
+          {appVersion ? (
+            <p className="settings-app-version" aria-label={`当前版本 ${appVersion}`}>
+              Nova v{appVersion}
+            </p>
+          ) : null}
+          <span
+            className={`sidecar-health-badge is-${sidecarHealth}`}
+            aria-label={sidecarHealthDetail}
+            aria-live="polite"
+            title={sidecarHealthDetail}
+          >
+            <i aria-hidden="true" />
+            {sidecarHealthLabel}
+          </span>
+        </div>
       </header>
       <ModelSettingsPanel />
+      <MessageChannelsPanel />
       <ComputerAgentSettingsPanel />
       <TokenActivityCard />
     </section>

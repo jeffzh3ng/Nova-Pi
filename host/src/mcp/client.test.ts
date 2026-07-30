@@ -1,13 +1,15 @@
 import assert from "node:assert/strict";
+import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
 import path from "node:path";
-import test from "node:test";
+import test, { after } from "node:test";
 import { resolveStdioCommandSpecs, splitCommandArgs } from "./client.js";
 import type { McpServerConfig } from "../rpc-protocol.js";
 
-const repositoryRoot = path.basename(process.cwd()).toLowerCase() === "host"
-  ? path.dirname(process.cwd())
-  : process.cwd();
-const serviceScript = path.resolve(repositoryRoot, "services", "alert-analysis-mcp", "server.py");
+const testServiceDir = mkdtempSync(path.join(tmpdir(), "nova-pi-mcp-client-"));
+const serviceScript = path.join(testServiceDir, "server.py");
+writeFileSync(serviceScript, "# MCP command resolution test fixture\n", "utf8");
+after(() => rmSync(testServiceDir, { recursive: true, force: true }));
 
 function config(overrides: Partial<McpServerConfig> = {}): McpServerConfig {
   return {
@@ -36,7 +38,9 @@ test("Python script settings resolve to interpreter candidates with cwd", () => 
     assert.equal(spec.cwd, path.dirname(serviceScript));
     assert.ok(spec.args.includes(serviceScript));
     assert.deepEqual(spec.args.slice(-2), ["--mode", "stdio compat"]);
-    assert.match(spec.env?.PYTHONPATH ?? "", /alert-analysis-mcp/);
+    const pythonPath = (spec.env?.PYTHONPATH ?? "").split(path.delimiter);
+    assert.ok(pythonPath.includes(testServiceDir));
+    assert.ok(pythonPath.includes(path.join(testServiceDir, "src")));
   }
 });
 

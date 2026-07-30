@@ -56,4 +56,3 @@ nova-uploads/
 nova-skill-import/
 
 # Lock files for services (keep root lockfile)
-services/**/package-lock.json

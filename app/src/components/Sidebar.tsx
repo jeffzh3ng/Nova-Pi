@@ -10,8 +10,8 @@ import {
   ClipboardList,
   DatabaseZap,
   History,
-  MessageCircle,
   Pencil,
+  Puzzle,
   Settings,
   Store,
   Trash2,
@@ -152,20 +152,20 @@ export function Sidebar({
         </button>
         <div className="rail-spacer" />
         <button
+          className={`rail-tool ${activeNav === "skill" ? "active" : ""}`}
+          aria-label="SKILL 中心"
+          data-tooltip="SKILL 中心"
+          onClick={() => onSelectNav("skill")}
+        >
+          <Puzzle size={22} />
+        </button>
+        <button
           className={`rail-tool ${activeNav === "mcp" ? "active" : ""}`}
           aria-label="数字员工管理"
           data-tooltip="数字员工管理"
           onClick={() => onSelectNav("mcp")}
         >
           <Store size={22} />
-        </button>
-        <button
-          className={`rail-tool ${activeNav === "wechat" ? "active" : ""}`}
-          aria-label="消息通道"
-          data-tooltip="消息通道"
-          onClick={() => onSelectNav("wechat")}
-        >
-          <MessageCircle size={22} />
         </button>
         <button
           className={`rail-tool ${activeNav === "settings" ? "active" : ""}`}

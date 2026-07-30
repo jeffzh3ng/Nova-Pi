@@ -1,4 +1,4 @@
-export type SidebarNavId = "home" | "tasks" | "projects" | "skill" | "mcp" | "extensions" | "wechat" | "usage" | "settings";
+export type SidebarNavId = "home" | "tasks" | "projects" | "skill" | "mcp" | "extensions" | "usage" | "settings";
 
 export type DigitalHuman = {
   id: string;

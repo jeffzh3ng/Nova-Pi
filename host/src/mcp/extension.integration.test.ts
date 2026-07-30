@@ -11,14 +11,15 @@ import type { McpServerConfig } from "../rpc-protocol.js";
 const repositoryRoot = path.basename(process.cwd()).toLowerCase() === "host"
   ? path.dirname(process.cwd())
   : process.cwd();
+const fixturePath = path.join(repositoryRoot, "host", "src", "mcp", "fixtures", "stdio-server.mjs");
 
 test("pi ResourceLoader exposes threat-analysis MCP tools as extension capabilities", { timeout: 60_000 }, async () => {
   const agentDir = mkdtempSync(path.join(tmpdir(), "nova-pi-mcp-extension-"));
   const config: McpServerConfig = {
     serviceId: "alert-analysis-mcp",
     transport: "stdio",
-    commandPath: path.join(repositoryRoot, "services", "alert-analysis-mcp", "server.py"),
-    commandArgs: "",
+    commandPath: process.execPath,
+    commandArgs: JSON.stringify(fixturePath),
     url: "",
     enabled: true,
     launchMode: "script",

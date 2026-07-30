@@ -50,6 +50,26 @@ const permissionText = (permissions: unknown) => {
   }
 };
 
+function SkillPanelHeading({
+  icon: Icon,
+  title,
+  description,
+}: {
+  icon: typeof BookOpenText;
+  title: string;
+  description: string;
+}) {
+  return (
+    <div className="settings-card-title">
+      <Icon size={20} />
+      <div>
+        <h2>{title}</h2>
+        <p>{description}</p>
+      </div>
+    </div>
+  );
+}
+
 function SkillListItem({
   skill,
   selected,
@@ -237,8 +257,8 @@ export function SkillCenterPanel() {
   };
 
   return (
-    <section className="settings-page skill-center-page" aria-label="SKILL 中心">
-      <header className="settings-header">
+    <section className="settings-page mcp-square-page skill-center-page" aria-label="SKILL 中心">
+      <header className="settings-header skill-center-header">
         <div>
           <span>SKILL 中心</span>
           <h1>SKILL 管理</h1>
@@ -263,13 +283,11 @@ export function SkillCenterPanel() {
       <div className="skill-center-scroll">
         <div className="skill-center-layout">
           <section className="settings-card skill-list-panel">
-          <div className="settings-card-title">
-            <BookOpenText size={20} />
-            <div>
-              <h2>已安装 SKILL</h2>
-              <p>可在右侧查看详情并管理状态。</p>
-            </div>
-          </div>
+          <SkillPanelHeading
+            icon={BookOpenText}
+            title="已安装 SKILL"
+            description="可在右侧查看详情并管理状态。"
+          />
 
           <div className="skill-list">
             {skills.length ? (
@@ -294,30 +312,31 @@ export function SkillCenterPanel() {
           <section className="settings-card skill-detail-panel">
           {selectedSkill ? (
             <>
-              <div className="settings-card-title">
-                <ShieldCheck size={20} />
-                <div>
-                  <h2>{selectedSkill.name}</h2>
-                  <p>{selectedSkill.description}</p>
+              <div className="skill-detail-sticky">
+                <SkillPanelHeading
+                  icon={ShieldCheck}
+                  title={selectedSkill.name}
+                  description={selectedSkill.description}
+                />
+
+                <div className="skill-action-row">
+                  <button type="button" onClick={() => handleToggleSkill(selectedSkill)} disabled={busy || !selectedSkill.canToggle}>
+                    <Power size={15} />
+                    {selectedSkill.enabled ? "禁用" : "启用"}
+                  </button>
+                  <button
+                    type="button"
+                    className="danger"
+                    onClick={() => handleDeleteSkill(selectedSkill)}
+                    disabled={busy || !selectedSkill.canDelete}
+                  >
+                    <Trash2 size={15} />
+                    删除
+                  </button>
                 </div>
               </div>
 
-              <div className="skill-action-row">
-                <button type="button" onClick={() => handleToggleSkill(selectedSkill)} disabled={busy || !selectedSkill.canToggle}>
-                  <Power size={15} />
-                  {selectedSkill.enabled ? "禁用" : "启用"}
-                </button>
-                <button
-                  type="button"
-                  className="danger"
-                  onClick={() => handleDeleteSkill(selectedSkill)}
-                  disabled={busy || !selectedSkill.canDelete}
-                >
-                  <Trash2 size={15} />
-                  删除
-                </button>
-              </div>
-
+              <div className="skill-detail-scroll">
               <dl className="skill-meta-grid">
                 <div>
                   <dt>ID</dt>
@@ -384,6 +403,7 @@ export function SkillCenterPanel() {
               <div className="skill-section skill-entry-section">
                 <h3>{selectedSkill.entry}</h3>
                 <pre>{definition?.entryContent || "正在读取 Skill 内容..."}</pre>
+              </div>
               </div>
             </>
           ) : (

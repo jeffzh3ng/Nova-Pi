@@ -32,19 +32,71 @@ body,
   min-width: 0;
 }
 
-.settings-app-version {
+.settings-runtime-status {
   flex: 0 0 auto;
   align-self: flex-start;
+  display: flex;
+  align-items: center;
+  gap: 8px;
   margin: 20px 0 0;
+}
+
+.settings-app-version,
+.sidecar-health-badge {
+  margin: 0;
   padding: 6px 10px;
   border: 1px solid var(--color-line);
   border-radius: 999px;
-  color: var(--color-ink-muted);
   background: rgba(255, 255, 255, 0.72);
   font-size: 12px;
   font-weight: 700;
   line-height: 1;
   white-space: nowrap;
+}
+
+.settings-app-version {
+  color: var(--color-muted);
+}
+
+.sidecar-health-badge {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+}
+
+.sidecar-health-badge i {
+  width: 7px;
+  height: 7px;
+  border-radius: 50%;
+  background: currentColor;
+}
+
+.sidecar-health-badge.is-online {
+  color: var(--color-teal);
+  border-color: #b8e4dc;
+  background: var(--color-teal-soft);
+}
+
+.sidecar-health-badge.is-checking {
+  color: var(--color-accent);
+  border-color: #c5e4ec;
+  background: var(--color-accent-weak);
+}
+
+.sidecar-health-badge.is-checking i {
+  animation: sidecar-health-pulse 1.2s ease-in-out infinite;
+}
+
+.sidecar-health-badge.is-offline {
+  color: var(--color-crimson);
+  border-color: #fecaca;
+  background: var(--color-crimson-soft);
+}
+
+@keyframes sidecar-health-pulse {
+  50% {
+    opacity: 0.35;
+  }
 }
 
 .pi-settings-page .mcp-status-line,
@@ -478,8 +530,9 @@ label.pi-model-reasoning input {
     max-width: 100%;
   }
 
-  .settings-app-version {
+  .settings-runtime-status {
     margin-top: 0;
+    flex-wrap: wrap;
   }
 
   .pi-settings-page .mcp-card-grid {
@@ -776,4 +829,3 @@ label.pi-model-reasoning input {
     justify-content: flex-start;
   }
 }
-

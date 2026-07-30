@@ -7,13 +7,14 @@ import type { McpServerConfig } from "../rpc-protocol.js";
 const repositoryRoot = path.basename(process.cwd()).toLowerCase() === "host"
   ? path.dirname(process.cwd())
   : process.cwd();
+const fixturePath = path.join(repositoryRoot, "host", "src", "mcp", "fixtures", "stdio-server.mjs");
 
-test("legacy threat-analysis FastMCP server completes stdio handshake", { timeout: 60_000 }, async () => {
+test("self-contained MCP fixture completes stdio handshake", { timeout: 60_000 }, async () => {
   const config: McpServerConfig = {
     serviceId: "alert-analysis-mcp",
     transport: "stdio",
-    commandPath: path.join(repositoryRoot, "services", "alert-analysis-mcp", "server.py"),
-    commandArgs: "",
+    commandPath: process.execPath,
+    commandArgs: JSON.stringify(fixturePath),
     url: "",
     enabled: true,
     launchMode: "script",

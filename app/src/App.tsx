@@ -7,7 +7,6 @@ import { ConfirmModal } from "./components/ConfirmModal";
 import { DigitalHumanPicker } from "./components/DigitalHumanPicker";
 import { Hero } from "./components/Hero";
 import { McpSquarePanel } from "./components/McpSquarePanel";
-import { MessageChannelsPanel } from "./components/MessageChannelsPanel";
 import { SettingsPanel } from "./components/SettingsPanel";
 import { Sidebar } from "./components/Sidebar";
 import { SkillCenterPanel } from "./components/SkillCenterPanel";
@@ -3209,7 +3208,7 @@ export default function App() {
         onRestoreTask={handleRestoreTask}
       />
       <main
-        className={`workspace ${activeNav === "settings" || activeNav === "mcp" || activeNav === "skill" || activeNav === "wechat" ? "settings-workspace" : ""} ${
+        className={`workspace ${activeNav === "settings" || activeNav === "mcp" || activeNav === "skill" ? "settings-workspace" : ""} ${activeNav === "skill" ? "skill-workspace" : ""} ${
           activeNav === "tasks" || (activeNav === "projects" && selectedTaskId) ? "tasks-workspace" : ""
         }`}
       >
@@ -3219,8 +3218,6 @@ export default function App() {
           <SkillCenterPanel />
         ) : activeNav === "mcp" ? (
           <McpSquarePanel />
-        ) : activeNav === "wechat" ? (
-          <MessageChannelsPanel />
         ) : activeNav === "usage" ? (
           <TokenUsagePanel />
         ) : activeNav === "projects" && !selectedTaskId ? (

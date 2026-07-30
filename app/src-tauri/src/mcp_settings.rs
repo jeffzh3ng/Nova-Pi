@@ -71,7 +71,7 @@ pub struct McpConnectionSettingsCatalog {
 pub fn default_mcp_connection_settings(service_id: &str) -> McpConnectionSettings {
     let service_id = normalize_service_id(service_id);
     McpConnectionSettings {
-        http_url: default_http_url(&service_id),
+        http_url: String::new(),
         employee_name: default_employee_name(&service_id),
         employee_role: default_employee_role(&service_id),
         welcome_title: default_welcome_title(&service_id),
@@ -265,7 +265,26 @@ fn initialize_mcp_db(connection: &Connection) -> Result<(), String> {
          SET service_id = 'data-security-risk-assessment-mcp' \
          WHERE service_id = 'data-risk-assessment-mcp';",
     );
+    clear_legacy_builtin_connection_defaults(connection)?;
     retire_removed_builtin_mcp_connection_settings(connection)?;
+    Ok(())
+}
+
+fn clear_legacy_builtin_connection_defaults(connection: &Connection) -> Result<(), String> {
+    for (service_id, legacy_url) in [
+        (ALERT_ANALYSIS_SERVICE_ID, "http://127.0.0.1:8765/mcp"),
+        (DATA_CLASSIFICATION_SERVICE_ID, "http://127.0.0.1:8766/mcp"),
+        (DATA_RISK_ASSESSMENT_SERVICE_ID, "http://127.0.0.1:8767/mcp"),
+    ] {
+        connection
+            .execute(
+                "UPDATE mcp_connection_settings \
+                 SET http_url = '' \
+                 WHERE service_id = ?1 AND enabled = 0 AND command_path = '' AND http_url = ?2",
+                params![service_id, legacy_url],
+            )
+            .map_err(|error| format!("清理数字员工默认连接地址失败：{error}"))?;
+    }
     Ok(())
 }
 
@@ -482,7 +501,7 @@ fn normalize_mcp_connection_settings(mut settings: McpConnectionSettings) -> Mcp
     if settings.command_args.is_empty() {
         settings.command_args = "--transport stdio".to_string();
     }
-    settings.http_url = normalize_http_url(&settings.http_url, &settings.service_id);
+    settings.http_url = normalize_http_url(&settings.http_url);
     settings
 }
 
@@ -564,10 +583,10 @@ fn default_show_in_employee_list() -> bool {
     true
 }
 
-fn normalize_http_url(value: &str, service_id: &str) -> String {
+fn normalize_http_url(value: &str) -> String {
     let trimmed = value.trim().trim_end_matches('/');
     if trimmed.is_empty() {
-        return default_http_url(service_id);
+        return String::new();
     }
     // Normalize scheme to lowercase for matching; store the original trimmed value.
     let lower = trimmed.to_ascii_lowercase();
@@ -583,15 +602,6 @@ fn normalize_http_url(value: &str, service_id: &str) -> String {
         return format!("{lower}/mcp");
     }
     trimmed.to_string()
-}
-
-fn default_http_url(service_id: &str) -> String {
-    match service_id {
-        ALERT_ANALYSIS_SERVICE_ID => "http://127.0.0.1:8765/mcp".to_string(),
-        DATA_CLASSIFICATION_SERVICE_ID => "http://127.0.0.1:8766/mcp".to_string(),
-        DATA_RISK_ASSESSMENT_SERVICE_ID => "http://127.0.0.1:8767/mcp".to_string(),
-        _ => String::new(),
-    }
 }
 
 fn bool_to_i64(value: bool) -> i64 {
@@ -644,18 +654,45 @@ mod tests {
     }
 
     #[test]
-    fn data_classification_default_uses_its_own_http_port() {
+    fn data_classification_default_has_no_connection_location() {
         let settings = default_mcp_connection_settings(DATA_CLASSIFICATION_SERVICE_ID);
 
         assert_eq!(settings.service_id, DATA_CLASSIFICATION_SERVICE_ID);
         assert!(!settings.show_in_employee_list);
-        assert_eq!(settings.http_url, "http://127.0.0.1:8766/mcp");
+        assert!(settings.command_path.is_empty());
+        assert!(settings.http_url.is_empty());
     }
 
     #[test]
-    fn data_risk_assessment_default_uses_its_own_http_port() {
+    fn data_risk_assessment_default_has_no_connection_location() {
         let settings = default_mcp_connection_settings(DATA_RISK_ASSESSMENT_SERVICE_ID);
-        assert_eq!(settings.http_url, "http://127.0.0.1:8767/mcp");
+        assert!(settings.command_path.is_empty());
+        assert!(settings.http_url.is_empty());
+    }
+
+    #[test]
+    fn inactive_legacy_default_url_is_cleared_without_overwriting_enabled_connections() {
+        let connection = Connection::open_in_memory().expect("open db");
+        initialize_mcp_db(&connection).expect("initialize");
+
+        let mut inactive = default_mcp_connection_settings(ALERT_ANALYSIS_SERVICE_ID);
+        inactive.http_url = "http://127.0.0.1:8765/mcp".to_string();
+        save_mcp_connection_settings_to_db(&connection, &inactive).expect("save inactive default");
+
+        let mut enabled = default_mcp_connection_settings(DATA_CLASSIFICATION_SERVICE_ID);
+        enabled.enabled = true;
+        enabled.http_url = "http://127.0.0.1:8766/mcp".to_string();
+        save_mcp_connection_settings_to_db(&connection, &enabled).expect("save enabled connection");
+
+        initialize_mcp_db(&connection).expect("migrate defaults");
+
+        let inactive = load_mcp_connection_settings_from_db(&connection, ALERT_ANALYSIS_SERVICE_ID)
+            .expect("load inactive default");
+        let enabled =
+            load_mcp_connection_settings_from_db(&connection, DATA_CLASSIFICATION_SERVICE_ID)
+                .expect("load enabled connection");
+        assert!(inactive.http_url.is_empty());
+        assert_eq!(enabled.http_url, "http://127.0.0.1:8766/mcp");
     }
 
     #[test]

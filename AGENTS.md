@@ -19,7 +19,7 @@ React UI ──invoke──► Rust ──spawn──► Node sidecar(nova-pi-ho
                           + Session JSONL 持久化
                                      │
                                      ▼
-                          外部 MCP 服务（services/）
+                          用户配置的外部 MCP 服务
 ```
 
 ### 关键设计
@@ -83,7 +83,6 @@ Nova-PI/
 │       ├── digital-human.ts     # 9 员工 system prompt + MCP 白名单
 │       ├── mcp/                 # MCP 桥接（extension/registry/client/payload）
 │       └── skills/              # pi ResourceLoader 配置
-├── services/                    # 外部 MCP 服务（Python FastMCP）
 └── skills/                      # 内置技能包
 ```
 
@@ -177,7 +176,7 @@ NOVA_PI_HOST_MODE=dev npm run tauri:dev
 
 # 生产构建
 npm run build        # 先 build host，再 build 前端
-npm run tauri:build  # Tauri 打包（含 sidecar + skills + services）
+npm run tauri:build  # Tauri 打包（含 sidecar + skills）
 ```
 
 ### Prerequisites

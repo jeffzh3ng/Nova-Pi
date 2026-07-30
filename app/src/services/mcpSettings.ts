@@ -122,7 +122,7 @@ export const defaultAlertMcpSettings: McpConnectionSettings = {
   transport: "stdio",
   commandPath: "",
   commandArgs: "--transport stdio",
-  httpUrl: "http://127.0.0.1:8765/mcp",
+  httpUrl: "",
   launchMode: "script",
 };
 
@@ -137,7 +137,7 @@ export const defaultDataClassificationMcpSettings: McpConnectionSettings = {
   transport: "stdio",
   commandPath: "",
   commandArgs: "--transport stdio",
-  httpUrl: "http://127.0.0.1:8766/mcp",
+  httpUrl: "",
   launchMode: "script",
 };
 

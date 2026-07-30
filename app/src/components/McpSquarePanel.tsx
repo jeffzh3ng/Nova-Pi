@@ -50,22 +50,22 @@ const BUILT_IN_SERVICE_META: Record<string, McpServiceMeta> = {
     title: "数安风评数字员工 MCP",
     description: "数据安全风险评估数字员工使用的 MCP 服务连接。",
     enabledDescription: "连接成功后数安风评数字员工显示为可用",
-    pathPlaceholder: "D:\\path\\to\\data-security-risk-assessment-mcp\\server.py",
-    httpPlaceholder: "http://127.0.0.1:8765/mcp",
+    pathPlaceholder: "",
+    httpPlaceholder: "",
   },
   [ALERT_ANALYSIS_MCP_SERVICE]: {
     title: "威胁研判数字员工 MCP",
     description: "告警研判、流量解析和威胁分析使用的 MCP 服务连接。",
     enabledDescription: "连接成功后威胁研判数字员工显示为可用",
-    pathPlaceholder: "D:\\PROGRAMS\\RUST\\Nova\\services\\alert-analysis-mcp\\server.py",
-    httpPlaceholder: "http://127.0.0.1:8765/mcp",
+    pathPlaceholder: "",
+    httpPlaceholder: "",
   },
   [DATA_CLASSIFICATION_MCP_SERVICE]: {
     title: "分类分级工具 MCP",
     description: "数据资产分类分级任务使用的 MCP 服务连接。",
     enabledDescription: "启用后分类分级工具使用该连接配置",
-    pathPlaceholder: "D:\\PROGRAMS\\RUST\\Nova\\services\\data-classification-mcp\\server.py",
-    httpPlaceholder: "http://127.0.0.1:8766/mcp",
+    pathPlaceholder: "",
+    httpPlaceholder: "",
   },
 };
 
@@ -162,8 +162,8 @@ const serviceMeta = (
     title: serviceId,
     description: "自定义 MCP 服务连接，可供数字员工或工具调用。",
     enabledDescription: "启用后将检测该 MCP 服务连接",
-    pathPlaceholder: "D:\\path\\to\\mcp-server.py",
-    httpPlaceholder: "http://127.0.0.1:8765/mcp",
+    pathPlaceholder: "",
+    httpPlaceholder: "",
   };
   const employeeName = settings?.employeeName.trim();
   const employeeRole = settings?.employeeRole.trim();
@@ -178,16 +178,7 @@ const serviceMeta = (
   };
 };
 
-/// Module 模式下的「项目根目录」占位提示。对已知内置服务给出贴近真实的示例，
-/// 其余给出通用示例，降低用户配置成本。
-const moduleProjectRootPlaceholder = (serviceId: string): string => {
-  switch (serviceId) {
-    case DATA_RISK_ASSESSMENT_MCP_SERVICE:
-      return "/path/to/data-security-risk-assessment-mcp";
-    default:
-      return "/path/to/your-mcp-project";
-  }
-};
+const moduleProjectRootPlaceholder = (): string => "";
 
 /// Module 模式下的「Python 模块名」占位提示。
 const modulePlaceholder = (serviceId: string): string => {
@@ -743,7 +734,7 @@ export function McpSquarePanel() {
                       value={editor.draft.commandPath}
                       placeholder={
                         editor.draft.launchMode === "module"
-                          ? moduleProjectRootPlaceholder(editor.draft.serviceId)
+                          ? moduleProjectRootPlaceholder()
                           : serviceMeta(editor.draft.serviceId, editor.draft).pathPlaceholder
                       }
                       onChange={(event) => updateEditor("commandPath", event.target.value)}

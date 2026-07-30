@@ -266,6 +266,17 @@ export async function sendRpc<TResult = unknown, TCommand extends RpcCommand = R
   return invoke<TResult>("send_rpc", { command });
 }
 
+export type SidecarHealth = {
+  status: "ready";
+};
+
+/**
+ * 用短超时 RPC 探测 sidecar 是否真正可响应，而不只判断进程是否仍存在。
+ */
+export async function getSidecarHealth(): Promise<SidecarHealth> {
+  return invoke<SidecarHealth>("get_sidecar_health");
+}
+
 /**
  * 订阅 pi 事件流（message_update / tool_execution_* / agent_end / usage / risk_job_update / error）。
  * 返回取消订阅函数。

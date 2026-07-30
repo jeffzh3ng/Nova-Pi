@@ -50,7 +50,7 @@ use risk_http::{
     download_risk_assessment_matrix_template, download_risk_assessment_result,
     upload_risk_assessment_material,
 };
-use rpc::send_rpc;
+use rpc::{get_sidecar_health, send_rpc};
 use serde_json::json;
 use skill_registry::{
     delete_user_skill, execute_skill_plan, get_skill, list_skill_catalog, list_skills,
@@ -124,9 +124,8 @@ async fn list_mcp_tools(
 /// 前端 McpSquarePanel 保存配置后、test/list 调用前都需要 sidecar 已加载最新配置。
 pub(crate) async fn sync_mcp_config_to_sidecar(app: &tauri::AppHandle) -> Result<(), String> {
     let catalog = list_mcp_connection_settings(app.clone())?;
-    // 把上传目录路径通过环境变量传给 MCP 子进程。alert-analysis-mcp 的 safe_resolve
-    // 只允许读 $TMPDIR/nova-uploads，但 Rust 把上传文件写到 app_data_dir/uploads，
-    // 这里打通两层路径白名单（详见 services/alert-analysis-mcp/server.py 的 _allowed_read_roots）。
+    // 把上传目录路径通过环境变量传给外部 MCP 子进程，供服务按需加入读取白名单。
+    // Rust 将上传文件写到 app_data_dir/uploads；具体访问策略由外部服务自行实现。
     let upload_env = upload_dir_env_entry(app);
     let servers: Vec<serde_json::Value> = catalog
         .settings
@@ -194,6 +193,7 @@ pub fn run() {
             // sidecar / rpc
             start_sidecar,
             send_rpc,
+            get_sidecar_health,
             test_mcp_connection,
             reconnect_mcp_connection,
             list_mcp_tools,

@@ -1,7 +1,7 @@
 /**
  * 消息通道面板（卡片网格版，多渠道）。
  *
- * 布局参照模型配置（SettingsPanel）：mcp-square-page + mcp-card-grid + 居中 modal。
+ * 作为系统设置中的独立区块展示，布局与模型配置、Nova 智能员工设置保持一致。
  * 每个渠道一张卡片，含状态徽章 + 账号/员工 + 操作按钮。
  * 详情（二维码/消息记录/编辑配置）全部走 modal。
  *
@@ -636,11 +636,10 @@ export function MessageChannelsPanel() {
   const activeChatEntries = chatModalFor ? (runtime[chatModalFor]?.chat ?? []) : [];
 
   return (
-    <section className="settings-page mcp-square-page channel-page" aria-label="消息通道">
-      <header className="settings-header channel-page-header">
+    <section className="settings-section channel-page" aria-label="消息通道">
+      <header className="settings-section-header channel-section-header">
         <div>
-          <span>外部对接</span>
-          <h1>消息通道</h1>
+          <h2>消息通道</h2>
           <p className="mcp-status-line">
             接入外部消息渠道后，收到的消息会自动转给指定数字员工处理，AI 回复发回原渠道
           </p>
