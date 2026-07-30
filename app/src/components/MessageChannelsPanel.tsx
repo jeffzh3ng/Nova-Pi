@@ -843,7 +843,6 @@ export function MessageChannelsPanel() {
                 <QrCode size={20} />
               </span>
               <div>
-                <span>扫码登录</span>
                 <h2>微信扫码</h2>
               </div>
               <button onClick={() => setQrModal(null)} aria-label="关闭">

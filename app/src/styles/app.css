@@ -1333,11 +1333,10 @@ body.is-resizing-sidebar * {
    否则高亮文字会和光标错位（这是 mention 高亮的标准对齐约束）。
    注意：覆盖层必须脱离布局流（absolute），否则它会随内容增长撑高容器，
    导致 textarea 跟着变高（grid 叠放会取两元素的最大行高）。
-   overflow:hidden 作为兜底裁剪：即使覆盖层内容超长，也被限制在本层
-   （=textarea 固定高度）内，绝不溢出盖住下方的 footer。 */
+   本层不设 overflow:hidden——裁剪由覆盖层自身的固定高度 + overflow:hidden
+   负责；否则会误裁剪向上展开的 @员工 浮层（mention-picker bottom:100%）。 */
 .composer-input-wrap {
   position: relative;
-  overflow: hidden;
 }
 
 .composer-highlight-overlay,
@@ -1357,12 +1356,15 @@ body.is-resizing-sidebar * {
 }
 
 /* 覆盖层：绝对定位叠在 textarea 上，渲染可见文字（含高亮 mention）。
-   不可交互、不占布局——其高度跟随 textarea（固定高度），绝不反向撑高容器。
-   overflow:hidden 配合与 textarea 同步 scrollTop（见组件 onScroll），
-   让长内容在输入框固定高度内滚动而非溢出。 */
+   不可交互、不占布局。用固定 height（=textarea 高度）而非 inset:0 跟随 wrap，
+   避免 wrap 被 grid 拉伸时覆盖层变高、裁剪失效而溢出盖住 footer。
+   overflow:hidden 裁剪到该固定高度，内层 transform 跟随 textarea 滚动。 */
 .composer-highlight-overlay {
   position: absolute;
-  inset: 0;
+  top: 0;
+  left: 0;
+  right: 0;
+  height: 87px;
   pointer-events: none;
   overflow: hidden;
   color: var(--color-ink);
@@ -2599,6 +2601,11 @@ body.is-resizing-sidebar * {
   height: 58px;
   min-height: 58px;
   line-height: 1.5;
+}
+
+/* 覆盖层高度须与 textarea 一致，否则裁剪范围与输入框不符。 */
+.conversation-composer .composer-highlight-overlay {
+  height: 58px;
 }
 
 /* 介绍文字（placeholder 提示）随内边距对齐 */
