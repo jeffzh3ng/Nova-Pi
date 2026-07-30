@@ -1,0 +1,23 @@
+# Normalize line endings across platforms.
+# The repo stores text as LF; git checks out LF on all platforms and never
+# rewrites binary resources. This eliminates phantom "modified" files caused
+# by system-level core.autocrlf=true on Windows.
+
+# Default: treat everything as text with LF line endings.
+* text=auto eol=lf
+
+# ---- Binary resources (never normalize) ----
+*.png  binary
+*.jpg  binary
+*.jpeg binary
+*.gif  binary
+*.ico  binary
+*.icns binary
+*.webp binary
+*.bmp  binary
+*.tiff binary
+*.tif  binary
+
+# ---- Generated / lock files ----
+# Cargo.lock and package-lock files are machine-managed; avoid merge noise.
+*.lock text eol=lf merge=ours
