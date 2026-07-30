@@ -1,5 +1,6 @@
 import {
   Activity,
+  BookOpenCheck,
   Bot,
   CheckCircle2,
   CircleMinus,
@@ -22,7 +23,7 @@ import { toUserFacingError } from "../services/uiError";
 
 type PermissionKey = keyof Pick<
   ComputerAgentSettings,
-  "allowFileRead" | "allowFileWrite" | "allowCommandExecution" | "allowComputerInfo" | "allowNovaManagement"
+  "allowFileRead" | "allowFileWrite" | "allowCommandExecution" | "allowSkills" | "allowComputerInfo" | "allowNovaManagement"
 >;
 
 const PERMISSIONS: Array<{
@@ -35,6 +36,7 @@ const PERMISSIONS: Array<{
   { key: "allowFileRead", title: "读取文件", description: "查看任意可访问路径中的文本、代码和图片。", icon: FileSearch },
   { key: "allowFileWrite", title: "修改文件与编程", description: "创建、修改代码和其他文件。", icon: FilePenLine, risk: true },
   { key: "allowCommandExecution", title: "执行命令", description: "在工作目录执行 PowerShell、Git、构建、测试和系统命令。", icon: Command, risk: true },
+  { key: "allowSkills", title: "使用 Skill", description: "调用 Skill 设置中已启用的能力，并安全保存其 Token 等环境配置。", icon: BookOpenCheck, risk: true },
   { key: "allowComputerInfo", title: "查看设备信息", description: "读取系统、CPU、内存、网络接口和用户目录信息。", icon: MonitorCog },
   { key: "allowNovaManagement", title: "管理 Nova", description: "查看对话与运行任务，并中止或释放其他任务会话。", icon: Activity, risk: true },
 ];
@@ -190,7 +192,7 @@ export function ComputerAgentSettingsPanel() {
         </div>
         <div className="computer-agent-risk-note">
           <ShieldAlert size={18} />
-          <span>文件修改和命令执行可能影响本机环境。只授权实际需要的能力，涉及删除或系统级变更时仍应人工确认。</span>
+          <span>文件修改、命令执行和第三方 Skill 可能影响本机或访问外部服务。只授权实际需要的能力，涉及删除或系统级变更时仍应人工确认。</span>
         </div>
         <footer className="computer-agent-save-row">
           <button className="primary" type="button" onClick={() => void save()} disabled={saving}>

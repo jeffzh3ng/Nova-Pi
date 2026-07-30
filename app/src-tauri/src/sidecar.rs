@@ -90,6 +90,13 @@ fn start_sidecar_internal(app: &AppHandle, reset_watchdog_failures: bool) -> Res
     let log_path = prepare_sidecar_log(&app_data_dir);
     let agent_dir = app_data_dir.join(".pi").join("agent");
     std::fs::create_dir_all(&agent_dir).map_err(|e| format!("无法创建 agent 目录：{e}"))?;
+    let bundled_skill_dir = app
+        .path()
+        .resource_dir()
+        .map(|dir| dir.join("skills"))
+        .ok()
+        .filter(|dir| dir.is_dir());
+    let skill_state_path = app_data_dir.join("skill-state.json");
 
     // 开发期：直接 tsx 跑 host/src/main.ts；生产期：跑打包后的 host/dist/main.js。
     // 通过环境变量 NOVA_PI_HOST_MODE 控制（dev=tsx，prod=node）。
@@ -123,6 +130,13 @@ fn start_sidecar_internal(app: &AppHandle, reset_watchdog_failures: bool) -> Res
     command
         .args(&args)
         .arg(process_compatible_path(&agent_dir))
+        .arg(
+            bundled_skill_dir
+                .as_deref()
+                .map(process_compatible_path)
+                .unwrap_or_default(),
+        )
+        .arg(process_compatible_path(&skill_state_path))
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())

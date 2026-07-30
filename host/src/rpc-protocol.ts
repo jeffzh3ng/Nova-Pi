@@ -54,6 +54,7 @@ export type RpcCommand =
   | { id?: string; type: "mcp_call"; serviceId: string; toolName: string; args: Record<string, unknown>; timeoutSecs?: number }
   // 技能
   | { id?: string; type: "list_skills" }
+  | { id?: string; type: "reload_skills" }
   | { id?: string; type: "resolve_skill"; request: string; sessionId?: string }
   // 风评：完全走 mcp_call（pi 自主调用 data-security-risk-assessment-mcp 工具），
   // 前端 pollRiskAssessment 轮询进度。host 不再编排，故无独立 risk_* 命令。

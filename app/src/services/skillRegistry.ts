@@ -1,4 +1,5 @@
 import { invoke } from "@tauri-apps/api/core";
+import { sendRpc } from "./hostBridge";
 
 export type SkillManifest = {
   id: string;
@@ -55,22 +56,33 @@ const normalizeCatalog = (catalog: SkillCatalog): SkillCatalog => ({
 // shows fresh data after install/toggle/delete.
 let catalogCache: SkillCatalog | null = null;
 
+const catalogSignature = (catalog: SkillCatalog | null) => JSON.stringify(
+  catalog?.skills.map((skill) => [skill.id, skill.enabled, skill.sourcePath]) ?? [],
+);
+
 const invalidateCatalogCache = () => {
   catalogCache = null;
 };
+
+async function reloadHostSkills(): Promise<void> {
+  await sendRpc({ type: "reload_skills" });
+  window.dispatchEvent(new CustomEvent("nova-skills-changed"));
+}
 
 export async function listSkillCatalog(): Promise<SkillCatalog> {
   // listSkillCatalog backs the Skill Center, whose "刷新" button is meant to
   // re-read from disk (manifest edits, files dropped into the dir, etc.), so
   // it must bypass the cache. It refreshes the cache as a side effect.
-  try {
-    const catalog = await invoke<SkillCatalog>("list_skill_catalog");
-    catalogCache = normalizeCatalog(catalog);
-    return catalogCache;
-  } catch (error) {
-    console.warn("Failed to list skill catalog", error);
-    return { skills: [], errors: [] };
+  const catalog = await invoke<SkillCatalog>("list_skill_catalog");
+  const normalized = normalizeCatalog(catalog);
+  const changed = catalogSignature(normalized) !== catalogSignature(catalogCache);
+  catalogCache = normalized;
+  if (changed) {
+    await reloadHostSkills().catch((error) => {
+      console.warn("Skill catalog changed but host reload failed", error);
+    });
   }
+  return catalogCache;
 }
 
 export async function getSkill(skillId: string): Promise<SkillDefinition> {
@@ -84,18 +96,21 @@ export async function getSkill(skillId: string): Promise<SkillDefinition> {
 export async function setSkillEnabled(skillId: string, enabled: boolean): Promise<SkillManifest> {
   const skill = await invoke<SkillManifest>("set_skill_enabled", { skillId, enabled });
   invalidateCatalogCache();
+  await reloadHostSkills();
   return normalizeManifest(skill);
 }
 
 export async function pickAndInstallSkill(): Promise<SkillManifest> {
   const skill = await invoke<SkillManifest>("pick_and_install_skill");
   invalidateCatalogCache();
+  await reloadHostSkills();
   return normalizeManifest(skill);
 }
 
 export async function deleteUserSkill(skillId: string): Promise<void> {
   await invoke<void>("delete_user_skill", { skillId });
   invalidateCatalogCache();
+  await reloadHostSkills();
 }
 
 export async function openUserSkillDir(): Promise<string> {

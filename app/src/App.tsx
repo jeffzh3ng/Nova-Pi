@@ -667,8 +667,12 @@ export default function App() {
       else void refreshComputerAgent(false);
       clearComputerAgentSessions();
     };
+    const handleSkillsChanged = () => {
+      clearComputerAgentSessions();
+    };
     void refreshComputerAgent();
     window.addEventListener("nova-computer-agent-settings-changed", handleChanged);
+    window.addEventListener("nova-skills-changed", handleSkillsChanged);
     void listen("pi-sidecar-restarted", () => {
       conversationPiSessionRef.current = {};
       conversationPiSessionIdentityRef.current = {};
@@ -681,6 +685,7 @@ export default function App() {
       alive = false;
       unlistenRestart?.();
       window.removeEventListener("nova-computer-agent-settings-changed", handleChanged);
+      window.removeEventListener("nova-skills-changed", handleSkillsChanged);
     };
   }, []);
 

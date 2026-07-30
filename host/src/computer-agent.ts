@@ -3,6 +3,10 @@ import os from "node:os";
 import path from "node:path";
 import type { ToolDefinition } from "@earendil-works/pi-coding-agent";
 import { Type } from "typebox";
+import {
+  createSkillTools,
+  skillAuthorizationPrompt,
+} from "./skills/runtime.js";
 
 export const COMPUTER_AGENT_ID = "nova-computer-agent";
 
@@ -13,6 +17,7 @@ export type ComputerAgentSettings = {
   allowFileRead: boolean;
   allowFileWrite: boolean;
   allowCommandExecution: boolean;
+  allowSkills: boolean;
   allowComputerInfo: boolean;
   allowNovaManagement: boolean;
 };
@@ -21,6 +26,7 @@ export type ComputerAgentPermission =
   | "file_read"
   | "file_write"
   | "command_execution"
+  | "skills"
   | "computer_info"
   | "nova_management";
 
@@ -88,6 +94,7 @@ export const DEFAULT_COMPUTER_AGENT_SETTINGS: ComputerAgentSettings = {
   allowFileRead: false,
   allowFileWrite: false,
   allowCommandExecution: false,
+  allowSkills: false,
   allowComputerInfo: false,
   allowNovaManagement: false,
 };
@@ -101,6 +108,7 @@ export function normalizeComputerAgentSettings(value: unknown): ComputerAgentSet
     allowFileRead: input.allowFileRead === true,
     allowFileWrite: input.allowFileWrite === true,
     allowCommandExecution: input.allowCommandExecution === true,
+    allowSkills: input.allowSkills === true,
     allowComputerInfo: input.allowComputerInfo === true,
     allowNovaManagement: input.allowNovaManagement === true,
   };
@@ -125,6 +133,7 @@ const PERMISSION_LABELS: Record<ComputerAgentPermission, string> = {
   file_read: "读取文件",
   file_write: "修改文件与编程",
   command_execution: "执行命令",
+  skills: "使用 Skill",
   computer_info: "查看设备信息",
   nova_management: "管理 Nova",
 };
@@ -137,6 +146,7 @@ const permissionEnabled = (
     case "file_read": return settings.allowFileRead;
     case "file_write": return settings.allowFileWrite;
     case "command_execution": return settings.allowCommandExecution;
+    case "skills": return settings.allowSkills;
     case "computer_info": return settings.allowComputerInfo;
     case "nova_management": return settings.allowNovaManagement;
   }
@@ -169,6 +179,8 @@ export function detectComputerAgentPermissionBlock(
   const writeAction = /(创建|新建|写入|修改|编辑|删除|移除|移动|复制|重命名|整理|保存|生成|覆盖|create|write|modify|edit|delete|remove|move|copy|rename|save|generate)/i.test(text);
   const existingFileMutation = /(修改|编辑|删除|移除|移动|复制|重命名|整理|覆盖|modify|edit|delete|remove|move|copy|rename)/i.test(text);
   const commandAction = /(执行命令|运行命令|运行脚本|执行脚本|启动程序|停止程序|安装|卸载|编译|构建|打包|跑测试|运行测试|执行测试|powershell|cmd\b|bash\b|terminal|shell|npm\b|pnpm\b|yarn\b|cargo\b|git\b|python\b|node\b|run command|execute command|run script|build|compile|install|uninstall)/i.test(text);
+  const skillTarget = /(\bskill\b|skills\b|技能)/i.test(text);
+  const skillAction = /(使用|调用|运行|执行|启用|配置|授权|use|invoke|run|execute|enable|configure|authorize)/i.test(text);
   const computerTarget = /(电脑|本机|计算机|操作系统|系统信息|cpu|内存|磁盘|网卡|网络接口|主机名|ip地址|computer|system info|memory|disk|hostname|network interface)/i.test(text);
   const computerAction = /(查看|看看|获取|读取|显示|检查|查询|多少|配置|状态|show|get|inspect|check|status|configuration)/i.test(text);
   const novaTarget = /(nova-?pi|nova|任务|会话|对话|消息通道)/i.test(text);
@@ -177,6 +189,7 @@ export function detectComputerAgentPermissionBlock(
   if (fileTarget && (readAction || existingFileMutation)) required.push("file_read");
   if (fileTarget && writeAction) required.push("file_write");
   if (commandAction) required.push("command_execution");
+  if (skillTarget && skillAction) required.push("skills");
   if (computerTarget && computerAction) required.push("computer_info");
   if (novaTarget && novaAction) required.push("nova_management");
 
@@ -207,6 +220,7 @@ export function detectInvalidComputerToolCall(
   if (toolName && /^(?:list_files?|ls|find|grep|read(?:_file)?)$/i.test(toolName)) requestedPermissions.push("file_read");
   if (toolName && /^(?:write(?:_file)?|edit(?:_file)?|delete(?:_file)?|move(?:_file)?|copy(?:_file)?)$/i.test(toolName)) requestedPermissions.push("file_write");
   if (toolName && /^(?:bash|shell|exec|execute|run_command)$/i.test(toolName)) requestedPermissions.push("command_execution");
+  if (toolName && /^skill_(?:list|read|configure_environment|execute)$/i.test(toolName)) requestedPermissions.push("skills");
   if (toolName && /^(?:computer_info|system_info)$/i.test(toolName)) requestedPermissions.push("computer_info");
   if (toolName && /^nova_(?:status|list_tasks|manage_task)$/i.test(toolName)) requestedPermissions.push("nova_management");
   const missing = uniquePermissions(requestedPermissions)
@@ -231,13 +245,14 @@ export function computerAgentAuthorizationPrompt(settings: ComputerAgentSettings
     ["读取文件", settings.allowFileRead, "read、ls、find、grep"],
     ["修改文件与编程", settings.allowFileWrite, "edit、write"],
     ["执行命令", settings.allowCommandExecution, "bash"],
+    ["使用 Skill", settings.allowSkills, "skill_list、skill_read、skill_configure_environment、skill_execute"],
     ["查看设备信息", settings.allowComputerInfo, "computer_info"],
     ["管理 Nova", settings.allowNovaManagement, "nova_status、nova_list_tasks、nova_manage_task"],
   ];
   const lines = grants.map(([label, enabled, tools]) => (
     `- ${label}：${enabled ? `已授权（可用工具：${tools}）` : "未授权"}`
   ));
-  return `【本次会话授权】\n${lines.join("\n")}\n\n` +
+  return `【本次会话授权】\n${lines.join("\n")}\n${skillAuthorizationPrompt(settings.allowSkills)}\n\n` +
     "只能通过当前会话真实注册的结构化工具调用执行操作。列出目录使用 ls，不存在 list_files 工具。" +
     "绝不能输出 <function_calls>、<invoke> 或其他文本形式的伪工具调用；缺少权限时直接说明需要开启哪一项授权。" +
     "不得用 bash 绕过未授予的读取、修改或管理权限。";
@@ -355,6 +370,9 @@ export function createComputerAgentTools(
         },
       },
     );
+  }
+  if (settings.allowSkills) {
+    tools.push(...createSkillTools());
   }
   return tools;
 }

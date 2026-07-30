@@ -22,7 +22,12 @@ import { registerBunOAuthFlows } from "../../node_modules/@earendil-works/pi-cod
 import { SessionPool } from "./session-pool.js";
 import { initModelRuntime, getModelRuntime } from "./model-setup.js";
 import { mcpRegistry } from "./mcp/registry.js";
-import { initBaseResourceLoader, listDiscoveredSkills } from "./skills/loader.js";
+import {
+  initBaseResourceLoader,
+  listDiscoveredSkills,
+  reloadSkillResources,
+} from "./skills/loader.js";
+import { initSkillRuntime } from "./skills/runtime.js";
 import { writeResponse, writeEvent, type RpcCommand, type McpServerConfig } from "./rpc-protocol.js";
 import {
   initModelsManagerPaths,
@@ -60,6 +65,9 @@ import { normalizeFeishuConfig, type FeishuConfig } from "./feishubot/types.js";
 // ── 初始化 ───────────────────────────────────────────────────────────────────
 
 const agentDir = process.argv[2] || join(process.env.HOME || process.cwd(), ".nova-pi", "agent");
+const bundledSkillDir = process.argv[3]?.trim() || "";
+const skillStatePath = process.argv[4]?.trim() || join(agentDir, "..", "..", "skill-state.json");
+const additionalSkillPaths = bundledSkillDir ? [bundledSkillDir] : [];
 mkdirSync(agentDir, { recursive: true });
 registerBunOAuthFlows();
 
@@ -77,7 +85,8 @@ async function bootstrap(): Promise<void> {
   await initModelRuntime(agentDir);
   initModelsManagerPaths(agentDir);
   initExtensionsManagerPaths(agentDir);
-  await initBaseResourceLoader(agentDir);
+  initSkillRuntime(agentDir, additionalSkillPaths, skillStatePath);
+  await initBaseResourceLoader(agentDir, additionalSkillPaths);
   pool = new SessionPool();
   weixinBot = new WeixinBotManager(pool, agentDir);
   try {
@@ -361,6 +370,12 @@ async function handleCommand(command: RpcCommand): Promise<void> {
         return;
       }
       case "list_skills": {
+        writeResponse(id, true, listDiscoveredSkills());
+        return;
+      }
+      case "reload_skills": {
+        await reloadSkillResources();
+        await pool?.reloadSkillSessions();
         writeResponse(id, true, listDiscoveredSkills());
         return;
       }

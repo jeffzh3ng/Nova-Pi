@@ -48,6 +48,7 @@ export type RpcCommand =
   | { id?: string; type: "mcp_call"; serviceId: string; toolName: string; args: Record<string, unknown>; timeoutSecs?: number }
   // 技能
   | { id?: string; type: "list_skills" }
+  | { id?: string; type: "reload_skills" }
   | { id?: string; type: "resolve_skill"; request: string; sessionId?: string }
   // 风评：完全走 mcp_call（pi 自主调用 data-security-risk-assessment-mcp 工具），无独立 risk_* 命令。
   // 模型管理（pi models.json + ModelRuntime）

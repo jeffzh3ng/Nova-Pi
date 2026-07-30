@@ -21,6 +21,7 @@ pub struct ComputerAgentSettings {
     pub allow_file_read: bool,
     pub allow_file_write: bool,
     pub allow_command_execution: bool,
+    pub allow_skills: bool,
     pub allow_computer_info: bool,
     pub allow_nova_management: bool,
 }
@@ -46,6 +47,7 @@ pub fn default_computer_agent_settings() -> ComputerAgentSettings {
         allow_file_read: false,
         allow_file_write: false,
         allow_command_execution: false,
+        allow_skills: false,
         allow_computer_info: false,
         allow_nova_management: false,
     }
@@ -70,9 +72,9 @@ pub fn save_computer_agent_settings(
                 r#"
                 INSERT INTO computer_agent_settings (
                     id, enabled, display_name, working_directory, allow_file_read,
-                    allow_file_write, allow_command_execution, allow_computer_info,
-                    allow_nova_management, updated_at
-                ) VALUES (1, ?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)
+                    allow_file_write, allow_command_execution, allow_skills,
+                    allow_computer_info, allow_nova_management, updated_at
+                ) VALUES (1, ?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10)
                 ON CONFLICT(id) DO UPDATE SET
                     enabled = excluded.enabled,
                     display_name = excluded.display_name,
@@ -80,6 +82,7 @@ pub fn save_computer_agent_settings(
                     allow_file_read = excluded.allow_file_read,
                     allow_file_write = excluded.allow_file_write,
                     allow_command_execution = excluded.allow_command_execution,
+                    allow_skills = excluded.allow_skills,
                     allow_computer_info = excluded.allow_computer_info,
                     allow_nova_management = excluded.allow_nova_management,
                     updated_at = excluded.updated_at
@@ -91,6 +94,7 @@ pub fn save_computer_agent_settings(
                     normalized.allow_file_read as i64,
                     normalized.allow_file_write as i64,
                     normalized.allow_command_execution as i64,
+                    normalized.allow_skills as i64,
                     normalized.allow_computer_info as i64,
                     normalized.allow_nova_management as i64,
                     chrono::Local::now().format("%Y-%m-%d %H:%M:%S").to_string(),
@@ -149,6 +153,7 @@ fn initialize_db(connection: &Connection) -> Result<(), String> {
                 allow_file_read INTEGER NOT NULL DEFAULT 0,
                 allow_file_write INTEGER NOT NULL DEFAULT 0,
                 allow_command_execution INTEGER NOT NULL DEFAULT 0,
+                allow_skills INTEGER NOT NULL DEFAULT 0,
                 allow_computer_info INTEGER NOT NULL DEFAULT 0,
                 allow_nova_management INTEGER NOT NULL DEFAULT 0,
                 updated_at TEXT NOT NULL
@@ -156,6 +161,12 @@ fn initialize_db(connection: &Connection) -> Result<(), String> {
             "#,
         )
         .map_err(|error| format!("初始化智能员工设置失败：{error}"))?;
+    ensure_column(
+        connection,
+        "computer_agent_settings",
+        "allow_skills",
+        "INTEGER NOT NULL DEFAULT 0",
+    )?;
 
     let defaults = default_computer_agent_settings();
     connection
@@ -163,9 +174,9 @@ fn initialize_db(connection: &Connection) -> Result<(), String> {
             r#"
             INSERT OR IGNORE INTO computer_agent_settings (
                 id, enabled, display_name, working_directory, allow_file_read,
-                allow_file_write, allow_command_execution, allow_computer_info,
-                allow_nova_management, updated_at
-            ) VALUES (1, 0, ?1, ?2, 0, 0, 0, 0, 0, ?3)
+                allow_file_write, allow_command_execution, allow_skills,
+                allow_computer_info, allow_nova_management, updated_at
+            ) VALUES (1, 0, ?1, ?2, 0, 0, 0, 0, 0, 0, ?3)
             "#,
             params![
                 defaults.display_name,
@@ -183,13 +194,40 @@ fn initialize_db(connection: &Connection) -> Result<(), String> {
     Ok(())
 }
 
+fn ensure_column(
+    connection: &Connection,
+    table: &str,
+    column: &str,
+    definition: &str,
+) -> Result<(), String> {
+    let mut statement = connection
+        .prepare(&format!("PRAGMA table_info({table})"))
+        .map_err(|error| format!("读取智能员工设置结构失败：{error}"))?;
+    let names = statement
+        .query_map([], |row| row.get::<_, String>(1))
+        .map_err(|error| format!("读取智能员工设置字段失败：{error}"))?;
+    for name in names {
+        if name.map_err(|error| format!("读取智能员工设置字段失败：{error}"))? == column
+        {
+            return Ok(());
+        }
+    }
+    connection
+        .execute(
+            &format!("ALTER TABLE {table} ADD COLUMN {column} {definition}"),
+            [],
+        )
+        .map_err(|error| format!("升级智能员工设置失败：{error}"))?;
+    Ok(())
+}
+
 fn load_settings(connection: &Connection) -> Result<ComputerAgentSettings, String> {
     connection
         .query_row(
             r#"
             SELECT enabled, display_name, working_directory, allow_file_read,
-                   allow_file_write, allow_command_execution, allow_computer_info,
-                   allow_nova_management
+                   allow_file_write, allow_command_execution, allow_skills,
+                   allow_computer_info, allow_nova_management
               FROM computer_agent_settings
              WHERE id = 1
             "#,
@@ -202,8 +240,9 @@ fn load_settings(connection: &Connection) -> Result<ComputerAgentSettings, Strin
                     allow_file_read: row.get::<_, i64>(3)? != 0,
                     allow_file_write: row.get::<_, i64>(4)? != 0,
                     allow_command_execution: row.get::<_, i64>(5)? != 0,
-                    allow_computer_info: row.get::<_, i64>(6)? != 0,
-                    allow_nova_management: row.get::<_, i64>(7)? != 0,
+                    allow_skills: row.get::<_, i64>(6)? != 0,
+                    allow_computer_info: row.get::<_, i64>(7)? != 0,
+                    allow_nova_management: row.get::<_, i64>(8)? != 0,
                 })
             },
         )
@@ -222,6 +261,7 @@ mod tests {
         assert!(!settings.allow_file_read);
         assert!(!settings.allow_file_write);
         assert!(!settings.allow_command_execution);
+        assert!(!settings.allow_skills);
         assert!(!settings.allow_computer_info);
         assert!(!settings.allow_nova_management);
     }
@@ -261,5 +301,6 @@ mod tests {
         assert!(loaded.allow_file_read);
         assert!(loaded.allow_nova_management);
         assert!(!loaded.allow_command_execution);
+        assert!(!loaded.allow_skills);
     }
 }

@@ -3,7 +3,7 @@ use serde_json::Value;
 use std::collections::{BTreeMap, HashSet};
 use std::ffi::OsStr;
 use std::fs;
-use std::io::Read;
+use std::io::{self, Read};
 use std::path::{Component, Path, PathBuf};
 use std::process::Stdio;
 use std::sync::{Mutex, OnceLock};
@@ -13,6 +13,8 @@ use tauri::{AppHandle, Manager};
 const MAX_SKILL_ENTRY_BYTES: u64 = 128 * 1024;
 const MAX_SKILL_MANIFEST_BYTES: u64 = 64 * 1024;
 const MAX_SKILL_INSTALL_BYTES: u64 = 20 * 1024 * 1024;
+const MAX_SKILL_ARCHIVE_ENTRIES: usize = 2_048;
+const MAX_SKILL_ARCHIVE_PATH_BYTES: usize = 512;
 const MAX_SKILL_ZIP_SEARCH_DEPTH: usize = 4;
 const MAX_SKILL_EXECUTION_INPUT_BYTES: usize = 512 * 1024;
 const SKILL_EXECUTION_TIMEOUT: Duration = Duration::from_secs(90);
@@ -100,6 +102,15 @@ pub struct SkillExecutionResult {
 struct SkillRegistryState {
     #[serde(default)]
     disabled_skill_ids: Vec<String>,
+}
+
+#[derive(Debug, Default, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct SkillPackageMetadata {
+    #[serde(default)]
+    slug: Option<String>,
+    #[serde(default)]
+    version: Option<String>,
 }
 
 fn default_entry() -> String {
@@ -389,10 +400,74 @@ fn skill_roots(app: &AppHandle) -> Vec<(String, PathBuf)> {
 }
 
 fn user_skill_root(app: &AppHandle) -> Result<PathBuf, String> {
-    app.path()
+    let data_dir = app
+        .path()
         .app_data_dir()
-        .map(|data_dir| data_dir.join("skills"))
-        .map_err(|error| format!("failed to resolve app data dir: {error}"))
+        .map_err(|error| format!("failed to resolve app data dir: {error}"))?;
+    let root = data_dir.join(".pi").join("agent").join("skills");
+    migrate_legacy_user_skills(&data_dir, &root)?;
+    Ok(root)
+}
+
+/// Before Skill execution was connected to pi, imports were written to
+/// `<app-data>/skills` while pi only watched `<app-data>/.pi/agent/skills`.
+/// Move legacy entries one-by-one into the actual pi directory. Existing
+/// targets always win, so migration never overwrites a newer installation.
+fn migrate_legacy_user_skills(data_dir: &Path, target_root: &Path) -> Result<(), String> {
+    fs::create_dir_all(target_root).map_err(|error| {
+        format!(
+            "failed to create skill root {}: {error}",
+            target_root.display()
+        )
+    })?;
+    let legacy_root = data_dir.join("skills");
+    if legacy_root.is_dir() && legacy_root != target_root {
+        let entries = fs::read_dir(&legacy_root).map_err(|error| {
+            format!(
+                "failed to read legacy skill root {}: {error}",
+                legacy_root.display()
+            )
+        })?;
+        for entry in entries {
+            let entry =
+                entry.map_err(|error| format!("failed to read legacy skill entry: {error}"))?;
+            let source = entry.path();
+            if !source.is_dir() || should_skip_skill_name(&entry.file_name()) {
+                continue;
+            }
+            let target = target_root.join(entry.file_name());
+            if target.exists() {
+                continue;
+            }
+            fs::rename(&source, &target).map_err(|error| {
+                format!(
+                    "failed to migrate legacy Skill {} to {}: {error}",
+                    source.display(),
+                    target.display()
+                )
+            })?;
+        }
+
+        if fs::read_dir(&legacy_root)
+            .map(|mut entries| entries.next().is_none())
+            .unwrap_or(false)
+        {
+            let _ = fs::remove_dir(&legacy_root);
+        }
+    }
+    for entry in fs::read_dir(target_root).map_err(|error| {
+        format!(
+            "failed to read skill root {}: {error}",
+            target_root.display()
+        )
+    })? {
+        let entry =
+            entry.map_err(|error| format!("failed to read installed Skill entry: {error}"))?;
+        if entry.path().is_dir() {
+            normalize_skill_entry_for_pi(&entry.path())?;
+        }
+    }
+    Ok(())
 }
 
 fn skill_state_path(app: &AppHandle) -> Result<PathBuf, String> {
@@ -478,8 +553,29 @@ fn load_manifest_from_dir(skill_dir: &Path, source: &str) -> Result<Option<Skill
             .ok_or_else(|| format!("SKILL.md is missing frontmatter: {}", entry_path.display()))?
     };
 
+    if let Some(metadata) = load_skill_package_metadata(skill_dir)? {
+        if let Some(package_version) = metadata.version.filter(|value| !value.trim().is_empty()) {
+            manifest.version = Some(package_version);
+        }
+        if manifest.id.trim().is_empty() {
+            manifest.id = metadata.slug.unwrap_or_default();
+        }
+    }
     finalize_manifest(skill_dir, source, &mut manifest)?;
     Ok(Some(manifest))
+}
+
+fn load_skill_package_metadata(skill_dir: &Path) -> Result<Option<SkillPackageMetadata>, String> {
+    let path = skill_dir.join("_meta.json");
+    if !path.is_file() {
+        return Ok(None);
+    }
+    ensure_file_size(&path, MAX_SKILL_MANIFEST_BYTES)?;
+    let raw = fs::read_to_string(&path)
+        .map_err(|error| format!("failed to read {}: {error}", path.display()))?;
+    serde_json::from_str(&raw)
+        .map(Some)
+        .map_err(|error| format!("failed to parse {}: {error}", path.display()))
 }
 
 fn load_manifest_from_skill_md(entry_path: &Path) -> Result<Option<SkillManifest>, String> {
@@ -500,6 +596,12 @@ fn load_manifest_from_skill_md(entry_path: &Path) -> Result<Option<SkillManifest
         .iter()
         .find(|(key, _)| key == "description")
         .map(|(_, value)| value.trim().to_string())
+        .or_else(|| {
+            fields
+                .iter()
+                .find(|(key, _)| key == "summary")
+                .map(|(_, value)| value.trim().to_string())
+        })
         .unwrap_or_default();
     if name.is_empty() || description.is_empty() {
         return Err(format!(
@@ -525,7 +627,7 @@ fn load_manifest_from_skill_md(entry_path: &Path) -> Result<Option<SkillManifest
     // asking the author to add an `id` field instead of failing opaquely.
     let explicit_id = fields
         .iter()
-        .find(|(key, _)| key == "id")
+        .find(|(key, _)| key == "id" || key == "slug")
         .map(|(_, value)| value.trim().to_string())
         .filter(|value| !value.is_empty());
     let id = explicit_id
@@ -546,7 +648,7 @@ fn load_manifest_from_skill_md(entry_path: &Path) -> Result<Option<SkillManifest
         id,
         name: fields
             .iter()
-            .find(|(key, _)| key == "title")
+            .find(|(key, _)| key == "title" || key == "displayname")
             .map(|(_, value)| value.trim().to_string())
             .filter(|value| !value.is_empty())
             .unwrap_or_else(|| name.clone()),
@@ -609,8 +711,21 @@ fn finalize_manifest(
 fn extract_skill_frontmatter(raw: &str) -> Option<String> {
     let raw = raw.strip_prefix('\u{feff}').unwrap_or(raw);
     let mut lines = raw.lines();
-    let first = lines.next()?;
-    if first.trim() != "---" {
+    // Most Agent Skills start with `---`. Some registries prepend a few
+    // package fields (for example `version:"1.0.0"`) before the canonical
+    // frontmatter. Accept that legacy form during import so it can be
+    // normalized on disk for pi after installation.
+    let mut found_opening = false;
+    for (index, line) in lines.by_ref().enumerate() {
+        if line.trim() == "---" {
+            found_opening = true;
+            break;
+        }
+        if index >= 15 || (!line.trim().is_empty() && !line.contains(':')) {
+            return None;
+        }
+    }
+    if !found_opening {
         return None;
     }
     let mut frontmatter = Vec::new();
@@ -1391,54 +1506,107 @@ fn create_skill_extract_dir() -> Result<PathBuf, String> {
 fn extract_skill_zip(zip_path: &Path, target: &Path) -> Result<(), String> {
     fs::create_dir_all(target)
         .map_err(|error| format!("failed to create {}: {error}", target.display()))?;
-
-    let output = run_zip_extract_command(zip_path, target)?;
-    if !output.status.success() {
+    let target = target
+        .canonicalize()
+        .map_err(|error| format!("failed to resolve {}: {error}", target.display()))?;
+    let archive_file = fs::File::open(zip_path)
+        .map_err(|error| format!("failed to open zip package {}: {error}", zip_path.display()))?;
+    let mut archive = zip::ZipArchive::new(archive_file)
+        .map_err(|error| format!("invalid zip package {}: {error}", zip_path.display()))?;
+    if archive.len() > MAX_SKILL_ARCHIVE_ENTRIES {
         return Err(format!(
-            "failed to extract zip package {}: {}",
-            zip_path.display(),
-            command_output_text(&output)
+            "skill package contains too many entries ({}; limit {})",
+            archive.len(),
+            MAX_SKILL_ARCHIVE_ENTRIES
         ));
     }
 
-    validate_extracted_skill_tree(target)
+    let mut total_bytes = 0_u64;
+    for index in 0..archive.len() {
+        let mut entry = archive
+            .by_index(index)
+            .map_err(|error| format!("failed to read zip entry {index}: {error}"))?;
+        let enclosed = entry
+            .enclosed_name()
+            .ok_or_else(|| format!("unsafe path in zip package: {}", entry.name()))?
+            .to_path_buf();
+        if enclosed.as_os_str().len() > MAX_SKILL_ARCHIVE_PATH_BYTES {
+            return Err(format!("zip entry path is too long: {}", entry.name()));
+        }
+        if should_skip_archive_path(&enclosed) {
+            continue;
+        }
+        if let Some(mode) = entry.unix_mode() {
+            let file_kind = mode & 0o170000;
+            if file_kind == 0o120000 {
+                return Err(format!(
+                    "symlinks are not allowed in skills: {}",
+                    entry.name()
+                ));
+            }
+            if file_kind != 0 && file_kind != 0o040000 && file_kind != 0o100000 {
+                return Err(format!(
+                    "special files are not allowed in skills: {}",
+                    entry.name()
+                ));
+            }
+        }
+
+        let output_path = target.join(&enclosed);
+        if entry.is_dir() {
+            fs::create_dir_all(&output_path)
+                .map_err(|error| format!("failed to create {}: {error}", output_path.display()))?;
+            continue;
+        }
+
+        let remaining = MAX_SKILL_INSTALL_BYTES.saturating_sub(total_bytes);
+        if entry.size() > remaining {
+            return Err(format!(
+                "skill package is too large after extraction (limit {} bytes)",
+                MAX_SKILL_INSTALL_BYTES
+            ));
+        }
+        let entry_name = entry.name().to_string();
+        let parent = output_path
+            .parent()
+            .ok_or_else(|| format!("zip entry has no parent: {entry_name}"))?;
+        fs::create_dir_all(parent)
+            .map_err(|error| format!("failed to create {}: {error}", parent.display()))?;
+        let canonical_parent = parent
+            .canonicalize()
+            .map_err(|error| format!("failed to resolve {}: {error}", parent.display()))?;
+        if !canonical_parent.starts_with(&target) {
+            return Err(format!(
+                "zip entry leaves the temporary directory: {}",
+                entry.name()
+            ));
+        }
+        let mut output = fs::File::create(&output_path)
+            .map_err(|error| format!("failed to create {}: {error}", output_path.display()))?;
+        // Do not trust the ZIP header's uncompressed size. A malformed archive
+        // may declare a small value and still yield more data while decoding.
+        let copied = io::copy(
+            &mut (&mut entry).take(remaining.saturating_add(1)),
+            &mut output,
+        )
+        .map_err(|error| format!("failed to extract {entry_name}: {error}"))?;
+        if copied > remaining {
+            return Err(format!(
+                "skill package is too large after extraction (limit {} bytes)",
+                MAX_SKILL_INSTALL_BYTES
+            ));
+        }
+        total_bytes = total_bytes.saturating_add(copied);
+    }
+
+    validate_extracted_skill_tree(&target)
 }
 
-#[cfg(target_os = "windows")]
-fn run_zip_extract_command(zip_path: &Path, target: &Path) -> Result<std::process::Output, String> {
-    std::process::Command::new("powershell")
-        .env("NOVA_SKILL_ZIP_PATH", zip_path)
-        .env("NOVA_SKILL_EXTRACT_DIR", target)
-        .arg("-NoProfile")
-        .arg("-NonInteractive")
-        .arg("-ExecutionPolicy")
-        .arg("Bypass")
-        .arg("-Command")
-        .arg("Expand-Archive -LiteralPath $env:NOVA_SKILL_ZIP_PATH -DestinationPath $env:NOVA_SKILL_EXTRACT_DIR -Force")
-        .output()
-        .map_err(|error| format!("failed to start PowerShell zip extractor: {error}"))
-}
-
-#[cfg(target_os = "macos")]
-fn run_zip_extract_command(zip_path: &Path, target: &Path) -> Result<std::process::Output, String> {
-    std::process::Command::new("ditto")
-        .arg("-x")
-        .arg("-k")
-        .arg(zip_path)
-        .arg(target)
-        .output()
-        .map_err(|error| format!("failed to start ditto zip extractor: {error}"))
-}
-
-#[cfg(target_os = "linux")]
-fn run_zip_extract_command(zip_path: &Path, target: &Path) -> Result<std::process::Output, String> {
-    std::process::Command::new("unzip")
-        .arg("-q")
-        .arg(zip_path)
-        .arg("-d")
-        .arg(target)
-        .output()
-        .map_err(|error| format!("failed to start unzip extractor: {error}"))
+fn should_skip_archive_path(path: &Path) -> bool {
+    path.components().any(|component| match component {
+        Component::Normal(name) => should_skip_skill_name(name),
+        _ => false,
+    })
 }
 
 fn command_output_text(output: &std::process::Output) -> String {
@@ -1524,7 +1692,7 @@ fn find_extracted_skill_dir(root: &Path) -> Result<PathBuf, String> {
     candidates.dedup();
 
     match candidates.len() {
-        0 => Err("skill.json was not found in the zip package".to_string()),
+        0 => Err("SKILL.md or skill.json was not found in the zip package".to_string()),
         1 => Ok(candidates.remove(0)),
         _ => Err(
             "zip package contains multiple Skill manifests; package one Skill at a time"
@@ -1580,31 +1748,157 @@ fn install_skill_from_source(app: &AppHandle, source_path: &Path) -> Result<Skil
     }
 
     let Some(manifest) = load_manifest_from_dir(&source, "import")? else {
-        return Err(format!("skill.json was not found in {}", source.display()));
+        return Err(format!(
+            "SKILL.md or skill.json was not found in {}",
+            source.display()
+        ));
     };
-    if find_skill_manifest(app, &manifest.id)?.is_some() {
-        return Err(format!("skill id already exists: {}", manifest.id));
+
+    for (existing_source, existing_root) in skill_roots(app) {
+        if existing_source == "user" || !existing_root.is_dir() {
+            continue;
+        }
+        if find_skill_dir_in_root(&existing_root, &manifest.id, &existing_source)?.is_some() {
+            return Err(format!(
+                "Skill {} conflicts with an installed built-in Skill and cannot replace it",
+                manifest.id
+            ));
+        }
     }
 
     let root = user_skill_root(app)?;
     fs::create_dir_all(&root)
         .map_err(|error| format!("failed to create skill root {}: {error}", root.display()))?;
     let target = root.join(&manifest.id);
-    if target.exists() {
+    let staging = unique_install_sibling(&root, &manifest.id, "installing")?;
+    let mut total_bytes = 0_u64;
+    let prepared = (|| {
+        copy_skill_dir(&source, &staging, &mut total_bytes)?;
+        normalize_skill_entry_for_pi(&staging)?;
+        load_manifest_from_dir(&staging, "user")?
+            .ok_or_else(|| format!("installed skill is invalid: {}", staging.display()))
+    })();
+    if let Err(error) = prepared {
+        let _ = fs::remove_dir_all(&staging);
+        return Err(error);
+    }
+
+    let backup = if target.exists() {
+        if !target.is_dir() {
+            let _ = fs::remove_dir_all(&staging);
+            return Err(format!(
+                "target Skill path exists and is not a directory: {}",
+                target.display()
+            ));
+        }
+        let backup = unique_install_sibling(&root, &manifest.id, "backup")?;
+        fs::rename(&target, &backup).map_err(|error| {
+            let _ = fs::remove_dir_all(&staging);
+            format!(
+                "failed to prepare Skill update {}: {error}",
+                target.display()
+            )
+        })?;
+        Some(backup)
+    } else {
+        None
+    };
+
+    if let Err(error) = fs::rename(&staging, &target) {
+        if let Some(backup) = &backup {
+            let _ = fs::rename(backup, &target);
+        }
+        let _ = fs::remove_dir_all(&staging);
         return Err(format!(
-            "target skill directory already exists: {}",
+            "failed to activate installed Skill {}: {error}",
             target.display()
         ));
     }
-
-    let mut total_bytes = 0_u64;
-    copy_skill_dir(&source, &target, &mut total_bytes)?;
+    if let Some(backup) = backup {
+        if let Err(error) = fs::remove_dir_all(&backup) {
+            eprintln!(
+                "Skill update succeeded but old backup could not be removed {}: {error}",
+                backup.display()
+            );
+        }
+    }
 
     let mut installed = load_manifest_from_dir(&target, "user")?
         .ok_or_else(|| format!("installed skill is invalid: {}", target.display()))?;
     let state = load_skill_state(app)?;
     apply_skill_state(&mut installed, &state);
     Ok(installed)
+}
+
+fn unique_install_sibling(root: &Path, skill_id: &str, label: &str) -> Result<PathBuf, String> {
+    for attempt in 0..100 {
+        let candidate = root.join(format!(
+            ".{skill_id}.{label}.{}-{}-{attempt}",
+            std::process::id(),
+            timestamp_text()
+        ));
+        if !candidate.exists() {
+            return Ok(candidate);
+        }
+    }
+    Err(format!(
+        "failed to allocate a temporary Skill directory under {}",
+        root.display()
+    ))
+}
+
+/// pi follows the Agent Skills format strictly and expects `---` on the first
+/// line. A few public registries prepend package fields before that marker.
+/// Move those scalar fields into the frontmatter in the installed copy so the
+/// package remains compatible without mutating the user's source archive.
+fn normalize_skill_entry_for_pi(skill_dir: &Path) -> Result<(), String> {
+    let entry = skill_dir.join("SKILL.md");
+    if !entry.is_file() {
+        return Ok(());
+    }
+    ensure_file_size(&entry, MAX_SKILL_ENTRY_BYTES)?;
+    let raw = fs::read_to_string(&entry)
+        .map_err(|error| format!("failed to read {}: {error}", entry.display()))?;
+    let without_bom = raw.strip_prefix('\u{feff}').unwrap_or(&raw);
+    if without_bom.starts_with("---") {
+        if without_bom.len() != raw.len() {
+            fs::write(&entry, without_bom)
+                .map_err(|error| format!("failed to normalize {}: {error}", entry.display()))?;
+        }
+        return Ok(());
+    }
+
+    let lines: Vec<&str> = without_bom.lines().collect();
+    let Some(opening) = lines.iter().position(|line| line.trim() == "---") else {
+        return Ok(());
+    };
+    if opening > 16
+        || lines[..opening]
+            .iter()
+            .any(|line| !line.trim().is_empty() && !line.contains(':'))
+    {
+        return Ok(());
+    }
+    let Some(relative_closing) = lines[opening + 1..]
+        .iter()
+        .position(|line| line.trim() == "---")
+    else {
+        return Ok(());
+    };
+    let closing = opening + 1 + relative_closing;
+    let mut normalized = Vec::with_capacity(lines.len() + 1);
+    normalized.push("---");
+    normalized.extend(
+        lines[..opening]
+            .iter()
+            .copied()
+            .filter(|line| !line.trim().is_empty()),
+    );
+    normalized.extend(lines[opening + 1..closing].iter().copied());
+    normalized.push("---");
+    normalized.extend(lines[closing + 1..].iter().copied());
+    fs::write(&entry, format!("{}\n", normalized.join("\n")))
+        .map_err(|error| format!("failed to normalize {}: {error}", entry.display()))
 }
 
 fn should_skip_skill_name(name: &OsStr) -> bool {
@@ -1827,6 +2121,44 @@ description: >
         assert_eq!(manifest.id, "folded-skill");
         assert!(manifest.description.contains("公文排版"));
         assert!(manifest.triggers.iter().any(|term| term == "红头文件"));
+
+        fs::remove_dir_all(root).expect("test dir should be removed");
+    }
+
+    #[test]
+    fn registry_metadata_and_legacy_preamble_are_normalized_for_pi() {
+        let root = create_test_dir("registry-package");
+        fs::write(
+            root.join("SKILL.md"),
+            r#"version:"1.0.0"
+author:test-author
+---
+name: weather
+description: Get weather forecasts.
+---
+
+# Weather
+"#,
+        )
+        .expect("skill entry should be written");
+        fs::write(
+            root.join("_meta.json"),
+            r#"{"slug":"weather-plus-plus","version":"1.0.1"}"#,
+        )
+        .expect("registry metadata should be written");
+
+        let manifest = load_manifest_from_dir(&root, "import")
+            .expect("registry package should parse")
+            .expect("manifest should exist");
+        assert_eq!(manifest.id, "weather");
+        assert_eq!(manifest.version.as_deref(), Some("1.0.1"));
+
+        normalize_skill_entry_for_pi(&root).expect("entry should normalize");
+        let normalized = fs::read_to_string(root.join("SKILL.md")).expect("normalized entry");
+        assert!(normalized.starts_with("---\nversion:\"1.0.0\"\nauthor:test-author\n"));
+        assert!(load_manifest_from_dir(&root, "import")
+            .expect("normalized package should parse")
+            .is_some());
 
         fs::remove_dir_all(root).expect("test dir should be removed");
     }

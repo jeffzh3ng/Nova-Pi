@@ -31,11 +31,21 @@ test("computer agent maps each authorization to the intended pi tools", () => {
     allowFileRead: true,
     allowFileWrite: true,
     allowCommandExecution: true,
+    allowSkills: true,
     allowComputerInfo: true,
     allowNovaManagement: true,
   });
   assert.deepEqual(builtInToolNamesForSettings(settings), ["read", "grep", "find", "ls", "bash", "edit", "write"]);
-  assert.deepEqual(customToolNamesForSettings(settings), ["computer_info", "nova_status", "nova_list_tasks", "nova_manage_task"]);
+  assert.deepEqual(customToolNamesForSettings(settings), [
+    "computer_info",
+    "nova_status",
+    "nova_list_tasks",
+    "nova_manage_task",
+    "skill_list",
+    "skill_read",
+    "skill_configure_environment",
+    "skill_execute",
+  ]);
 });
 
 test("normalizing settings never grants omitted permissions", () => {
@@ -44,6 +54,7 @@ test("normalizing settings never grants omitted permissions", () => {
   assert.equal(settings.allowFileRead, false);
   assert.equal(settings.allowFileWrite, false);
   assert.equal(settings.allowCommandExecution, false);
+  assert.equal(settings.allowSkills, false);
   assert.equal(settings.allowComputerInfo, false);
   assert.equal(settings.allowNovaManagement, false);
 });
@@ -60,6 +71,10 @@ test("computer operation preflight blocks only missing high-confidence permissio
 
   const normalQuestion = detectComputerAgentPermissionBlock("解释一下零信任的基本概念", settings);
   assert.equal(normalQuestion, null);
+  assert.deepEqual(
+    detectComputerAgentPermissionBlock("请调用 Skill 完成任务", settings)?.permissions,
+    ["skills"],
+  );
 
   const readable = normalizeComputerAgentSettings({
     enabled: true,

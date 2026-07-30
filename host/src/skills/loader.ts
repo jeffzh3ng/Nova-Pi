@@ -13,19 +13,34 @@
 
 import {
   DefaultResourceLoader,
+  type Skill,
   type ResourceLoader,
 } from "@earendil-works/pi-coding-agent";
 import { createMcpExtension } from "../mcp/extension.js";
+import {
+  filterEnabledSkills,
+  formatSkillInventoryForPrompt,
+} from "./runtime.js";
 
 let baseLoader: ResourceLoader | null = null;
 let configuredAgentDir: string | null = null;
+let configuredAdditionalSkillPaths: string[] = [];
 
 /** 初始化基础 ResourceLoader（在 agentDir 下发现 skills/extensions/prompts）。 */
-export async function initBaseResourceLoader(agentDir: string): Promise<ResourceLoader> {
+export async function initBaseResourceLoader(
+  agentDir: string,
+  additionalSkillPaths: string[] = [],
+): Promise<ResourceLoader> {
   configuredAgentDir = agentDir;
+  configuredAdditionalSkillPaths = additionalSkillPaths;
   baseLoader = new DefaultResourceLoader({
     cwd: process.cwd(),
     agentDir,
+    additionalSkillPaths,
+    skillsOverride: (current) => ({
+      ...current,
+      skills: filterEnabledSkills(current.skills),
+    }),
   });
   await baseLoader.reload();
   return baseLoader;
@@ -44,18 +59,33 @@ export async function createSessionResourceLoader(
   humanSystemPrompt: string,
   allowedMcpServices: string[],
   cwd = process.cwd(),
+  allowSkills = false,
 ): Promise<ResourceLoader> {
   if (!configuredAgentDir) {
     throw new Error("技能加载器尚未初始化。");
   }
+  let enabledSkills: Skill[] = [];
   const loader = new DefaultResourceLoader({
     cwd,
     agentDir: configuredAgentDir,
+    additionalSkillPaths: configuredAdditionalSkillPaths,
     systemPromptOverride: () => humanSystemPrompt,
+    skillsOverride: (current) => {
+      enabledSkills = allowSkills ? filterEnabledSkills(current.skills) : [];
+      return { ...current, skills: enabledSkills };
+    },
+    appendSystemPromptOverride: (current) => {
+      const inventory = allowSkills ? formatSkillInventoryForPrompt(enabledSkills) : "";
+      return inventory ? [...current, inventory] : current;
+    },
     extensionFactories: allowedMcpServices.length > 0 ? [createMcpExtension(allowedMcpServices)] : [],
   });
   await loader.reload();
   return loader;
+}
+
+export async function reloadSkillResources(): Promise<void> {
+  await baseLoader?.reload();
 }
 
 /** 列出已发现的 skills（供 list_skills RPC 返回给前端的 Skill Center）。 */

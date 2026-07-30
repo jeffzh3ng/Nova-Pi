@@ -10,6 +10,7 @@ export type ComputerAgentSettings = {
   allowFileRead: boolean;
   allowFileWrite: boolean;
   allowCommandExecution: boolean;
+  allowSkills: boolean;
   allowComputerInfo: boolean;
   allowNovaManagement: boolean;
 };

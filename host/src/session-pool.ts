@@ -230,6 +230,7 @@ export class SessionPool {
       systemPromptWithHistory,
       human.allowedMcpServices,
       computerSetup.cwd,
+      computerSetup.allowSkills,
     );
 
     const sessionId = `pi-${params.conversationId}-${Date.now().toString(36)}`;
@@ -314,6 +315,7 @@ export class SessionPool {
       systemPromptWithHistory,
       human.allowedMcpServices,
       computerSetup.cwd,
+      computerSetup.allowSkills,
     );
 
     const sessionId = `bg-${params.conversationId}-${Date.now().toString(36)}`;
@@ -430,6 +432,17 @@ export class SessionPool {
     entry.lastActivityAt = Date.now();
   }
 
+  async reloadSkillSessions(): Promise<void> {
+    const sessionIds = [...this.sessions.values()]
+      .filter((entry) => entry.humanId === COMPUTER_AGENT_ID)
+      .map((entry) => entry.sessionId);
+    for (const sessionId of sessionIds) {
+      const entry = this.sessions.get(sessionId);
+      if (entry?.status === "running") await entry.session.abort().catch(() => {});
+      await this.dispose(sessionId);
+    }
+  }
+
   /** 销毁会话（切换/删除 conversation 时调用）。 */
   async dispose(sessionId: string): Promise<void> {
     const entry = this.sessions.get(sessionId);
@@ -453,12 +466,13 @@ export class SessionPool {
   private async computerAgentSetup(humanId: string, conversationId: string): Promise<{
     isComputerAgent: boolean;
     cwd: string;
+    allowSkills: boolean;
     tools?: string[];
     customTools?: ToolDefinition[];
     authorizationPrompt?: string;
   }> {
     if (humanId !== COMPUTER_AGENT_ID) {
-      return { isComputerAgent: false, cwd: process.cwd() };
+      return { isComputerAgent: false, cwd: process.cwd(), allowSkills: false };
     }
     const settings = this.computerAgentSettings;
     if (!settings.enabled) {
@@ -473,6 +487,7 @@ export class SessionPool {
     return {
       isComputerAgent: true,
       cwd: settings.workingDirectory,
+      allowSkills: settings.allowSkills,
       tools: [...builtInToolNamesForSettings(settings), ...customToolNamesForSettings(settings)],
       customTools,
       authorizationPrompt: computerAgentAuthorizationPrompt(settings),
@@ -664,12 +679,23 @@ export class SessionPool {
     }
     // 透传 pi 事件的核心子集；前端按 sessionId→conversationId 映射后更新 ChatMessage。
     // 不同事件类型携带的字段不同，这里统一加 sessionId 后转发。
-    const payload = { ...event, sessionId } as Record<string, unknown>;
+    const sanitizedEvent = this.sanitizeSensitiveToolEvent(event);
+    const payload = { ...sanitizedEvent, sessionId } as Record<string, unknown>;
     // agent_end 时聚合 usage 上报（token 统计）
     if (event.type === "agent_end" && conversationId) {
       this.emitUsageFromAgentEnd(sessionId, event, entry.humanId);
     }
     writeEvent(payload as Parameters<typeof writeEvent>[0]);
+  }
+
+  private sanitizeSensitiveToolEvent(event: AgentSessionEvent): AgentSessionEvent {
+    if (event.type !== "tool_execution_start" || event.toolName !== "skill_configure_environment") {
+      return event;
+    }
+    const args = event.args && typeof event.args === "object"
+      ? { ...(event.args as Record<string, unknown>), value: "[REDACTED]" }
+      : event.args;
+    return { ...event, args } as AgentSessionEvent;
   }
 
   private emitUsageFromAgentEnd(sessionId: string, event: AgentSessionEvent, humanId?: string): void {

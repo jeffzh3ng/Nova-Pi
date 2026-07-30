@@ -111,7 +111,7 @@ function SkillErrors({ errors }: { errors: SkillLoadError[] }) {
         <CircleOff size={20} />
         <div>
           <h2>无效 SKILL 包</h2>
-          <p>这些目录包含无法加载的 Skill。修复 skill.json 或 SKILL.md 后刷新。</p>
+          <p>这些目录包含无法加载的 Skill。修复标准 SKILL.md（可选 skill.json）后刷新。</p>
         </div>
       </div>
       <div className="skill-error-list">
@@ -303,7 +303,7 @@ export function SkillCenterPanel() {
               <div className="skill-empty">
                 <CircleOff size={20} />
                 <span>暂无 SKILL</span>
-                <small>把 skill.json 和 SKILL.md 放入 skills/&lt;id&gt;/ 后刷新。</small>
+                <small>导入标准 Skill ZIP，或把含 SKILL.md 的目录放入用户 Skill 目录后刷新。</small>
               </div>
             )}
           </div>
