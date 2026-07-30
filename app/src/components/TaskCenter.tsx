@@ -2,15 +2,18 @@ import { useEffect, useMemo, useRef, useState } from "react";
 import type { KeyboardEvent as ReactKeyboardEvent, MouseEvent as ReactMouseEvent } from "react";
 import {
   Archive,
+  ArrowUpDown,
   CheckCircle2,
   CirclePause,
   CirclePlay,
+  ListFilter,
   MoreHorizontal,
   Pencil,
   Search,
   ShieldCheck,
   ShieldX,
   Trash2,
+  X,
   XCircle,
 } from "lucide-react";
 import type { DigitalHuman, RecentTask } from "../types";
@@ -76,8 +79,12 @@ export function TaskCenter({
   const [query, setQuery] = useState("");
   const [sort, setSort] = useState<TaskSort>("recent");
   const [agentFilter, setAgentFilter] = useState<string>("all");
+  const [filterOpen, setFilterOpen] = useState(false);
+  const [draftFilter, setDraftFilter] = useState<TaskFilter>("all");
+  const [draftAgentFilter, setDraftAgentFilter] = useState<string>("all");
   const [menuTaskId, setMenuTaskId] = useState<string>();
   const menuRef = useRef<HTMLDivElement>(null);
+  const filterRef = useRef<HTMLDivElement>(null);
 
   useEffect(() => {
     if (!menuTaskId) return;
@@ -87,6 +94,22 @@ export function TaskCenter({
     window.addEventListener("pointerdown", close);
     return () => window.removeEventListener("pointerdown", close);
   }, [menuTaskId]);
+
+  useEffect(() => {
+    if (!filterOpen) return;
+    const close = (event: MouseEvent) => {
+      if (!filterRef.current?.contains(event.target as Node)) setFilterOpen(false);
+    };
+    const closeOnEscape = (event: KeyboardEvent) => {
+      if (event.key === "Escape") setFilterOpen(false);
+    };
+    window.addEventListener("pointerdown", close);
+    window.addEventListener("keydown", closeOnEscape);
+    return () => {
+      window.removeEventListener("pointerdown", close);
+      window.removeEventListener("keydown", closeOnEscape);
+    };
+  }, [filterOpen]);
 
   const counts = useMemo(
     () => ({
@@ -160,13 +183,34 @@ export function TaskCenter({
     ].filter((group) => group.tasks.length > 0);
   }, [visibleTasks]);
 
-  const filters: Array<{ id: TaskFilter; label: string }> = [
+  const filterOptions: Array<{ id: TaskFilter; label: string }> = [
     { id: "all", label: "全部" },
     { id: "running", label: "进行中" },
     { id: "done", label: "已完成" },
     { id: "paused", label: "已暂停" },
   ];
-  if (counts.canceled > 0) filters.push({ id: "canceled", label: "已取消" });
+  if (counts.canceled > 0) filterOptions.push({ id: "canceled", label: "已取消" });
+  const primaryFilters = filterOptions.filter((item) => ["all", "running", "done"].includes(item.id));
+  const selectedAgent = agentOptions.find((option) => option.id === agentFilter);
+  const hasSecondaryStatus = filter === "paused" || filter === "canceled";
+  const activeFilterCount = Number(hasSecondaryStatus) + Number(agentFilter !== "all");
+
+  const openFilters = () => {
+    setDraftFilter(filter);
+    setDraftAgentFilter(agentFilter);
+    setFilterOpen(true);
+  };
+
+  const applyFilters = () => {
+    setFilter(draftFilter);
+    setAgentFilter(draftAgentFilter);
+    setFilterOpen(false);
+  };
+
+  const clearExtraFilters = () => {
+    setFilter("all");
+    setAgentFilter("all");
+  };
 
   const openTask = (task: RecentTask) => {
     setMenuTaskId(undefined);
@@ -198,7 +242,7 @@ export function TaskCenter({
         <div>
           <p>任务管理</p>
           <h1>任务中心</h1>
-          <span>集中查看任务进度，继续处理已有任务。</span>
+          <span>集中查看任务进度，继续处理已有任务。<b>共 {tasks.length} 个任务</b></span>
         </div>
         <div className={`task-center-mcp ${mcpConnectedCount > 0 ? "connected" : ""}`}>
           {mcpConnectedCount > 0 ? <ShieldCheck size={16} /> : <ShieldX size={16} />}
@@ -206,51 +250,128 @@ export function TaskCenter({
         </div>
       </header>
 
-      <div className="task-center-toolbar">
-        <div className="task-filter-group" aria-label="按状态筛选">
-          {filters.map((item) => (
-            <button
-              type="button"
-              key={item.id}
-              className={filter === item.id ? "active" : ""}
-              aria-pressed={filter === item.id}
-              onClick={() => setFilter(item.id)}
-            >
-              {item.label} <strong>{counts[item.id]}</strong>
-            </button>
-          ))}
+      <div className="task-center-controls">
+        <div className="task-center-toolbar">
+          <div className="task-filter-group" aria-label="按状态筛选">
+            {primaryFilters.map((item) => (
+              <button
+                type="button"
+                key={item.id}
+                className={filter === item.id ? "active" : ""}
+                aria-pressed={filter === item.id}
+                onClick={() => setFilter(item.id)}
+              >
+                {item.label} <strong>{counts[item.id]}</strong>
+              </button>
+            ))}
+          </div>
+          <div className="task-center-tools">
+            <label className="task-search">
+              <Search size={16} />
+              <input
+                type="search"
+                value={query}
+                placeholder="搜索任务"
+                aria-label="搜索任务"
+                onChange={(event) => setQuery(event.target.value)}
+              />
+            </label>
+            <div className="task-filter-menu" ref={filterRef}>
+              <button
+                type="button"
+                className={`task-filter-trigger ${activeFilterCount > 0 ? "active" : ""}`}
+                aria-expanded={filterOpen}
+                onClick={() => (filterOpen ? setFilterOpen(false) : openFilters())}
+              >
+                <ListFilter size={15} />
+                筛选
+                {activeFilterCount > 0 ? <strong>{activeFilterCount}</strong> : null}
+              </button>
+              {filterOpen ? (
+                <section className="task-filter-popover" role="dialog" aria-label="筛选任务">
+                  <header>
+                    <strong>筛选任务</strong>
+                    <button type="button" aria-label="关闭筛选" onClick={() => setFilterOpen(false)}>
+                      <X size={16} />
+                    </button>
+                  </header>
+                  <div className="task-filter-section">
+                    <span>任务状态</span>
+                    <div className="task-filter-options">
+                      {filterOptions.map((item) => (
+                        <button
+                          type="button"
+                          key={item.id}
+                          className={draftFilter === item.id ? "selected" : ""}
+                          aria-pressed={draftFilter === item.id}
+                          onClick={() => setDraftFilter(item.id)}
+                        >
+                          <span>{item.label}</span>
+                          <strong>{counts[item.id]}</strong>
+                        </button>
+                      ))}
+                    </div>
+                  </div>
+                  <div className="task-filter-section">
+                    <span>数字员工</span>
+                    <div className="task-agent-filter-options">
+                      <button
+                        type="button"
+                        className={draftAgentFilter === "all" ? "selected" : ""}
+                        aria-pressed={draftAgentFilter === "all"}
+                        onClick={() => setDraftAgentFilter("all")}
+                      >
+                        <span>全部数字员工</span>
+                        <strong>{tasks.length}</strong>
+                      </button>
+                      {agentOptions.map((option) => (
+                        <button
+                          type="button"
+                          key={option.id}
+                          className={draftAgentFilter === option.id ? "selected" : ""}
+                          aria-pressed={draftAgentFilter === option.id}
+                          onClick={() => setDraftAgentFilter(option.id)}
+                        >
+                          <span>{option.label}</span>
+                          <strong>{option.count}</strong>
+                        </button>
+                      ))}
+                    </div>
+                  </div>
+                  <footer>
+                    <button type="button" onClick={() => { setDraftFilter("all"); setDraftAgentFilter("all"); }}>
+                      重置
+                    </button>
+                    <button type="button" className="primary" onClick={applyFilters}>应用筛选</button>
+                  </footer>
+                </section>
+              ) : null}
+            </div>
+            <label className="task-sort-control">
+              <ArrowUpDown size={15} />
+              <select value={sort} aria-label="任务排序" onChange={(event) => setSort(event.target.value as TaskSort)}>
+                <option value="recent">最近更新</option>
+                <option value="oldest">最早更新</option>
+                <option value="title">任务名称</option>
+              </select>
+            </label>
+          </div>
         </div>
-        <div className="task-center-tools">
-          <label className="task-search">
-            <Search size={17} />
-            <input
-              type="search"
-              value={query}
-              placeholder="搜索任务"
-              aria-label="搜索任务"
-              onChange={(event) => setQuery(event.target.value)}
-            />
-          </label>
-          {agentOptions.length > 0 ? (
-            <select
-              value={agentFilter}
-              aria-label="按数字员工筛选"
-              onChange={(event) => setAgentFilter(event.target.value)}
-            >
-              <option value="all">全部数字员工</option>
-              {agentOptions.map((option) => (
-                <option key={option.id} value={option.id}>
-                  {option.label}（{option.count}）
-                </option>
-              ))}
-            </select>
-          ) : null}
-          <select value={sort} aria-label="任务排序" onChange={(event) => setSort(event.target.value as TaskSort)}>
-            <option value="recent">最近更新</option>
-            <option value="oldest">最早更新</option>
-            <option value="title">任务名称</option>
-          </select>
-        </div>
+        {activeFilterCount > 0 ? (
+          <div className="task-active-filters" aria-label="当前筛选条件">
+            {hasSecondaryStatus ? (
+              <button type="button" onClick={() => setFilter("all")}>
+                {statusMeta[filter].label}<X size={12} />
+              </button>
+            ) : null}
+            {selectedAgent ? (
+              <button type="button" onClick={() => setAgentFilter("all")}>
+                {selectedAgent.label}<X size={12} />
+              </button>
+            ) : null}
+            <button type="button" className="clear" onClick={clearExtraFilters}>清除筛选</button>
+          </div>
+        ) : null}
       </div>
 
       <div className="task-center-list">
