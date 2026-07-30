@@ -1332,9 +1332,12 @@ body.is-resizing-sidebar * {
    覆盖层和 textarea 必须共享完全相同的字号/行高/字距/padding/换行规则，
    否则高亮文字会和光标错位（这是 mention 高亮的标准对齐约束）。
    注意：覆盖层必须脱离布局流（absolute），否则它会随内容增长撑高容器，
-   导致 textarea 跟着变高（grid 叠放会取两元素的最大行高）。 */
+   导致 textarea 跟着变高（grid 叠放会取两元素的最大行高）。
+   overflow:hidden 作为兜底裁剪：即使覆盖层内容超长，也被限制在本层
+   （=textarea 固定高度）内，绝不溢出盖住下方的 footer。 */
 .composer-input-wrap {
   position: relative;
+  overflow: hidden;
 }
 
 .composer-highlight-overlay,
@@ -1354,13 +1357,23 @@ body.is-resizing-sidebar * {
 }
 
 /* 覆盖层：绝对定位叠在 textarea 上，渲染可见文字（含高亮 mention）。
-   不可交互、不占布局——其高度跟随 textarea，绝不反向撑高容器。 */
+   不可交互、不占布局——其高度跟随 textarea（固定高度），绝不反向撑高容器。
+   overflow:hidden 配合与 textarea 同步 scrollTop（见组件 onScroll），
+   让长内容在输入框固定高度内滚动而非溢出。 */
 .composer-highlight-overlay {
   position: absolute;
   inset: 0;
   pointer-events: none;
+  overflow: hidden;
   color: var(--color-ink);
   user-select: none;
+}
+
+/* 覆盖层内层：由 transform 平移跟随 textarea 的 scrollTop/scrollLeft，
+   让可见文字与 caret 始终同位置。宽度与排版继承 overlay（=textarea）。 */
+.composer-highlight-inner {
+  width: 100%;
+  will-change: transform;
 }
 
 /* textarea 文字透明 + caret 可见。caret-color 保留主题色让光标清晰。
@@ -2581,7 +2594,7 @@ body.is-resizing-sidebar * {
   box-shadow: 0 12px 30px rgba(18, 24, 38, 0.1);
 }
 
-/* 对话页的输入框适度紧凑：保留约 2 行半的舒适输入空间 */
+/* 对话页的输入框适度紧凑：保留约 2 行半的舒适输入空间（固定高度，内部滚动）。 */
 .conversation-composer .prompt-composer textarea {
   height: 58px;
   min-height: 58px;

@@ -1,4 +1,4 @@
-import { useMemo, useRef, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import type { ReactNode } from "react";
 import { ArrowUp, Cpu, Paperclip } from "lucide-react";
 import type { DigitalHuman } from "../types";
@@ -134,6 +134,33 @@ export function PromptComposer({
 }: PromptComposerProps) {
   const fileInputRef = useRef<HTMLInputElement>(null);
   const textareaRef = useRef<HTMLTextAreaElement>(null);
+  const overlayRef = useRef<HTMLDivElement>(null);
+  const overlayInnerRef = useRef<HTMLDivElement>(null);
+
+  // textarea 文字透明、可见文字由 overlay 渲染，二者必须同高同滚动，
+  // 否则 caret 与可见文字错位。overlay 用 overflow:hidden 裁剪溢出内容，
+  // 内层用 transform 平移跟随 textarea 的 scrollTop——比直接设置 overflow:hidden
+  // 元素的 scrollTop 更可靠（不依赖其可滚动行为，跨 WebView2/WebKit 一致）。
+  const syncOverlayScroll = () => {
+    const ta = textareaRef.current;
+    const ov = overlayRef.current;
+    const inner = overlayInnerRef.current;
+    if (!ta || !ov || !inner) return;
+    inner.style.transform = `translate(${-ta.scrollLeft}px, ${-ta.scrollTop}px)`;
+    // textarea 出现垂直滚动条时占用内容宽度，overlay 无滚动条会更宽、换行更晚，
+    // 导致 caret 与可见文字横向错位。这里动态给 overlay 留出等宽的右内边距，
+    // 使二者内容区宽度始终一致。
+    const scrollbar = ta.offsetWidth - ta.clientWidth;
+    ov.style.paddingRight = scrollbar ? `${scrollbar}px` : "";
+  };
+
+  useEffect(() => {
+    // 输入/粘贴后 textarea 会程序滚动到光标，rAF 在布局后同步 overlay 位置，
+    // 保证 caret 与可见文字始终对齐。
+    const id = requestAnimationFrame(syncOverlayScroll);
+    return () => cancelAnimationFrame(id);
+  }, [value]);
+
   const canSubmit = value.trim().length > 0 && !busy && !disabled;
 
   // @ 浮层状态：触发位置 + 查询关键字 + 高亮索引。
@@ -271,8 +298,10 @@ export function PromptComposer({
             textarea 文字透明（仅保留 caret 与交互），由本层负责可见文字。
             这是 Slack/Notion 式 mention 高亮的标准做法。 */}
         {value ? (
-          <div className="composer-highlight-overlay" aria-hidden="true">
-            {renderHighlightedValue(value, mentionHumans)}
+          <div className="composer-highlight-overlay" ref={overlayRef} aria-hidden="true">
+            <div className="composer-highlight-inner" ref={overlayInnerRef}>
+              {renderHighlightedValue(value, mentionHumans)}
+            </div>
           </div>
         ) : null}
         <textarea
@@ -292,6 +321,7 @@ export function PromptComposer({
           }
           title={disabled ? disabledReason : undefined}
           onChange={(event) => handleChange(event.target.value)}
+          onScroll={syncOverlayScroll}
           onKeyDown={handleKeyDown}
           onBlur={() => {
             // 延迟关闭，让浮层 onMouseDown 有机会触发。
