@@ -13,13 +13,17 @@ import {
   Trash2,
   XCircle,
 } from "lucide-react";
-import type { RecentTask } from "../types";
+import type { DigitalHuman, RecentTask } from "../types";
 
 type TaskFilter = "all" | RecentTask["status"];
 type TaskSort = "recent" | "oldest" | "title";
 
+// "通用助手 / 其他" 桶的筛选项 id：覆盖 general-chat 及历史遗留（已下线）员工的 agentId。
+const AGENT_FILTER_OTHER = "__other__";
+
 type TaskCenterProps = {
   tasks: RecentTask[];
+  employees?: DigitalHuman[];
   mcpConnectedCount: number;
   mcpTotalCount: number;
   mcpChecking: boolean;
@@ -59,6 +63,7 @@ const isUpdatedToday = (task: RecentTask) => {
 
 export function TaskCenter({
   tasks,
+  employees = [],
   mcpConnectedCount,
   mcpTotalCount,
   mcpChecking,
@@ -70,6 +75,7 @@ export function TaskCenter({
   const [filter, setFilter] = useState<TaskFilter>("all");
   const [query, setQuery] = useState("");
   const [sort, setSort] = useState<TaskSort>("recent");
+  const [agentFilter, setAgentFilter] = useState<string>("all");
   const [menuTaskId, setMenuTaskId] = useState<string>();
   const menuRef = useRef<HTMLDivElement>(null);
 
@@ -93,10 +99,42 @@ export function TaskCenter({
     [tasks],
   );
 
+  // 已知员工的 id 集合，用于把 general-chat 及历史遗留 agentId 归入"其他"桶。
+  const knownAgentIds = useMemo(() => new Set(employees.map((human) => human.id)), [employees]);
+
+  // 只展示当前任务列表中实际存在的员工，避免下拉框列出无任务的员工。
+  const agentOptions = useMemo(() => {
+    const countsById = new Map<string, number>();
+    let otherCount = 0;
+    tasks.forEach((task) => {
+      const id = task.agentId ?? "";
+      if (id && knownAgentIds.has(id)) {
+        countsById.set(id, (countsById.get(id) ?? 0) + 1);
+      } else {
+        otherCount += 1;
+      }
+    });
+    const known = employees
+      .filter((human) => countsById.has(human.id))
+      .map((human) => ({ id: human.id, label: human.name, count: countsById.get(human.id) ?? 0 }));
+    const options: Array<{ id: string; label: string; count: number }> = [...known];
+    if (otherCount > 0) {
+      options.push({ id: AGENT_FILTER_OTHER, label: "通用助手 / 其他", count: otherCount });
+    }
+    return options;
+  }, [employees, knownAgentIds, tasks]);
+
   const visibleTasks = useMemo(() => {
     const keyword = query.trim().toLocaleLowerCase("zh-CN");
     const filtered = tasks.filter((task) => {
       if (filter !== "all" && task.status !== filter) return false;
+      if (agentFilter !== "all") {
+        if (agentFilter === AGENT_FILTER_OTHER) {
+          if (knownAgentIds.has(task.agentId ?? "")) return false;
+        } else if (task.agentId !== agentFilter) {
+          return false;
+        }
+      }
       if (!keyword) return true;
       return [task.title, task.agentName, task.lastMessage]
         .filter(Boolean)
@@ -108,7 +146,7 @@ export function TaskCenter({
       const timeDelta = parseUpdatedAt(b) - parseUpdatedAt(a);
       return sort === "oldest" ? -timeDelta : timeDelta;
     });
-  }, [filter, query, sort, tasks]);
+  }, [agentFilter, filter, knownAgentIds, query, sort, tasks]);
 
   const taskGroups = useMemo(() => {
     const today: RecentTask[] = [];
@@ -193,6 +231,20 @@ export function TaskCenter({
               onChange={(event) => setQuery(event.target.value)}
             />
           </label>
+          {agentOptions.length > 0 ? (
+            <select
+              value={agentFilter}
+              aria-label="按数字员工筛选"
+              onChange={(event) => setAgentFilter(event.target.value)}
+            >
+              <option value="all">全部数字员工</option>
+              {agentOptions.map((option) => (
+                <option key={option.id} value={option.id}>
+                  {option.label}（{option.count}）
+                </option>
+              ))}
+            </select>
+          ) : null}
           <select value={sort} aria-label="任务排序" onChange={(event) => setSort(event.target.value as TaskSort)}>
             <option value="recent">最近更新</option>
             <option value="oldest">最早更新</option>

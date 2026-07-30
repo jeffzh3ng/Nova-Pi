@@ -3235,6 +3235,7 @@ export default function App() {
         ) : activeNav === "tasks" && !selectedTaskId ? (
           <TaskCenter
             tasks={displayedRecentTasks}
+            employees={effectiveDigitalHumans}
             mcpConnectedCount={connectedMcpCount}
             mcpTotalCount={catalogDigitalHumans.length}
             mcpChecking={mcpChecking}
