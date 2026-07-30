@@ -240,7 +240,28 @@ export function PromptComposer({
     });
   };
 
+  // 手动在光标处插入换行：中文输入法（IME）激活时，textarea 的默认 Enter 行为
+  // 会被输入法接管（用于确认候选词），Shift/Ctrl+Enter 放行后并不产生换行。
+  // 因此换行不依赖浏览器默认行为，而是显式插入 "\n" 并把光标移到换行之后。
+  const insertNewline = () => {
+    const textarea = textareaRef.current;
+    if (!textarea) return;
+    const start = textarea.selectionStart;
+    const end = textarea.selectionEnd;
+    const nextValue = `${value.slice(0, start)}\n${value.slice(end)}`;
+    onChange(nextValue);
+    const newCursor = start + 1;
+    requestAnimationFrame(() => {
+      textareaRef.current?.focus();
+      textareaRef.current?.setSelectionRange(newCursor, newCursor);
+    });
+  };
+
   const handleKeyDown = (event: React.KeyboardEvent<HTMLTextAreaElement>) => {
+    const isPlainEnter =
+      event.key === "Enter" && !event.shiftKey && !event.ctrlKey && !event.metaKey && !event.altKey;
+    const isModifierEnter =
+      event.key === "Enter" && (event.shiftKey || event.ctrlKey || event.metaKey);
     // @ 浮层打开时优先处理导航键。
     if (mentionActive && filteredHumans.length > 0) {
       if (event.key === "ArrowDown") {
@@ -255,12 +276,19 @@ export function PromptComposer({
         );
         return;
       }
-      if (event.key === "Enter" && !event.shiftKey) {
+      // 纯 Enter 选中高亮员工；Shift/Ctrl/Cmd+Enter 插入换行。
+      if (isPlainEnter) {
         event.preventDefault();
         const target = filteredHumans[safeHighlight];
         if (target) {
           handleSelectMention(target);
         }
+        return;
+      }
+      if (isModifierEnter) {
+        event.preventDefault();
+        insertNewline();
+        closeMention();
         return;
       }
       if (event.key === "Escape") {
@@ -274,9 +302,13 @@ export function PromptComposer({
       return;
     }
 
-    if (event.key === "Enter" && !event.shiftKey) {
+    // 纯 Enter 发送；Shift/Ctrl/Cmd+Enter 插入换行。
+    if (isPlainEnter) {
       event.preventDefault();
       if (canSubmit) onSubmit();
+    } else if (isModifierEnter) {
+      event.preventDefault();
+      insertNewline();
     }
   };
 
