@@ -2603,9 +2603,13 @@ body.is-resizing-sidebar * {
   line-height: 1.5;
 }
 
-/* 覆盖层高度须与 textarea 一致，否则裁剪范围与输入框不符。 */
+/* 覆盖层高度须与 textarea 一致，否则裁剪范围与输入框不符。
+   必须同时覆盖 height 与 min-height：基础规则（L1342）的组合选择器把
+   min-height:87px 同时套到 overlay，仅覆盖 height 会被 min-height 顶回 87px，
+   导致对话页 overlay 比 textarea 高、裁剪失效而溢出盖住 footer。 */
 .conversation-composer .composer-highlight-overlay {
   height: 58px;
+  min-height: 58px;
 }
 
 /* 介绍文字（placeholder 提示）随内边距对齐 */

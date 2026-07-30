@@ -38,6 +38,13 @@ fn default_working_directory() -> String {
                 .to_string()
         });
     // 默认工作目录放在用户主目录下的 .nova，不存在则自动新建。
+    // home 取自 USERPROFILE/HOME/current_dir，极端情况下可能为空串
+    // （如 current_dir 失败返回空 PathBuf）。空串会让 Path::new("").join(".nova")
+    // 得到相对路径 .nova，create_dir_all 会在进程 cwd（多为只读安装目录）下建目录
+    // 而静默失败。此时退回 "." 避免默认工作目录指向不可写的奇怪位置。
+    if home.trim().is_empty() {
+        return ".".to_string();
+    }
     let nova_dir = Path::new(&home).join(".nova");
     let _ = std::fs::create_dir_all(&nova_dir);
     nova_dir.to_string_lossy().to_string()
