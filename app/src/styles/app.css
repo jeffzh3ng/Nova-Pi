@@ -3856,6 +3856,15 @@ body.is-resizing-sidebar * {
   line-height: 1.45;
 }
 
+/* 最多展示 2 行，超出省略号 */
+.clamp-2 {
+  display: -webkit-box;
+  -webkit-box-orient: vertical;
+  -webkit-line-clamp: 2;
+  line-clamp: 2;
+  overflow: hidden;
+}
+
 .settings-form-grid {
   display: grid;
   grid-template-columns: repeat(2, minmax(0, 1fr));
@@ -6864,7 +6873,7 @@ label.settings-toggle input {
 
 .computer-agent-permissions {
   display: grid;
-  grid-template-columns: repeat(3, minmax(0, 1fr));
+  grid-template-columns: repeat(4, minmax(0, 1fr));
   gap: 10px;
 }
 

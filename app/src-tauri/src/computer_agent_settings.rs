@@ -27,7 +27,7 @@ pub struct ComputerAgentSettings {
 }
 
 fn default_working_directory() -> String {
-    std::env::var_os("USERPROFILE")
+    let home = std::env::var_os("USERPROFILE")
         .or_else(|| std::env::var_os("HOME"))
         .map(|value| value.to_string_lossy().to_string())
         .filter(|value| !value.trim().is_empty())
@@ -36,7 +36,11 @@ fn default_working_directory() -> String {
                 .unwrap_or_default()
                 .to_string_lossy()
                 .to_string()
-        })
+        });
+    // 默认工作目录放在用户主目录下的 .nova，不存在则自动新建。
+    let nova_dir = Path::new(&home).join(".nova");
+    let _ = std::fs::create_dir_all(&nova_dir);
+    nova_dir.to_string_lossy().to_string()
 }
 
 pub fn default_computer_agent_settings() -> ComputerAgentSettings {

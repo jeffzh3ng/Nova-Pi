@@ -64,7 +64,9 @@ function SkillPanelHeading({
       <Icon size={20} />
       <div>
         <h2>{title}</h2>
-        <p>{description}</p>
+        <p className="clamp-2" title={description}>
+          {description}
+        </p>
       </div>
     </div>
   );
@@ -157,7 +159,7 @@ export function SkillCenterPanel() {
       });
       setStatus(
         catalog.skills.length
-          ? `已读取 ${catalog.skills.length} 个 Skill，${catalog.errors.length} 个无效包。`
+          ? `已读取 ${catalog.skills.length} 个 SKILL，${catalog.errors.length} 个无效包。`
           : `未发现已安装 SKILL，${catalog.errors.length} 个无效包。`,
       );
     } catch (error) {
