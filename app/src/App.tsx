@@ -2632,16 +2632,17 @@ export default function App() {
         const ext = f.name.split(".").pop()?.toLowerCase() ?? "";
         return zipExts.includes(ext);
       });
+      // 风评员工的 zip 走专用链路（upload_materials 入库），不归入普通附件；
+      // 其余员工（如代码审计数字员工）的 zip 作为普通附件透传，由其 MCP 工具自行读取解析。
+      const isRiskEmployee = selectedHuman.id === "data-security-risk-assessment";
       const regularFiles = files.filter((f) => {
         const ext = f.name.split(".").pop()?.toLowerCase() ?? "";
         return (
-          !pcapExts.includes(ext) && !imageExts.includes(ext) && !zipExts.includes(ext)
+          !pcapExts.includes(ext) &&
+          !imageExts.includes(ext) &&
+          !(zipExts.includes(ext) && isRiskEmployee)
         );
       });
-
-      if (zipFiles.length > 0 && selectedHuman.id !== "data-security-risk-assessment") {
-        throw new Error("仅数安风评数字员工支持上传压缩包（.zip）。");
-      }
 
       if (pcapFiles.length > 0 && selectedHuman.id === "alert-analysis") {
         const pcapAttachments: ChatMessageAttachment[] = [];
