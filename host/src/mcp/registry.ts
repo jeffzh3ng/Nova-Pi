@@ -226,7 +226,8 @@ export class McpRegistry {
       a.url === b.url &&
       a.launchMode === b.launchMode &&
       a.timeoutSecs === b.timeoutSecs &&
-      this.envEquals(a.env, b.env)
+      this.envEquals(a.env, b.env) &&
+      this.headersEquals(a.httpHeaders, b.httpHeaders)
     );
   }
 
@@ -234,6 +235,19 @@ export class McpRegistry {
     const left = a ? Object.keys(a).sort() : [];
     const right = b ? Object.keys(b).sort() : [];
     return left.length === right.length && left.every((key, index) => key === right[index] && a?.[key] === b?.[key]);
+  }
+
+  /** 比较两组请求头(顺序敏感):改名或改值都应触发重连,让新 token 生效。 */
+  private headersEquals(
+    a?: Array<{ name: string; value: string }>,
+    b?: Array<{ name: string; value: string }>,
+  ): boolean {
+    const left = a ?? [];
+    const right = b ?? [];
+    return (
+      left.length === right.length &&
+      left.every((item, index) => item.name === right[index].name && item.value === right[index].value)
+    );
   }
 }
 

@@ -1,7 +1,7 @@
 import { Bot, CirclePlus, Pencil, RefreshCw, RotateCcw, Save, Search, Trash2, X } from "lucide-react";
 import { useEffect, useMemo, useState } from "react";
 import { ConfirmModal } from "./ConfirmModal";
-import type { McpConnectionSettings, McpLaunchMode, McpTransport } from "../services/mcpSettings";
+import type { McpConnectionSettings, McpHttpHeader, McpLaunchMode, McpTransport } from "../services/mcpSettings";
 import {
   ALERT_ANALYSIS_MCP_SERVICE,
   BUILT_IN_MCP_SERVICE_IDS,
@@ -82,6 +82,7 @@ const EMPTY_DRAFT: McpConnectionSettings = {
   commandArgs: "--transport stdio",
   httpUrl: "",
   launchMode: "script",
+  httpHeaders: [],
 };
 
 const TRANSPORT_OPTIONS: { value: McpTransport; label: string }[] = [
@@ -340,6 +341,25 @@ export function McpSquarePanel() {
     setEditor((current) => current ? { ...current, draft: { ...current.draft, [key]: value } } : current);
   };
 
+  const addHttpHeader = () => {
+    if (!editor) return;
+    updateEditor("httpHeaders", [
+      ...editor.draft.httpHeaders,
+      { name: editor.draft.httpHeaders.length === 0 ? "Authorization" : "", value: "" },
+    ]);
+  };
+  const updateHttpHeader = (index: number, field: keyof McpHttpHeader, value: string) => {
+    if (!editor) return;
+    updateEditor(
+      "httpHeaders",
+      editor.draft.httpHeaders.map((item, i) => (i === index ? { ...item, [field]: value } : item)),
+    );
+  };
+  const removeHttpHeader = (index: number) => {
+    if (!editor) return;
+    updateEditor("httpHeaders", editor.draft.httpHeaders.filter((_, i) => i !== index));
+  };
+
   const replaceSettings = (saved: McpConnectionSettings) => {
     setSettingsList((items) => normalizeMcpSettingsList([
       ...items.filter((item) => item.serviceId !== saved.serviceId),
@@ -378,6 +398,11 @@ export function McpSquarePanel() {
       commandArgs: editor.draft.commandArgs.trim() || defaults.commandArgs,
       commandPath: editor.draft.commandPath.trim(),
       httpUrl: editor.draft.httpUrl.trim(),
+      httpHeaders: editor.draft.transport === "http"
+        ? editor.draft.httpHeaders
+            .map((item) => ({ name: item.name.trim(), value: item.value.trim() }))
+            .filter((item) => item.name.length > 0)
+        : [],
     };
 
     setEditorBusy(true);
@@ -682,7 +707,7 @@ export function McpSquarePanel() {
                 <textarea
                   value={editor.draft.welcomeMessage}
                   placeholder="说明数字员工可以完成什么，以及用户可以如何开始任务。"
-                  rows={3}
+                  rows={2}
                   onChange={(event) => updateEditor("welcomeMessage", event.target.value)}
                 />
               </label>
@@ -756,14 +781,51 @@ export function McpSquarePanel() {
                   </label>
                 </>
               ) : (
-                <label>
-                  <span>HTTP MCP 地址</span>
-                  <input
-                    value={editor.draft.httpUrl}
-                    placeholder={serviceMeta(editor.draft.serviceId, editor.draft).httpPlaceholder}
-                    onChange={(event) => updateEditor("httpUrl", event.target.value)}
-                  />
-                </label>
+                <>
+                  <label>
+                    <span>HTTP MCP 地址</span>
+                    <input
+                      value={editor.draft.httpUrl}
+                      placeholder={serviceMeta(editor.draft.serviceId, editor.draft).httpPlaceholder}
+                      onChange={(event) => updateEditor("httpUrl", event.target.value)}
+                    />
+                  </label>
+                  <div className="mcp-headers">
+                    <div className="mcp-headers-head">
+                      <span>认证请求头</span>
+                      <button type="button" className="mcp-headers-add" onClick={() => addHttpHeader()}>
+                        <CirclePlus size={14} /> 添加请求头
+                      </button>
+                    </div>
+                    <small className="mcp-headers-hint">
+                      用于鉴权,如添加名为「Authorization」、值为「Bearer xxxxxkey」的请求头。
+                    </small>
+                    {editor.draft.httpHeaders.map((item, index) => (
+                      <div className="mcp-headers-row" key={index}>
+                        <input
+                          className="mcp-headers-name"
+                          value={item.name}
+                          placeholder="Header 名称，如 Authorization"
+                          onChange={(event) => updateHttpHeader(index, "name", event.target.value)}
+                        />
+                        <input
+                          className="mcp-headers-value"
+                          value={item.value}
+                          placeholder="Header 值，如 Bearer xxxxxkey"
+                          onChange={(event) => updateHttpHeader(index, "value", event.target.value)}
+                        />
+                        <button
+                          type="button"
+                          className="mcp-headers-remove"
+                          aria-label="删除请求头"
+                          onClick={() => removeHttpHeader(index)}
+                        >
+                          <Trash2 size={15} />
+                        </button>
+                      </div>
+                    ))}
+                  </div>
+                </>
               )}
             </div>
 

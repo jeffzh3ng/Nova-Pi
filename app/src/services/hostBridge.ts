@@ -163,6 +163,8 @@ export type McpServerConfig = {
   enabled: boolean;
   launchMode: "script" | "module";
   timeoutSecs?: number;
+  /** HTTP 连接的自定义请求头(如 Authorization、X-API-Key);stdio 连接不使用。 */
+  httpHeaders?: Array<{ name: string; value: string }>;
 };
 
 export type ConversationAttachments = {

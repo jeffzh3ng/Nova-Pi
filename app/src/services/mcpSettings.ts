@@ -6,6 +6,9 @@ export type McpTransport = "stdio" | "http";
 /// `module` = 通过 `python -m <模块名>` 运行（适用于使用包内相对导入的 MCP）。
 export type McpLaunchMode = "script" | "module";
 
+/// HTTP 连接的单个请求头（如 Authorization: Bearer xxx），数组形态便于增删保序。
+export type McpHttpHeader = { name: string; value: string };
+
 export type McpConnectionSettings = {
   serviceId: string;
   employeeName: string;
@@ -19,6 +22,8 @@ export type McpConnectionSettings = {
   commandArgs: string;
   httpUrl: string;
   launchMode: McpLaunchMode;
+  /// HTTP 连接的自定义请求头（如 Authorization、X-API-Key）；stdio 连接不使用。
+  httpHeaders: McpHttpHeader[];
 };
 
 export type McpConnectionSettingsStatus = {
@@ -124,6 +129,7 @@ export const defaultAlertMcpSettings: McpConnectionSettings = {
   commandArgs: "--transport stdio",
   httpUrl: "",
   launchMode: "script",
+  httpHeaders: [],
 };
 
 export const defaultDataClassificationMcpSettings: McpConnectionSettings = {
@@ -139,6 +145,7 @@ export const defaultDataClassificationMcpSettings: McpConnectionSettings = {
   commandArgs: "--transport stdio",
   httpUrl: "",
   launchMode: "script",
+  httpHeaders: [],
 };
 
 const makeDisabledMcpSettings = (serviceId: string): McpConnectionSettings => {
@@ -157,6 +164,7 @@ const makeDisabledMcpSettings = (serviceId: string): McpConnectionSettings => {
     commandArgs: "--transport stdio",
     httpUrl: "",
     launchMode: "script",
+    httpHeaders: [],
   };
 };
 

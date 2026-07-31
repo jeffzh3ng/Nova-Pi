@@ -139,6 +139,7 @@ pub(crate) async fn sync_mcp_config_to_sidecar(app: &tauri::AppHandle) -> Result
                 "url": s.http_url,
                 "enabled": s.enabled,
                 "launchMode": s.launch_mode,
+                "httpHeaders": s.http_headers,
                 "env": upload_env,
             })
         })

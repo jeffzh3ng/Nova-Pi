@@ -3383,7 +3383,7 @@ body.is-resizing-sidebar * {
 .mcp-editor-body label:not(.settings-toggle) > textarea {
   width: 100%;
   min-width: 0;
-  min-height: 76px;
+  min-height: 62px;
   padding: 10px 12px;
   resize: vertical;
   color: #253245;
@@ -3397,6 +3397,99 @@ body.is-resizing-sidebar * {
 .mcp-editor-body label:not(.settings-toggle) > textarea:focus {
   border-color: var(--color-accent);
   box-shadow: 0 0 0 3px rgba(36, 123, 160, 0.1);
+}
+
+/* 认证请求头编辑区（仅 HTTP 连接显示） */
+.mcp-headers {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  padding-bottom: 4px;
+  border-bottom: 1px solid #e7ecf1;
+}
+
+.mcp-headers-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+}
+
+.mcp-headers-head span {
+  font-size: 13px;
+  font-weight: 700;
+  color: #253245;
+}
+
+.mcp-headers-add {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  height: 28px;
+  padding: 0 11px;
+  color: var(--color-accent);
+  background: rgba(36, 123, 160, 0.08);
+  border: 1px solid rgba(36, 123, 160, 0.25);
+  border-radius: 7px;
+  font-size: 12px;
+  font-weight: 700;
+  cursor: pointer;
+  transition: background 0.15s ease;
+}
+
+.mcp-headers-add:hover {
+  background: rgba(36, 123, 160, 0.16);
+}
+
+.mcp-headers-hint {
+  margin-top: -2px;
+  color: #7c8a9b;
+  font-size: 12px;
+  line-height: 1.5;
+}
+
+.mcp-headers-row {
+  display: grid;
+  grid-template-columns: minmax(0, 0.9fr) minmax(0, 1.4fr) 32px;
+  align-items: center;
+  gap: 8px;
+}
+
+.mcp-headers-row input {
+  min-width: 0;
+  height: 38px;
+  padding: 8px 11px;
+  color: #253245;
+  background: #ffffff;
+  border: 1px solid #d6dfe7;
+  border-radius: 8px;
+  outline: 0;
+  font: 13px/1.5 var(--font-sans);
+}
+
+.mcp-headers-row input:focus {
+  border-color: var(--color-accent);
+  box-shadow: 0 0 0 3px rgba(36, 123, 160, 0.1);
+}
+
+.mcp-headers-remove {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 32px;
+  height: 38px;
+  color: #a35b5b;
+  background: #ffffff;
+  border: 1px solid #d6dfe7;
+  border-radius: 8px;
+  cursor: pointer;
+  transition: background 0.15s ease, border-color 0.15s ease;
+}
+
+.mcp-headers-remove:hover {
+  color: #c0392b;
+  background: #fbeae8;
+  border-color: #e6b3ad;
 }
 
 .mcp-editor-two-column {

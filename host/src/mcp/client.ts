@@ -288,19 +288,50 @@ function errorMessage(error: unknown): string {
   return error instanceof Error ? error.message : String(error);
 }
 
+/** 把配置中的请求头列表归一为 Record;空数组/全空返回 undefined(不注入)。
+ *  后端已做 trim/去重,这里仅兜底过滤掉 name 为空的行。 */
+function headersToRecord(
+  list?: Array<{ name: string; value: string }>,
+): Record<string, string> | undefined {
+  if (!list || list.length === 0) return undefined;
+  const headers: Record<string, string> = {};
+  for (const item of list) {
+    const name = item.name.trim();
+    if (name) headers[name] = item.value;
+  }
+  return Object.keys(headers).length > 0 ? headers : undefined;
+}
+
 /** Connect and complete initialize + tools/list, with transport compatibility fallbacks. */
 export async function connectMcpServer(config: McpServerConfig): Promise<ConnectedMcpServer> {
   if (config.transport === "http") {
     const url = validateHttpUrl(config.url);
+    // 自定义请求头(如 Authorization: Bearer xxx),注入到每次 fetch。
+    const headers = headersToRecord(config.httpHeaders);
+    const requestInit = headers ? { headers } : undefined;
     const streamableError = await connectTransport(
       config,
-      new StreamableHTTPClientTransport(url),
+      new StreamableHTTPClientTransport(url, requestInit ? { requestInit } : {}),
       "streamable-http",
     ).then((server) => ({ server }), (error: unknown) => ({ error }));
     if ("server" in streamableError) return streamableError.server;
 
+    // SSE 回退:POST 走 requestInit；初始 GET 流(EventSource)的 header 通过
+    // 自定义 fetch 注入(SDK 的 EventSourceInit 类型未直接暴露 headers 字段)。
+    const sseOpts = requestInit
+      ? {
+          requestInit,
+          eventSourceInit: {
+            fetch: ((input: unknown, init?: RequestInit) =>
+              fetch(input as Parameters<typeof fetch>[0], {
+                ...init,
+                headers: { ...init?.headers, ...headers },
+              })) as never,
+          },
+        }
+      : {};
     try {
-      return await connectTransport(config, new SSEClientTransport(url), "sse");
+      return await connectTransport(config, new SSEClientTransport(url, sseOpts), "sse");
     } catch (sseError) {
       throw new Error(
         `MCP HTTP 连接失败（Streamable HTTP：${errorMessage(streamableError.error)}；SSE：${errorMessage(sseError)}）`,

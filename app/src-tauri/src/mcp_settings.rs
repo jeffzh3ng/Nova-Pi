@@ -47,6 +47,17 @@ pub struct McpConnectionSettings {
     pub http_url: String,
     #[serde(default = "default_launch_mode")]
     pub launch_mode: String,
+    /// HTTP 连接的自定义请求头(如 Authorization、X-API-Key);stdio 连接不使用。
+    /// 以 JSON 字符串形式持久化到 SQLite,例如 `[{"name":"Authorization","value":"Bearer xxx"}]`。
+    #[serde(default)]
+    pub http_headers: Vec<McpHttpHeader>,
+}
+
+/// MCP HTTP 连接的单个请求头(name/value),数组形态便于 UI 增删、保序、去重。
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct McpHttpHeader {
+    pub name: String,
+    pub value: String,
 }
 
 /// Default stdio launch mode. `script` = run a `.py` file directly;
@@ -83,6 +94,7 @@ pub fn default_mcp_connection_settings(service_id: &str) -> McpConnectionSetting
         command_path: String::new(),
         command_args: "--transport stdio".to_string(),
         launch_mode: default_launch_mode(),
+        http_headers: Vec::new(),
     }
 }
 
@@ -220,6 +232,7 @@ fn initialize_mcp_db(connection: &Connection) -> Result<(), String> {
                 command_args TEXT NOT NULL,
                 http_url TEXT NOT NULL,
                 launch_mode TEXT NOT NULL DEFAULT 'script',
+                http_headers TEXT NOT NULL DEFAULT '[]',
                 updated_at TEXT NOT NULL
             );
             "#,
@@ -255,6 +268,9 @@ fn initialize_mcp_db(connection: &Connection) -> Result<(), String> {
     );
     let _ = connection.execute_batch(
         "ALTER TABLE mcp_connection_settings ADD COLUMN launch_mode TEXT NOT NULL DEFAULT 'script';",
+    );
+    let _ = connection.execute_batch(
+        "ALTER TABLE mcp_connection_settings ADD COLUMN http_headers TEXT NOT NULL DEFAULT '[]';",
     );
     // Rename the data risk-assessment service id to match the deployed MCP server.
     // service_id is the primary key, so UPDATE renames in place and preserves the
@@ -310,7 +326,7 @@ fn load_mcp_connection_settings_from_db(
             r#"
             SELECT service_id, employee_name, employee_role, welcome_title, welcome_message,
                    show_in_employee_list,
-                   enabled, transport, command_path, command_args, http_url, launch_mode
+                   enabled, transport, command_path, command_args, http_url, launch_mode, http_headers
               FROM mcp_connection_settings
              WHERE service_id = ?1 AND deleted = 0
             "#,
@@ -330,6 +346,7 @@ fn load_mcp_connection_settings_from_db(
             command_args: row.get(9)?,
             http_url: row.get(10)?,
             launch_mode: row.get(11)?,
+            http_headers: parse_http_headers(&row.get::<_, String>(12)?),
         })
     });
 
@@ -359,7 +376,7 @@ fn list_mcp_connection_settings_from_db(
             r#"
             SELECT service_id, employee_name, employee_role, welcome_title, welcome_message,
                    show_in_employee_list,
-                   enabled, transport, command_path, command_args, http_url, launch_mode
+                   enabled, transport, command_path, command_args, http_url, launch_mode, http_headers
               FROM mcp_connection_settings
              WHERE deleted = 0
              ORDER BY
@@ -389,6 +406,7 @@ fn list_mcp_connection_settings_from_db(
                 command_args: row.get(9)?,
                 http_url: row.get(10)?,
                 launch_mode: row.get(11)?,
+                http_headers: parse_http_headers(&row.get::<_, String>(12)?),
             })
         })
         .map_err(|error| format!("读取 MCP 配置列表失败：{error}"))?;
@@ -412,9 +430,9 @@ fn save_mcp_connection_settings_to_db(
             INSERT INTO mcp_connection_settings (
                 service_id, employee_name, employee_role, welcome_title, welcome_message,
                 show_in_employee_list,
-                deleted, enabled, transport, command_path, command_args, http_url, launch_mode, updated_at
+                deleted, enabled, transport, command_path, command_args, http_url, launch_mode, http_headers, updated_at
             )
-            VALUES (?1, ?2, ?3, ?4, ?5, ?6, 0, ?7, ?8, ?9, ?10, ?11, ?12, ?13)
+            VALUES (?1, ?2, ?3, ?4, ?5, ?6, 0, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14)
             ON CONFLICT(service_id) DO UPDATE SET
                 employee_name = excluded.employee_name,
                 employee_role = excluded.employee_role,
@@ -428,6 +446,7 @@ fn save_mcp_connection_settings_to_db(
                 command_args = excluded.command_args,
                 http_url = excluded.http_url,
                 launch_mode = excluded.launch_mode,
+                http_headers = excluded.http_headers,
                 updated_at = excluded.updated_at
             "#,
             params![
@@ -443,6 +462,7 @@ fn save_mcp_connection_settings_to_db(
                 settings.command_args,
                 settings.http_url,
                 settings.launch_mode,
+                serialize_http_headers(&settings.http_headers),
                 now_text(),
             ],
         )
@@ -502,7 +522,48 @@ fn normalize_mcp_connection_settings(mut settings: McpConnectionSettings) -> Mcp
         settings.command_args = "--transport stdio".to_string();
     }
     settings.http_url = normalize_http_url(&settings.http_url);
+    // 请求头仅对 HTTP 连接有意义;stdio 清空。HTTP 下 trim、丢弃 name 为空行、
+    // 同名去重(保留首条),避免重复头发往服务端。
+    settings.http_headers = if settings.transport == "http" {
+        normalize_http_headers(&settings.http_headers)
+    } else {
+        Vec::new()
+    };
     settings
+}
+
+/// 将 SQLite 中存储的 JSON 字符串解析为请求头列表;解析失败回退为空。
+fn parse_http_headers(raw: &str) -> Vec<McpHttpHeader> {
+    if raw.trim().is_empty() {
+        return Vec::new();
+    }
+    serde_json::from_str::<Vec<McpHttpHeader>>(raw).unwrap_or_default()
+}
+
+/// 将请求头列表序列化为 JSON 字符串以写入 SQLite。
+fn serialize_http_headers(headers: &[McpHttpHeader]) -> String {
+    serde_json::to_string(headers).unwrap_or_else(|_| "[]".to_string())
+}
+
+/// 清洗请求头:trim name/value、丢弃 name 为空行、同名去重(大小写不敏感,保留首条)。
+fn normalize_http_headers(headers: &[McpHttpHeader]) -> Vec<McpHttpHeader> {
+    let mut seen: std::collections::HashSet<String> = std::collections::HashSet::new();
+    let mut result: Vec<McpHttpHeader> = Vec::new();
+    for header in headers {
+        let name = header.name.trim().to_string();
+        if name.is_empty() {
+            continue;
+        }
+        let key = name.to_ascii_lowercase();
+        if !seen.insert(key) {
+            continue; // 同名已保留首条
+        }
+        result.push(McpHttpHeader {
+            name,
+            value: header.value.trim().to_string(),
+        });
+    }
+    result
 }
 
 fn normalize_service_id(value: &str) -> String {
