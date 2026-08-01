@@ -679,7 +679,7 @@ export function McpSquarePanel() {
                   <span>数字员工名称</span>
                   <input
                     value={editor.draft.employeeName}
-                    placeholder="例如：日志分析数字员工"
+                    placeholder="例如：日志分析"
                     onChange={(event) => updateEditor("employeeName", event.target.value)}
                   />
                 </label>

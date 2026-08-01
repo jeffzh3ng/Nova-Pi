@@ -576,12 +576,9 @@ fn normalize_service_id(value: &str) -> String {
 fn normalize_employee_name(value: &str, service_id: &str) -> String {
     let trimmed = value.trim();
     if trimmed.is_empty() {
-        return default_employee_name(service_id);
-    }
-    if service_id == DATA_CLASSIFICATION_SERVICE_ID || trimmed.ends_with("数字员工") {
-        trimmed.to_string()
+        default_employee_name(service_id)
     } else {
-        format!("{trimmed}数字员工")
+        trimmed.to_string()
     }
 }
 
@@ -590,10 +587,10 @@ fn default_employee_name(service_id: &str) -> String {
         "data-security-risk-assessment-mcp" => "数安风评数字员工".to_string(),
         ALERT_ANALYSIS_SERVICE_ID => "威胁研判数字员工".to_string(),
         DATA_CLASSIFICATION_SERVICE_ID => "分类分级工具".to_string(),
-        _ => format!(
-            "{}数字员工",
-            service_id.strip_suffix("-mcp").unwrap_or(service_id)
-        ),
+        _ => service_id
+            .strip_suffix("-mcp")
+            .unwrap_or(service_id)
+            .to_string(),
     }
 }
 
@@ -720,6 +717,18 @@ mod tests {
         assert!(!settings.show_in_employee_list);
         assert!(settings.command_path.is_empty());
         assert!(settings.http_url.is_empty());
+    }
+
+    #[test]
+    fn custom_employee_name_is_preserved_without_adding_a_suffix() {
+        assert_eq!(
+            normalize_employee_name("  日志分析  ", "log-analysis-mcp"),
+            "日志分析"
+        );
+        assert_eq!(
+            normalize_employee_name("", "log-analysis-mcp"),
+            "log-analysis"
+        );
     }
 
     #[test]

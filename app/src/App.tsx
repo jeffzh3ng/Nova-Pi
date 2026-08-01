@@ -80,7 +80,7 @@ const SIDEBAR_PANEL_MAX = 420;
 
 type McpAvailability = {
   state: "checking" | "connected" | "disabled" | "unconfigured" | "error";
-  badge: "检测中" | "可用" | "按需可用" | "待配置" | "不可用";
+  badge?: "检测中" | "待配置" | "不可用";
   disabledReason?: string;
 };
 
@@ -605,7 +605,7 @@ export default function App() {
 
           // MCP 连接按需建立，避免应用启动时同时拉起全部 stdio/Node 服务。
           // 真正的握手错误会由 Agent 的 mcp 发现调用或设置页的“测试连接”明确返回。
-          return [serviceId, { state: "connected", badge: "按需可用" } satisfies McpAvailability] as const;
+          return [serviceId, { state: "connected" } satisfies McpAvailability] as const;
         }),
       );
 
@@ -686,7 +686,7 @@ export default function App() {
     if (!mcpService) return { status: defaultStatus ?? "pending" };
     const availability = mcpAvailability[mcpService];
     if (availability?.state === "connected") {
-      return { status: "ready", badge: availability.badge };
+      return { status: "ready" };
     }
     return {
       status: "pending",

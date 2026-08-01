@@ -78,7 +78,7 @@ const BUILT_IN_MCP_EMPLOYEE_DEFAULTS: Record<string, McpEmployeeDefaults> = {
 
 const customEmployeeName = (serviceId: string) => {
   const baseName = serviceId.replace(/-mcp$/i, "").trim() || "自定义";
-  return `${baseName}数字员工`;
+  return baseName;
 };
 
 export function getMcpEmployeeDefaults(serviceId: string): McpEmployeeDefaults {

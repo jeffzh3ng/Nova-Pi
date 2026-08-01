@@ -1,4 +1,16 @@
-import { Bot, CheckCircle2, CirclePlus, Pencil, Save, Search, ShieldCheck, Trash2, X } from "lucide-react";
+import {
+  Bot,
+  CheckCircle2,
+  CirclePlus,
+  ListChecks,
+  PanelTopClose,
+  Pencil,
+  Save,
+  Search,
+  ShieldCheck,
+  Trash2,
+  X,
+} from "lucide-react";
 import { getVersion } from "@tauri-apps/api/app";
 import { listen } from "@tauri-apps/api/event";
 import { useEffect, useRef, useState } from "react";
@@ -920,36 +932,37 @@ function AppBehaviorSettingsPanel() {
   };
 
   return (
-    <section className="settings-section" aria-label="应用行为">
+    <section className="settings-section" aria-label="窗口与对话显示">
       <header className="settings-section-header">
         <div>
-          <span>应用行为</span>
           <h2>窗口与对话显示</h2>
           <p className="mcp-status-line">控制关闭行为与对话中的执行细节。</p>
         </div>
-        {status ? <small className="settings-preference-status">{status}</small> : null}
+        {status ? <small className="settings-preference-status" aria-live="polite">{status}</small> : null}
       </header>
-      <div className="settings-card settings-preference-card">
-        <label className="settings-toggle">
+      <div className="settings-preference-options">
+        <label className={`settings-preference-option ${preferences.closeToTray ? "is-selected" : ""} ${loaded ? "" : "is-disabled"}`}>
           <input
             type="checkbox"
             checked={preferences.closeToTray}
             disabled={!loaded}
             onChange={(event) => void update({ closeToTray: event.target.checked })}
           />
-          <span>
+          <span className="settings-preference-option-icon"><PanelTopClose size={20} /></span>
+          <span className="settings-preference-option-copy">
             <strong>关闭窗口后驻留后台</strong>
             <small>开启后，关闭主窗口会回到 Windows 系统托盘或 macOS 顶部菜单栏，可从菜单彻底退出。</small>
           </span>
         </label>
-        <label className="settings-toggle">
+        <label className={`settings-preference-option ${preferences.showToolMessages ? "is-selected" : ""} ${loaded ? "" : "is-disabled"}`}>
           <input
             type="checkbox"
             checked={preferences.showToolMessages}
             disabled={!loaded}
             onChange={(event) => void update({ showToolMessages: event.target.checked })}
           />
-          <span>
+          <span className="settings-preference-option-icon"><ListChecks size={20} /></span>
+          <span className="settings-preference-option-copy">
             <strong>显示工具与 Skill 执行记录</strong>
             <small>默认关闭，只展示用户消息、数字员工结论和业务结果；开启后显示调试用执行过程。</small>
           </span>
@@ -1084,10 +1097,10 @@ export function SettingsPanel() {
           </span>
         </div>
       </header>
-      <AppBehaviorSettingsPanel />
       <ModelSettingsPanel />
       <MessageChannelsPanel />
       <ComputerAgentSettingsPanel />
+      <AppBehaviorSettingsPanel />
       <TokenActivityCard />
     </section>
   );

@@ -136,6 +136,7 @@ export function PromptComposer({
   const textareaRef = useRef<HTMLTextAreaElement>(null);
   const overlayRef = useRef<HTMLDivElement>(null);
   const overlayInnerRef = useRef<HTMLDivElement>(null);
+  const isComposingRef = useRef(false);
 
   // textarea 文字透明、可见文字由 overlay 渲染，二者必须同高同滚动，
   // 否则 caret 与可见文字错位。overlay 用 overflow:hidden 裁剪溢出内容，
@@ -258,6 +259,16 @@ export function PromptComposer({
   };
 
   const handleKeyDown = (event: React.KeyboardEvent<HTMLTextAreaElement>) => {
+    // 中文、日文等输入法用 Enter 确认组合文本时，不应触发员工选择、换行或发送。
+    // WKWebView/Safari 某些版本的 isComposing 会提前变为 false，但仍以 229 标记该按键。
+    if (
+      isComposingRef.current
+      || event.nativeEvent.isComposing
+      || event.nativeEvent.keyCode === 229
+    ) {
+      return;
+    }
+
     const isPlainEnter =
       event.key === "Enter" && !event.shiftKey && !event.ctrlKey && !event.metaKey && !event.altKey;
     const isModifierEnter =
@@ -354,6 +365,12 @@ export function PromptComposer({
           title={disabled ? disabledReason : undefined}
           onChange={(event) => handleChange(event.target.value)}
           onScroll={syncOverlayScroll}
+          onCompositionStart={() => {
+            isComposingRef.current = true;
+          }}
+          onCompositionEnd={() => {
+            isComposingRef.current = false;
+          }}
           onKeyDown={handleKeyDown}
           onBlur={() => {
             // 延迟关闭，让浮层 onMouseDown 有机会触发。

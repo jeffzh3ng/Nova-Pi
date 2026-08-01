@@ -64,6 +64,9 @@ use tauri::{Manager, RunEvent};
 
 static EXITING: AtomicBool = AtomicBool::new(false);
 
+#[cfg(target_os = "macos")]
+const MACOS_TRAY_ICON: tauri::image::Image<'static> = tauri::include_image!("icons/tray-icon.png");
+
 fn show_main_window(app: &tauri::AppHandle) {
     if let Some(window) = app.get_webview_window("main") {
         let _ = window.show();
@@ -80,6 +83,13 @@ fn setup_tray(app: &mut tauri::App) -> tauri::Result<()> {
         .tooltip("Nova AI 数字员工")
         .menu(&menu)
         .show_menu_on_left_click(false);
+
+    #[cfg(target_os = "macos")]
+    {
+        tray = tray.icon(MACOS_TRAY_ICON).icon_as_template(true);
+    }
+
+    #[cfg(not(target_os = "macos"))]
     if let Some(icon) = app.default_window_icon().cloned() {
         tray = tray.icon(icon);
     }
