@@ -33,7 +33,11 @@ test("self-contained MCP fixture completes stdio handshake", { timeout: 60_000 }
     const inputSchema = alertTool.inputSchema as { required?: string[] };
     assert.deepEqual(inputSchema.required, ["alertText"]);
     const result = await callMcpToolWithTimeout(server, "analyze_security_alert", { alertText: "test" }, 10);
-    assert.deepEqual(result.structuredContent, { tool: "analyze_security_alert", ok: true });
+    assert.deepEqual(result.structuredContent, {
+      tool: "analyze_security_alert",
+      ok: true,
+      args: { alertText: "test" },
+    });
   } finally {
     await disconnectMcpServer(server);
   }

@@ -109,7 +109,6 @@ pub fn list_mcp_connection_settings(
     })
 }
 
-#[tauri::command]
 pub fn save_mcp_connection_settings(
     app: AppHandle,
     settings: McpConnectionSettings,
@@ -142,7 +141,6 @@ pub fn save_mcp_connection_settings(
     })
 }
 
-#[tauri::command]
 pub fn delete_mcp_connection_settings(app: AppHandle, service_id: String) -> Result<(), String> {
     if service_id.trim().is_empty() {
         return Err("MCP 服务 ID 不能为空。".to_string());
@@ -811,6 +809,7 @@ mod tests {
             command_args: "--transport stdio".to_string(),
             http_url: "http://127.0.0.1:8899".to_string(),
             launch_mode: "script".to_string(),
+            http_headers: Vec::new(),
         };
         save_mcp_connection_settings_to_db(&connection, &custom_settings)
             .expect("custom settings should save");

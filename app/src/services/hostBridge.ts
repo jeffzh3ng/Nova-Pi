@@ -25,7 +25,7 @@ import { listen, type UnlistenFn } from "@tauri-apps/api/event";
 
 export type RpcCommand =
   // 会话生命周期
-  | { id?: string; type: "new_session"; humanId: string; conversationId: string; mcpServiceId?: string; resumeMessages?: unknown[] }
+  | { id?: string; type: "new_session"; humanId: string; conversationId: string; mcpServiceId?: string; resumeMessages?: unknown[]; resumeAttachments?: Array<{ name: string; path: string; ext: string; size?: number }> }
   | { id?: string; type: "dispose_session"; sessionId: string }
   // 对话
   | { id?: string; type: "prompt"; sessionId: string; message: string; images?: unknown[]; attachments?: ConversationAttachments }
@@ -168,10 +168,7 @@ export type McpServerConfig = {
 };
 
 export type ConversationAttachments = {
-  pcapSections?: string[];
-  imageSections?: string[];
-  alertFields?: Record<string, string>;
-  files?: Array<{ name: string; path: string; ext: string }>;
+  files?: Array<{ name: string; path: string; ext: string; size?: number }>;
 };
 
 export type RpcResponse =

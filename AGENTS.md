@@ -25,7 +25,7 @@ React UI ──invoke──► Rust ──spawn──► Node sidecar(nova-pi-ho
 ### 关键设计
 
 - **pi 是纯 Node SDK**（依赖 `node:fs`/`jiti`），不能跑在 webview → 用 Tauri sidecar 子进程嵌入。
-- **pi 无原生 MCP 支持** → 用 `@modelcontextprotocol/client` v2 自建桥接，通过 `DefaultResourceLoader.extensionFactories` 把每个 MCP 工具注册为 pi 扩展工具，让 LLM 原生按需调用（取代原 Nova 的 `agentRuntime.ts` 路由）。客户端以 `versionNegotiation: auto` 兼容 MCP 2026 `server/discover` 与 2025 `initialize`，并兼容旧 HTTP+SSE 服务。
+- **pi 无原生 MCP 支持** → 用 `@modelcontextprotocol/client` v2 自建桥接，通过 `DefaultResourceLoader.extensionFactories` 注册单一 `mcp` 代理工具：服务与工具按需连接/发现，再用 `service/tool` 完整名称调用，避免一次性注入全部远端 schema。客户端以 `versionNegotiation: auto` 兼容 MCP 2026 `server/discover` 与 2025 `initialize`，并兼容旧 HTTP+SSE 服务。
 - **pi 内置 DeepSeek provider**（`api.deepseek.com`），与原 Nova 默认 LLM 一致。
 - **Rust 退化为薄壳**：窗口、文件对话框、sidecar 进程管理、RPC 编排、SQLite 会话索引、大文件 HTTP（风评 zip/xlsx）。
 - **混合传输**：风评大文件走 Rust 直连 HTTP（`/mcp`→`/api` 推导），其余走 MCP。
@@ -108,10 +108,10 @@ JSON-line over stdin/stdout。详见 `host/src/rpc-protocol.ts`。
 | `get_model_settings` / `save_model_settings` / `reset_model_settings` | llm_settings | LLM 配置 CRUD |
 | `test_model_connection` | llm_settings | 模型连通性测试 |
 | `list_token_usage` | llm_settings | token 统计（pi 的真实用量由 rpc.rs 拦截 usage 事件写入）|
-| `upload_risk_assessment_material` / `download_risk_assessment_matrix_template` / `download_risk_assessment_result` | risk_http | 风评材料、空白矩阵和结果文件 |
+| `download_risk_assessment_matrix_template` / `download_risk_assessment_result` | risk_http | 风评空白矩阵和结果文件下载 |
 | `open_file_path` / `show_file_in_folder` / `save_file_as` | files | 文件操作 |
-| `write_temp_text_file` / `write_uploaded_blob` | files | 临时文件 |
-| `parse_pcap_file_cmd` / `extract_alert_image_text_cmd` | files | PCAP/OCR 解析 |
+| `write_temp_text_file` / `write_uploaded_blob` / `pick_and_store_attachments` | files | 临时文件与统一附件接收 |
+| `get_app_preferences` / `save_app_preferences` | app_preferences | 托盘驻留与工具执行记录显示偏好 |
 | `list_mcp_connection_settings` / `save_mcp_connection_settings` / `delete_mcp_connection_settings` | mcp_settings | MCP 配置 CRUD |
 | `list_skills` / `list_skill_catalog` / `get_skill` / `set_skill_enabled` | skill_registry | 技能管理 |
 | `pick_and_install_skill` / `delete_user_skill` / `open_user_skill_dir` / `execute_skill_plan` | skill_registry | 技能安装/执行 |
@@ -127,13 +127,13 @@ JSON-line over stdin/stdout。详见 `host/src/rpc-protocol.ts`。
 |---|---|---|
 | `data-security-risk-assessment` | 数安风评数字员工 | `data-security-risk-assessment-mcp` |
 | `alert-analysis` | 威胁研判数字员工 | `alert-analysis-mcp` |
-| `nova-computer-agent` | Nova 智能员工 | 无（pi 原生工具，设置授权后启用） |
+| `nova-computer-agent` | Nova 智能员工 | 所有已启用 MCP（动态发现）+ 设置授权后的 pi 原生工具 |
 
 每个员工在 `host/src/digital-human.ts` 配置：system prompt + 允许的 MCP 服务集 + 内置工具。
 
 ## Key Design Decisions & Caveats
 
-1. **专业员工用 `noTools: "builtin"` 起步**：只禁用 pi 内置的 read/bash/edit/write；MCP 作为 inline extension 注入并保持可用。禁止使用 `noTools: "all"`，它会同时屏蔽 MCP 扩展工具。唯一例外是 `nova-computer-agent`：它不挂 MCP，通过设置中的逐项授权生成显式 `tools` allowlist，可启用 read/bash/edit/write、Nova 状态管理工具及 Skill 工具；其他员工不得继承这些权限。Skill 工具还会按 Skill 中心启停状态二次过滤，未勾选“使用 Skill”时不会注册到 Nova 会话。
+1. **专业员工用 `noTools: "builtin"` 起步**：只禁用 pi 内置的 read/bash/edit/write；MCP 作为 inline extension 注入并保持可用。禁止使用 `noTools: "all"`，它会同时屏蔽 MCP 扩展工具。`nova-computer-agent` 是底层综合智能员工：通过动态 `all` 范围发现所有已启用 MCP，同时由设置中的逐项授权生成显式 `tools` allowlist，可启用 read/bash/edit/write、Nova 状态管理工具及 Skill 工具；其他员工不得继承这些本机权限，且专业员工仍只能访问各自绑定的 MCP。Skill 工具还会按 Skill 中心启停状态二次过滤，未勾选“使用 Skill”时不会注册到 Nova 会话。
 2. **路由简化**：原 Nova 的 `agentRuntime.ts` 三分支路由（skill/alert/workbench）被 pi 的 LLM 工具调用决策取代。system prompt 承载角色，扩展工具描述能力，LLM 自行决定。
 3. **会话持久化双轨**：pi 的 `SessionManager` 写 JSONL（完整历史，host 内部）；Rust SQLite 存索引+消息快照（侧栏列表+重启恢复）。
 4. **title 保护**：只在 INSERT 时设 title，UPDATE 不覆盖。`title_source` 三态（pending/manual/auto）。手动重命名设 `manual`，LLM 生成设 `auto`，条件 UPDATE（`WHERE title_source='pending' AND archived=0`）防竞态。
@@ -141,12 +141,13 @@ JSON-line over stdin/stdout。详见 `host/src/rpc-protocol.ts`。
 6. **风评轮询在前端**：风评进度由前端 `pollRiskAssessment` 每 3s 调 MCP `get_task_status`（网络失败退避 3→15s，poll token 取消）。`risk_job_update` 事件类型保留供未来 host 推送，但当前 host 不 emit。
 7. **Rust rebuild required**：任何 `src-tauri/src/**/*.rs` 改动需重启 `npm run tauri:dev`。Vite 热重载不覆盖 Rust。
 8. **DeepSeek 兼容**：pi 内置 DeepSeek provider，`thinking:disabled` 由 pi 处理。
-9. **sidecar watchdog**：Node sidecar 意外退出（stdout EOF 且非主动 stop）由 Rust 自动重启并 emit `pi-sidecar-restarted`；重启失败 emit `pi-sidecar-fatal`。
+9. **sidecar 生命周期**：Node sidecar 意外退出（stdout EOF 且非主动 stop）由 Rust 自动重启并 emit `pi-sidecar-restarted`；退出应用时先发送 `shutdown`，等待 host 关闭 MCP 子进程后才超时强杀。应用使用 single-instance，重复启动只唤醒现有窗口；关闭窗口可按设置驻留托盘/macOS 菜单栏。
 10. **abort 走 sidecar**：pi agent loop 的中止通过 sidecar 的 `abort` RPC 命令（pi 的 `session.abort()`）。Rust 无中断标志，耗时 Rust 操作（风评上传等）目前不可中断。
 11. **token 用量落库**：pi 的真实 token 用量由 host 在 agent_end 聚合后 emit `usage` 事件，Rust 在 rpc.rs 拦截写入 token_usage 表（`call_llm` 路径在新架构下几乎不被触达）。
 12. **历史上下文**：pi 无"静默灌入 assistant 回复"的公开 API，切换会话继续对话时，历史作为 system prompt 附录注入（`session-pool.injectHistory`，最多 20 轮）。
 13. **stdout 背压**：host 的所有 stdout 写入经串行化 Promise 队列，`process.stdout.write` 返回 false 时等 `drain`，避免流式事件高吞吐下数据截断。
 14. **Skill 单一目录与运行权限**：用户 Skill 安装到 `<app_data>/.pi/agent/skills`（旧 `<app_data>/skills` 自动迁移），与 pi ResourceLoader 读取目录一致。标准 ZIP 安装使用受限解压、原子替换和路径穿越防护；Skill 环境变量由 Nova 调用 `skill_configure_environment` 配置，macOS 下使用钥匙串主密钥加密保存，工具事件不回显敏感值。
+15. **附件统一交给 Agent 决策**：前端只负责把受支持文件持久化到 `<app_data>/uploads` 并发送元数据；host 仅预览安全文本，二进制文件通过 `mcp.attachment` 在工具调用时注入路径或 Base64。PCAP、截图、ZIP 等不再由前端预先分流调用专用命令。
 
 ## UI Text Guidelines
 

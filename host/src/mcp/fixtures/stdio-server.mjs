@@ -11,15 +11,25 @@ const tools = [
   description: `Test tool: ${name}`,
   inputSchema: {
     type: "object",
-    properties: { alertText: { type: "string" } },
+    properties: {
+      alertText: { type: "string" },
+      ...(name === "analyze_security_alert" ? { pcapFilePath: { type: "string" } } : {}),
+    },
     required: name === "analyze_security_alert" ? ["alertText"] : [],
   },
 }));
 
-const toolResult = (name) => ({
-  content: [{ type: "text", text: JSON.stringify({ tool: name, ok: true }) }],
-  structuredContent: { tool: name, ok: true },
-});
+const toolResult = (name, args = {}) => {
+  const result = {
+    tool: name,
+    ok: true,
+    ...(name === "analyze_security_alert" ? { args } : {}),
+  };
+  return {
+    content: [{ type: "text", text: JSON.stringify(result) }],
+    structuredContent: result,
+  };
+};
 
 if (process.argv.includes("--modern")) {
   serveStdio(() => {
@@ -35,7 +45,7 @@ if (process.argv.includes("--modern")) {
           description: tool.description,
           inputSchema: fromJsonSchema(tool.inputSchema),
         },
-        async () => toolResult(tool.name),
+        async (args) => toolResult(tool.name, args),
       );
     }
 
@@ -77,7 +87,10 @@ if (process.argv.includes("--modern")) {
     if (request.params?.cursor === "page-2") return { tools: tools.slice(2) };
     return { tools: tools.slice(0, 2), nextCursor: "page-2" };
   });
-  server.setRequestHandler("tools/call", async (request) => toolResult(request.params.name));
+  server.setRequestHandler(
+    "tools/call",
+    async (request) => toolResult(request.params.name, request.params.arguments),
+  );
 
   await server.connect(new StdioServerTransport());
 }

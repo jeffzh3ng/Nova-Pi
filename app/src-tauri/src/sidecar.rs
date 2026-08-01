@@ -13,6 +13,8 @@ use std::thread;
 use std::time::Duration;
 
 #[cfg(windows)]
+use std::os::windows::io::AsRawHandle;
+#[cfg(windows)]
 use std::os::windows::process::CommandExt;
 
 use chrono::Local;
@@ -29,6 +31,8 @@ struct SidecarHandle {
 
 static SIDECAR: OnceLock<SidecarHandle> = OnceLock::new();
 static SIDECAR_LOG_LOCK: OnceLock<Mutex<()>> = OnceLock::new();
+#[cfg(windows)]
+static SIDECAR_JOB: OnceLock<usize> = OnceLock::new();
 
 /// watchdog 连续失败计数器：用于指数退避与熔断。
 ///
@@ -77,8 +81,80 @@ fn write_sidecar_log(log_path: Option<&Path>, message: &str) {
     let _ = writeln!(file, "[{timestamp}] {message}");
 }
 
-/// 启动 sidecar。重复调用会先 kill 旧进程再 spawn 新进程。
+/// Keep the complete Node/MCP process tree in a Windows Job Object. The
+/// KILL_ON_JOB_CLOSE limit is the last-resort cleanup path when Nova itself is
+/// terminated and therefore cannot run its normal shutdown handler.
+#[cfg(windows)]
+fn assign_sidecar_to_job(child: &Child) -> Result<(), String> {
+    use std::mem::{size_of, zeroed};
+    use std::ptr::null;
+    use windows_sys::Win32::Foundation::{CloseHandle, HANDLE};
+    use windows_sys::Win32::System::JobObjects::{
+        AssignProcessToJobObject, CreateJobObjectW, JobObjectExtendedLimitInformation,
+        SetInformationJobObject, JOBOBJECT_EXTENDED_LIMIT_INFORMATION,
+        JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE,
+    };
+
+    let job = if let Some(raw) = SIDECAR_JOB.get() {
+        *raw as HANDLE
+    } else {
+        // SAFETY: null security/name pointers request a private unnamed job.
+        let created = unsafe { CreateJobObjectW(null(), null()) };
+        if created.is_null() {
+            return Err(format!(
+                "CreateJobObjectW failed: {}",
+                std::io::Error::last_os_error()
+            ));
+        }
+
+        // SAFETY: the structure is initialized before passing its exact size to
+        // SetInformationJobObject, and the handle is valid from the call above.
+        let mut limits: JOBOBJECT_EXTENDED_LIMIT_INFORMATION = unsafe { zeroed() };
+        limits.BasicLimitInformation.LimitFlags = JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE;
+        let configured = unsafe {
+            SetInformationJobObject(
+                created,
+                JobObjectExtendedLimitInformation,
+                (&limits as *const JOBOBJECT_EXTENDED_LIMIT_INFORMATION).cast(),
+                size_of::<JOBOBJECT_EXTENDED_LIMIT_INFORMATION>() as u32,
+            )
+        };
+        if configured == 0 {
+            let error = std::io::Error::last_os_error();
+            // SAFETY: `created` is a live handle owned by this function.
+            unsafe { CloseHandle(created) };
+            return Err(format!("SetInformationJobObject failed: {error}"));
+        }
+
+        if SIDECAR_JOB.set(created as usize).is_err() {
+            // Another starter won the race; close our duplicate and use the
+            // process-wide handle retained in SIDECAR_JOB.
+            unsafe { CloseHandle(created) };
+        }
+        *SIDECAR_JOB.get().expect("sidecar job must be initialized") as HANDLE
+    };
+
+    // SAFETY: the job handle is retained for the entire Nova process lifetime;
+    // Child owns a valid process handle until it is reaped.
+    let assigned = unsafe { AssignProcessToJobObject(job, child.as_raw_handle() as HANDLE) };
+    if assigned == 0 {
+        return Err(format!(
+            "AssignProcessToJobObject failed: {}",
+            std::io::Error::last_os_error()
+        ));
+    }
+    Ok(())
+}
+
+/// 启动 sidecar。已有健康进程时保持幂等，避免重复命令制造短时双进程。
 pub fn start_sidecar(app: &AppHandle) -> Result<(), String> {
+    if let Ok(mut guard) = sidecar().child.lock() {
+        if let Some(child) = guard.as_mut() {
+            if matches!(child.try_wait(), Ok(None)) {
+                return Ok(());
+            }
+        }
+    }
     start_sidecar_internal(app, true)
 }
 
@@ -140,7 +216,8 @@ fn start_sidecar_internal(app: &AppHandle, reset_watchdog_failures: bool) -> Res
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
-        .env("NOVA_PI_HOST_MODE", &mode);
+        .env("NOVA_PI_HOST_MODE", &mode)
+        .env("NOVA_PI_PARENT_PID", std::process::id().to_string());
     // Tauri 本身是 Windows GUI 程序。Node sidecar 若按默认控制台模式
     // 创建，会在应用启动或 watchdog 重启时短暂弹出黑色 cmd 窗口。
     #[cfg(windows)]
@@ -151,6 +228,16 @@ fn start_sidecar_internal(app: &AppHandle, reset_watchdog_failures: bool) -> Res
         write_sidecar_log(log_path.as_deref(), &format!("spawn failed: {message}"));
         message
     })?;
+    #[cfg(windows)]
+    if let Err(error) = assign_sidecar_to_job(&child) {
+        let _ = child.kill();
+        let _ = child.wait();
+        write_sidecar_log(
+            log_path.as_deref(),
+            &format!("failed to guard sidecar process tree: {error}"),
+        );
+        return Err(format!("无法保护 Node sidecar 进程生命周期：{error}"));
+    }
     write_sidecar_log(
         log_path.as_deref(),
         &format!("spawned sidecar pid={}", child.id()),
@@ -308,7 +395,7 @@ fn start_sidecar_internal(app: &AppHandle, reset_watchdog_failures: bool) -> Res
     //   sync_mcp_config_to_sidecar，若不在此预热，首次自主调用会因 configs 为空而失败，
     //   或 spawn 出不带 env 的 Python 子进程（导致路径守卫误报「路径越界」）。
     // - watchdog 重启时 Node 进程被整个替换，mcpRegistry.configs 清空，必须重新同步。
-    // 异步执行不阻塞 start_sidecar 返回；失败仅记日志（后续 parse_pcap_file_cmd 等会再 sync 兜底）。
+    // 异步执行不阻塞 start_sidecar 返回；失败仅记日志（设置页测试或首次 Agent 调用会再次同步）。
     let app_for_sync = app.clone();
     let sync_log_path = log_path;
     tauri::async_runtime::spawn(async move {
@@ -329,17 +416,40 @@ fn start_sidecar_internal(app: &AppHandle, reset_watchdog_failures: bool) -> Res
     Ok(())
 }
 
-/// 关闭当前已注册的 sidecar 子进程（若有），等待其退出。仅 kill，不重启。
+/// 关闭当前已注册的 sidecar 子进程（若有）。先请求 host 清理 MCP 子进程，再超时强杀。
 fn kill_existing() {
-    if let Ok(mut guard) = sidecar().child.lock() {
-        if let Some(child) = guard.as_mut() {
-            let _ = child.kill();
-            let _ = child.wait();
-        }
-        *guard = None;
+    shutdown_registered_sidecar();
+}
+
+fn shutdown_registered_sidecar() {
+    // 先从全局状态中取走句柄，让 stdout watchdog 将随后到来的 EOF 识别为主动退出。
+    let mut child = sidecar()
+        .child
+        .lock()
+        .ok()
+        .and_then(|mut guard| guard.take());
+    let mut stdin = sidecar()
+        .stdin
+        .lock()
+        .ok()
+        .and_then(|mut guard| guard.take());
+
+    if let Some(mut pipe) = stdin.take() {
+        let _ = pipe.write_all(b"{\"type\":\"shutdown\"}\n");
+        let _ = pipe.flush();
+        drop(pipe);
     }
-    if let Ok(mut guard) = sidecar().stdin.lock() {
-        *guard = None;
+
+    if let Some(mut process) = child.take() {
+        for _ in 0..30 {
+            match process.try_wait() {
+                Ok(Some(_)) => return,
+                Ok(None) => thread::sleep(Duration::from_millis(100)),
+                Err(_) => break,
+            }
+        }
+        let _ = process.kill();
+        let _ = process.wait();
     }
 }
 
@@ -491,19 +601,7 @@ pub fn write_command(command: &serde_json::Value) -> Result<(), String> {
 
 /// 关闭 sidecar（应用退出时调用）。标记为"主动关闭"，watchdog 不会重启。
 pub fn stop_sidecar() {
-    // 先把 child 置 None（在 kill 之前），让 watchdog 线程退出时判定为"主动关闭"不重启。
-    // 注意：watchdog 线程在 stdout EOF 时检查 child.is_some()，所以这里必须先取走 child。
-    let mut killed_child: Option<Child> = None;
-    if let Ok(mut guard) = sidecar().child.lock() {
-        killed_child = guard.take();
-    }
-    if let Ok(mut guard) = sidecar().stdin.lock() {
-        *guard = None;
-    }
-    if let Some(mut child) = killed_child {
-        let _ = child.kill();
-        let _ = child.wait();
-    }
+    shutdown_registered_sidecar();
 }
 
 #[cfg(test)]

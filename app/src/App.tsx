@@ -30,8 +30,6 @@ import {
 import type { ConversationSnapshot, ConversationSummary } from "./services/conversationStore";
 import { requiresNewPiSession } from "./services/conversationRouting";
 import { executeSkillPlan } from "./services/skillExecution";
-import { parseAlertFileContent } from "./services/alertFileParser";
-import type { ParsedAlertFields } from "./services/alertFileParser";
 import { sendRpc, subscribePiEvents } from "./services/hostBridge";
 import { listMessageChannels } from "./services/messageChannels";
 import { startWeixinBot, loginWeixinBot } from "./services/wechatBot";
@@ -42,13 +40,10 @@ import {
   downloadRiskAssessmentMatrixTemplate,
   downloadRiskAssessmentResult,
   getRiskAssessmentStatus,
-  listRiskAssessmentMatrices,
   normalizeRiskAssessmentResult,
-  pickAndUploadRemoteRiskMaterial,
   submitRiskAssessment,
-  uploadLocalRiskMaterial,
 } from "./services/riskAssessment";
-import type { RemoteRiskMaterial, RiskTaskStatus } from "./services/riskAssessment";
+import type { RiskTaskStatus } from "./services/riskAssessment";
 import type {
   AlertAnalysisResult,
   ChatMessage,
@@ -62,11 +57,7 @@ import type {
   SidebarNavId,
   UsedSkill,
 } from "./types";
-import {
-  DATA_RISK_ASSESSMENT_MCP_SERVICE,
-  listMcpConnectionSettings,
-  testMcpConnection,
-} from "./services/mcpSettings";
+import { listMcpConnectionSettings } from "./services/mcpSettings";
 import type { McpConnectionSettings } from "./services/mcpSettings";
 import {
   COMPUTER_AGENT_ID,
@@ -76,6 +67,11 @@ import {
   updateNovaContext,
 } from "./services/computerAgent";
 import type { ComputerAgentSettings } from "./services/computerAgent";
+import {
+  DEFAULT_APP_PREFERENCES,
+  getAppPreferences,
+  type AppPreferences,
+} from "./services/appPreferences";
 
 const SIDEBAR_PANEL_WIDTH_KEY = "dp-agent-sidebar-panel-width";
 const RECENTLY_USED_HUMAN_IDS_KEY = "dp-recently-used-human-ids";
@@ -84,7 +80,7 @@ const SIDEBAR_PANEL_MAX = 420;
 
 type McpAvailability = {
   state: "checking" | "connected" | "disabled" | "unconfigured" | "error";
-  badge: "检测中" | "可用" | "待配置" | "不可用";
+  badge: "检测中" | "可用" | "按需可用" | "待配置" | "不可用";
   disabledReason?: string;
 };
 
@@ -381,14 +377,6 @@ const sanitizeStaleRunningStatus = (status: RecentTask["status"]): RecentTask["s
   return "done";
 };
 
-type AlertAttachmentContext = {
-  fields?: ParsedAlertFields;
-  pcapSections: string[];
-  imageSections: string[];
-  /** 用户上传的 PCAP/抓包文件元信息，用于在用户消息上展示彩色标签、双击打开 */
-  pcapFiles: ChatMessageAttachment[];
-};
-
 type ConversationMetadata = Pick<ConversationSnapshot, "agentId" | "agentName">;
 
 type PiSessionIdentity = {
@@ -419,25 +407,6 @@ const fileToBase64 = async (file: File) => {
   return btoa(chunks.join(""));
 };
 
-const formatPcapSection = (fileName: string, pcapText: string) =>
-  `=== PCAP 文件：${fileName} ===\n${pcapText}`;
-
-const formatAlertImageSection = (fileName: string, imageText: string) =>
-  `=== 告警截图 OCR：${fileName} ===\n${imageText}`;
-
-const mergeAlertFields = (...fieldSets: Array<ParsedAlertFields | undefined>) => {
-  const merged: ParsedAlertFields = {};
-  for (const fields of fieldSets) {
-    if (!fields) continue;
-    for (const [key, value] of Object.entries(fields) as Array<[keyof ParsedAlertFields, string | undefined]>) {
-      if (value && !merged[key]) {
-        merged[key] = value;
-      }
-    }
-  }
-  return merged;
-};
-
 type RiskAssessmentContext = {
   jobMessageId: string;
   job: RiskAssessmentJob;
@@ -461,9 +430,14 @@ const interpretToolResult = (
   riskMatrixTemplate?: { matrixName: string; fileName: string };
 } => {
   if (!result || typeof result !== "object") return {};
-  const details = (result as { details?: unknown }).details;
-  if (details && typeof details === "object") {
-    const det = details as Record<string, unknown>;
+  const rawDetails = (result as { details?: unknown }).details;
+  if (rawDetails && typeof rawDetails === "object") {
+    const envelope = rawDetails as Record<string, unknown>;
+    // 统一 mcp 代理保留 serviceId/toolName 来源，并把业务负载放在 result 中。
+    // 兼容旧工具直接把业务负载放 details 的历史会话。
+    const det = envelope.result && typeof envelope.result === "object"
+      ? envelope.result as Record<string, unknown>
+      : envelope;
     if (det.module === "alert-analysis" || det.module === "ip-threat-analysis") {
       return { alertAnalysisResult: det as unknown as AlertAnalysisResult };
     }
@@ -511,6 +485,7 @@ export default function App() {
   const [mcpCatalog, setMcpCatalog] = useState<McpConnectionSettings[]>([]);
   const [mcpAvailability, setMcpAvailability] = useState<Record<string, McpAvailability>>({});
   const [computerAgentSettings, setComputerAgentSettings] = useState<ComputerAgentSettings | null>(null);
+  const [appPreferences, setAppPreferences] = useState<AppPreferences>(DEFAULT_APP_PREFERENCES);
   const activeRunIdRef = useRef(0);
   // busy 的 ref 镜像：catch/超时等非渲染上下文需要读最新值，避免 stale closure。
   const busyRef = useRef(false);
@@ -538,7 +513,6 @@ export default function App() {
   const conversationMessageBuffersRef = useRef<Record<string, ChatMessage[]>>({});
   const conversationMetadataRef = useRef<Record<string, ConversationMetadata>>({});
   const conversationSaveQueuesRef = useRef<Record<string, Promise<unknown>>>({});
-  const alertAttachmentContextsRef = useRef<Record<string, AlertAttachmentContext>>({});
   /** 每个会话累积的普通文件附件（write_uploaded_blob 后的临时路径），发送时收集传给 host。 */
   const fileAttachmentContextsRef = useRef<Record<string, ChatMessageAttachment[]>>({});
   const riskAssessmentContextsRef = useRef<Partial<Record<string, RiskAssessmentContext>>>({});
@@ -548,6 +522,24 @@ export default function App() {
   const deletedConversationIdsRef = useRef<Set<string>>(new Set());
   const titleGenerationInFlightRef = useRef<Set<string>>(new Set());
   const titleGenerationTimersRef = useRef<Record<string, ReturnType<typeof setTimeout>>>({});
+
+  useEffect(() => {
+    let active = true;
+    void getAppPreferences()
+      .then((loaded) => { if (active) setAppPreferences(loaded); })
+      .catch(() => {
+        // Browser preview or an older native shell: retain safe defaults.
+      });
+    const onChanged = (event: Event) => {
+      const detail = (event as CustomEvent<AppPreferences>).detail;
+      if (detail) setAppPreferences(detail);
+    };
+    window.addEventListener("nova-app-preferences-changed", onChanged);
+    return () => {
+      active = false;
+      window.removeEventListener("nova-app-preferences-changed", onChanged);
+    };
+  }, []);
 
   useEffect(() => {
     let alive = true;
@@ -611,20 +603,9 @@ export default function App() {
             ] as const;
           }
 
-          try {
-            await testMcpConnection(serviceId);
-            return [serviceId, { state: "connected", badge: "可用" } satisfies McpAvailability] as const;
-          } catch (error) {
-            const detail = String(error).replace(/^Error:\s*/i, "").slice(0, 180);
-            return [
-              serviceId,
-              {
-                state: "error",
-                badge: "不可用",
-                disabledReason: `${label}对应的 MCP 服务连接失败${detail ? `：${detail}` : ""}`,
-              } satisfies McpAvailability,
-            ] as const;
-          }
+          // MCP 连接按需建立，避免应用启动时同时拉起全部 stdio/Node 服务。
+          // 真正的握手错误会由 Agent 的 mcp 发现调用或设置页的“测试连接”明确返回。
+          return [serviceId, { state: "connected", badge: "按需可用" } satisfies McpAvailability] as const;
         }),
       );
 
@@ -815,31 +796,6 @@ export default function App() {
       }
       return next;
     });
-  };
-
-  const getAlertAttachmentContext = (conversationId: string): AlertAttachmentContext => (
-    alertAttachmentContextsRef.current[conversationId] ?? { pcapSections: [], imageSections: [], pcapFiles: [] }
-  );
-
-  const setAlertAttachmentContext = (
-    conversationId: string,
-    patch: Partial<AlertAttachmentContext>,
-  ) => {
-    const previous = getAlertAttachmentContext(conversationId);
-    alertAttachmentContextsRef.current[conversationId] = {
-      fields: patch.fields ?? previous.fields,
-      pcapSections: patch.pcapSections ?? previous.pcapSections,
-      imageSections: patch.imageSections ?? previous.imageSections,
-      pcapFiles: patch.pcapFiles ?? previous.pcapFiles,
-    };
-  };
-
-  const clearAlertAttachmentContext = (conversationId?: string) => {
-    if (conversationId) {
-      delete alertAttachmentContextsRef.current[conversationId];
-      return;
-    }
-    alertAttachmentContextsRef.current = {};
   };
 
   const clearRiskAssessmentContext = (conversationId?: string) => {
@@ -1067,10 +1023,6 @@ export default function App() {
     : selectedTask?.status ?? "done";
   const currentConversationRunning =
     !!currentConversationId && runningConversationIds.has(currentConversationId);
-  const riskAssessmentTransport =
-    mcpCatalog.find((settings) => settings.serviceId === DATA_RISK_ASSESSMENT_MCP_SERVICE)
-      ?.transport ?? "stdio";
-
   useEffect(() => {
     const timer = window.setTimeout(() => {
       const contexts = [...recentTasks.map((task) => ({ ...task, archived: false })), ...archivedTasks.map((task) => ({ ...task, archived: true }))]
@@ -1697,96 +1649,6 @@ export default function App() {
     return nextContext;
   };
 
-  const beginRiskMaterialUpload = (
-    conversationId: string,
-    fileName: string,
-  ) => {
-    const message = createUserMessage(
-      `正在上传评估材料「${fileName}」，大文件可能需要一些时间，请稍候。`,
-      [{
-        kind: "file",
-        name: fileName,
-        ext: "zip",
-        uploadStatus: "uploading",
-      }],
-    );
-    appendMessageToConversation(conversationId, message, "running");
-    return message.id;
-  };
-
-  const finishRiskMaterialUpload = (
-    conversationId: string,
-    messageId: string,
-    fileName: string,
-    status: "ready" | "failed",
-    path?: string,
-    error?: string,
-  ) => {
-    const attachment: ChatMessageAttachment = {
-      kind: "file",
-      name: fileName,
-      path,
-      ext: "zip",
-      uploadStatus: status,
-      uploadError: error,
-    };
-    updateMessageInConversation(
-      conversationId,
-      messageId,
-      (message) => ({
-        ...message,
-        content: status === "ready"
-          ? `已上传评估材料：${fileName}`
-          : `评估材料上传失败：${fileName}`,
-        attachments: [attachment],
-      }),
-      "paused",
-    );
-    return attachment;
-  };
-
-  const prepareRiskAssessmentMaterial = async (
-    conversationId: string,
-    uploaded: RemoteRiskMaterial,
-    displayFileName: string,
-    attachments: ChatMessageAttachment[],
-  ) => {
-    let matrices: string[] = [];
-    try {
-      matrices = await listRiskAssessmentMatrices();
-    } catch (error) {
-      console.error("读取评估矩阵失败", error);
-    }
-    if (!matrices.length) matrices = ["网络数据安全风险评估项目清单"];
-
-    const job: RiskAssessmentJob = {
-      materialId: uploaded.materialId,
-      fileName: displayFileName,
-      status: "uploaded",
-      progress: "材料已上传",
-      progressPct: 0,
-    };
-    const jobMessageId = makeLocalId();
-    riskAssessmentContextsRef.current[conversationId] = {
-      jobMessageId,
-      job,
-      attachments,
-    };
-    appendMessageToConversation(
-      conversationId,
-      {
-        id: jobMessageId,
-        role: "assistant",
-        title: "评估材料已就绪",
-        content: `已接收「${displayFileName}」（${uploaded.fileCount} 个文件）。请选择评估矩阵开始评估。`,
-        suggestions: matrices.map((name) => `评估：${name}`),
-        riskAssessmentJob: job,
-        time: formatMessageTime(),
-      },
-      "paused",
-    );
-  };
-
   const pollRiskAssessment = async (
     conversationId: string,
     initialContext: RiskAssessmentContext,
@@ -2263,7 +2125,6 @@ export default function App() {
     override?: {
       request: string;
       userMessage?: string;
-      fields?: ParsedAlertFields;
       skipUserMessage?: boolean;
     },
   ) => {
@@ -2286,21 +2147,6 @@ export default function App() {
     if (!override && targetHuman.status !== "ready") return;
     if (!override && currentConversationRunning) return;
 
-    // 数安风评：「评估：<矩阵名>」走异步评估，不经 pi。
-    if (targetHuman.id === "data-security-risk-assessment") {
-      const matrixName = request.match(/^评估：\s*(.+)$/)?.[1]?.trim();
-      if (matrixName) {
-        const conversationId = ensureConversation(targetMetadata);
-        setPrompt("");
-        await startRiskAssessment(
-          conversationId,
-          matrixName,
-          override?.userMessage ?? request,
-        );
-        return;
-      }
-    }
-
     // 通用对话（general-chat）不计入「最近使用」，只有真正的数字员工才记。
     if (targetHuman.id !== GENERAL_CHAT_HUMAN_ID) {
       recordHumanUsage(targetHuman.id);
@@ -2315,32 +2161,20 @@ export default function App() {
       role: message.role,
       content: message.content,
     }));
+    const resumeAttachments = (conversationMessageBuffersRef.current[conversationId] ?? [])
+      .flatMap((message) => message.attachments ?? [])
+      .filter((item): item is ChatMessageAttachment & { path: string; ext: string } => Boolean(item.path && item.ext))
+      .map((item) => ({ name: item.name, path: item.path, ext: item.ext, size: item.size }));
     setBusy(true);
     busyRef.current = true;
     setConversationRunning(conversationId, true);
     setActiveNav("tasks");
-    const attachmentContext = getAlertAttachmentContext(conversationId);
     if (!override?.skipUserMessage) {
-      const userAttachments =
-        attachmentContext.pcapFiles.length > 0 ? attachmentContext.pcapFiles : undefined;
-      appendUserMessage(override?.userMessage ?? request, userAttachments);
+      appendUserMessage(override?.userMessage ?? request);
     }
     setPrompt("");
 
     try {
-      const alertFields = override?.fields ?? attachmentContext.fields;
-      const pcapData = attachmentContext.pcapSections.length
-        ? attachmentContext.pcapSections.join("\n\n")
-        : undefined;
-      const alertImageData = attachmentContext.imageSections.length
-        ? attachmentContext.imageSections.join("\n\n")
-        : undefined;
-      const requestForAgent =
-        targetHuman.id === "alert-analysis" && alertImageData
-          ? `${request}\n\n${alertImageData}`
-          : request;
-      clearAlertAttachmentContext(conversationId);
-
       // 在 host 内创建/复用 pi 会话，然后把 prompt 发给 pi 的 agent loop。
       // 流式 token、工具调用、结构化结果都通过 subscribePiEvents 的事件回流。
       let piSessionId = conversationPiSessionRef.current[conversationId];
@@ -2363,6 +2197,7 @@ export default function App() {
           // 自定义 MCP 员工（非内置 9 个）需要 mcpServiceId 才能在 host 端获得 MCP 工具白名单。
           mcpServiceId: targetHuman.mcpService,
           resumeMessages,
+          resumeAttachments,
         });
         conversationPiSessionRef.current[conversationId] = piSessionId;
         conversationPiSessionIdentityRef.current[conversationId] = {
@@ -2371,20 +2206,18 @@ export default function App() {
         };
       }
 
-      // 收集本会话累积的普通文件附件（write_uploaded_blob 后的临时路径），交给 host 读取注入。
+      // 仅传本轮新附件；host 会维护会话级受控附件清单，模型通过 mcp.attachment 引用。
       const fileAttachments = fileAttachmentContextsRef.current[conversationId] ?? [];
       const filePayload = fileAttachments
         .filter((item) => item.path && item.ext)
-        .map((item) => ({ name: item.name, path: item.path!, ext: item.ext! }));
+        .map((item) => ({ name: item.name, path: item.path!, ext: item.ext!, size: item.size }));
       const attachments: ConversationAttachments = {
-        pcapSections: pcapData ? [pcapData] : undefined,
-        alertFields: alertFields as Record<string, string> | undefined,
         files: filePayload.length > 0 ? filePayload : undefined,
       };
       await sendRpc({
         type: "prompt",
         sessionId: piSessionId,
-        message: requestForAgent,
+        message: request,
         attachments,
       });
       // 文件附件已随本次 prompt 发送给 host，清空避免下一轮重复发送。
@@ -2422,7 +2255,6 @@ export default function App() {
   };
 
   const clearConversationView = () => {
-    clearAlertAttachmentContext(currentConversationIdRef.current);
     setSelectedTaskId(undefined);
     setCurrentConversationId(undefined);
     currentConversationIdRef.current = undefined;
@@ -2453,7 +2285,6 @@ export default function App() {
     setPrompt("");
     deletedConversationIdsRef.current.delete(conversationId);
     rememberConversationMetadata(conversationId, metadataForHumanId("alert-analysis"));
-    alertAttachmentContextsRef.current[conversationId] = { pcapSections: [], imageSections: [], pcapFiles: [] };
     const alertHuman = effectiveDigitalHumans.find((human) => human.id === "alert-analysis");
     const openingMessages = digitalHumanOpeningMessages(alertHuman);
     conversationMessageBuffersRef.current[conversationId] = openingMessages;
@@ -2522,7 +2353,6 @@ export default function App() {
     setSelectedTaskId(task.id);
     setPrompt("");
     setBusy(true);
-    clearAlertAttachmentContext(task.id);
     setCurrentConversationId(task.id);
     currentConversationIdRef.current = task.id;
     setConversationReadOnly(isArchived);
@@ -2609,300 +2439,89 @@ export default function App() {
     }
   };
 
+  const delegateAttachmentsToAgent = async (
+    conversationId: string,
+    uploaded: ChatMessageAttachment[],
+  ) => {
+    appendUserMessageToConversation(
+      conversationId,
+      `已上传附件：${uploaded.map((item) => item.name).join("、")}`,
+      uploaded,
+    );
+    const previous = fileAttachmentContextsRef.current[conversationId] ?? [];
+    fileAttachmentContextsRef.current[conversationId] = [...previous, ...uploaded];
+    setBusy(false);
+    await submitPrompt({
+      request: "请结合当前对话分析这些附件所对应的用户目的，并自主决定下一步处理。需要外部能力时，先发现并调用当前数字员工绑定的 MCP 服务；如果目的不明确，请先提出最少量的澄清问题。",
+      skipUserMessage: true,
+    });
+  };
+
   const handleAttachFiles = async (files: File[]) => {
     if (!files.length || currentConversationRunning) return;
-
     const conversationId = ensureConversation();
     setActiveNav("tasks");
     setBusy(true);
 
     try {
-      const pcapExts = ["pcap", "pcapng", "cap"];
-      const imageExts = ["png", "jpg", "jpeg", "bmp", "webp", "tif", "tiff"];
-      const zipExts = ["zip"];
-      const pcapFiles = files.filter((f) => {
-        const ext = f.name.split(".").pop()?.toLowerCase() ?? "";
-        return pcapExts.includes(ext);
-      });
-      const imageFiles = files.filter((f) => {
-        const ext = f.name.split(".").pop()?.toLowerCase() ?? "";
-        return imageExts.includes(ext);
-      });
-      const zipFiles = files.filter((f) => {
-        const ext = f.name.split(".").pop()?.toLowerCase() ?? "";
-        return zipExts.includes(ext);
-      });
-      // 风评员工的 zip 走专用链路（upload_materials 入库），不归入普通附件；
-      // 其余员工（如代码审计数字员工）的 zip 作为普通附件透传，由其 MCP 工具自行读取解析。
-      const isRiskEmployee = selectedHuman.id === "data-security-risk-assessment";
-      const regularFiles = files.filter((f) => {
-        const ext = f.name.split(".").pop()?.toLowerCase() ?? "";
-        return (
-          !pcapExts.includes(ext) &&
-          !imageExts.includes(ext) &&
-          !(zipExts.includes(ext) && isRiskEmployee)
-        );
-      });
-
-      if (pcapFiles.length > 0 && selectedHuman.id === "alert-analysis") {
-        const pcapAttachments: ChatMessageAttachment[] = [];
-        const pcapJobs: { name: string; tmpPath: string }[] = [];
-        for (const pcapFile of pcapFiles) {
-          const base64 = await fileToBase64(pcapFile);
-          const ext = fileExt(pcapFile.name) || "pcap";
-          const tmpPath = await invoke<string>("write_uploaded_blob", {
-            base64Data: base64,
-            extension: ext,
-            fileName: pcapFile.name,
-          });
-          pcapAttachments.push({ kind: "file", name: pcapFile.name, path: tmpPath, ext });
-          pcapJobs.push({ name: pcapFile.name, tmpPath });
-        }
-        appendUserMessageToConversation(
-          conversationId,
-          `已上传数据包：${pcapFiles.map((f) => f.name).join("、")}`,
-          pcapAttachments,
-        );
-
-        const pcapSections: string[] = [];
-        let totalPcapChars = 0;
-        for (const job of pcapJobs) {
-          const pcapText = await invoke<string>("parse_pcap_file_cmd", { path: job.tmpPath });
-          pcapSections.push(formatPcapSection(job.name, pcapText));
-          totalPcapChars += pcapText.length;
-          appendMessageToConversation(
-            conversationId,
-            progressToMessage({
-              title: `已解析数据包：${job.name}`,
-              content: `已提取数据包内容，共 ${pcapText.length} 字符。`,
-              detail: pcapText,
-            }),
-            "paused",
-          );
-        }
-        const previous = getAlertAttachmentContext(conversationId);
-        setAlertAttachmentContext(conversationId, {
-          pcapSections: [...previous.pcapSections, ...pcapSections],
-          pcapFiles: [...previous.pcapFiles, ...pcapAttachments],
+      const uploaded: ChatMessageAttachment[] = [];
+      for (const file of files) {
+        const base64 = await fileToBase64(file);
+        const ext = fileExt(file.name) || "bin";
+        const tmpPath = await invoke<string>("write_uploaded_blob", {
+          base64Data: base64,
+          extension: ext,
+          fileName: file.name,
         });
-        appendMessageToConversation(
-          conversationId,
-          progressToMessage({
-            title: "数据包解析完成",
-            content: `已解析 ${pcapFiles.length} 个数据包（共 ${totalPcapChars} 字符）。是否开始分析？也可在输入框补充说明后提交。`,
-            suggestions: ["开始研判"],
-          }),
-          "paused",
-        );
-      }
-
-      if (zipFiles.length > 0 && selectedHuman.id === "data-security-risk-assessment") {
-        const zipFile = zipFiles[zipFiles.length - 1];
-        const uploadMessageId = beginRiskMaterialUpload(conversationId, zipFile.name);
-        try {
-          const base64 = await fileToBase64(zipFile);
-          const tmpPath = await invoke<string>("write_uploaded_blob", {
-            base64Data: base64,
-            extension: "zip",
-            fileName: zipFile.name,
-          });
-          const uploaded = riskAssessmentTransport === "http"
-            ? await pickAndUploadRemoteRiskMaterial(tmpPath)
-            : await uploadLocalRiskMaterial(tmpPath);
-          const zipAttachment = finishRiskMaterialUpload(
-            conversationId,
-            uploadMessageId,
-            zipFile.name,
-            "ready",
-            tmpPath,
-          );
-          await prepareRiskAssessmentMaterial(
-            conversationId,
-            uploaded,
-            zipFile.name,
-            [zipAttachment],
-          );
-        } catch (error) {
-          finishRiskMaterialUpload(
-            conversationId,
-            uploadMessageId,
-            zipFile.name,
-            "failed",
-            undefined,
-            error instanceof Error ? error.message : String(error),
-          );
-          throw error;
-        }
-      }
-
-      if (imageFiles.length > 0) {
-        if (selectedHuman.id !== "alert-analysis") {
-          throw new Error("告警截图识别仅支持威胁研判数字员工。");
-        }
-        const imageAttachments: ChatMessageAttachment[] = [];
-        const imageJobs: { name: string; tmpPath: string }[] = [];
-        for (const imageFile of imageFiles) {
-          const base64 = await fileToBase64(imageFile);
-          const ext = fileExt(imageFile.name) || "png";
-          const tmpPath = await invoke<string>("write_uploaded_blob", {
-            base64Data: base64,
-            extension: ext,
-            fileName: imageFile.name,
-          });
-          const mime = IMAGE_MIME_BY_EXT[ext] ?? "image/png";
-          imageAttachments.push({
-            kind: "image",
-            name: imageFile.name,
-            previewUrl: `data:${mime};base64,${base64}`,
-            path: tmpPath,
-            ext,
-          });
-          imageJobs.push({ name: imageFile.name, tmpPath });
-        }
-        appendUserMessageToConversation(
-          conversationId,
-          `已上传告警截图：${imageFiles.map((f) => f.name).join("、")}`,
-          imageAttachments,
-        );
-        const imageSections: string[] = [];
-        const parsedImageFields: ParsedAlertFields[] = [];
-        let totalOcrChars = 0;
-        for (const job of imageJobs) {
-          const imageText = await invoke<string>("extract_alert_image_text_cmd", {
-            path: job.tmpPath,
-          });
-          imageSections.push(formatAlertImageSection(job.name, imageText));
-          parsedImageFields.push(parseAlertFileContent(imageText).fields);
-          totalOcrChars += imageText.length;
-          appendMessageToConversation(
-            conversationId,
-            progressToMessage({
-              title: `已识别告警截图：${job.name}`,
-              content: `智谱 OCR 已识别告警截图，提取约 ${imageText.length} 字符。`,
-              detail: imageText,
-            }),
-            "paused",
-          );
-        }
-        const previous = getAlertAttachmentContext(conversationId);
-        const mergedFields = mergeAlertFields(previous.fields, ...parsedImageFields);
-        setAlertAttachmentContext(conversationId, {
-          fields: Object.keys(mergedFields).length ? mergedFields : previous.fields,
-          imageSections: [...previous.imageSections, ...imageSections],
+        const isImage = Object.prototype.hasOwnProperty.call(IMAGE_MIME_BY_EXT, ext);
+        uploaded.push({
+          kind: isImage ? "image" : "file",
+          name: file.name,
+          previewUrl: isImage ? `data:${IMAGE_MIME_BY_EXT[ext]};base64,${base64}` : undefined,
+          path: tmpPath,
+          ext,
+          size: file.size,
         });
-        appendMessageToConversation(
-          conversationId,
-          progressToMessage({
-            title: "截图解析完成",
-            content: `已解析 ${imageFiles.length} 张告警截图（共 ${totalOcrChars} 字符）。是否开始分析？也可在输入框补充说明后提交。`,
-            suggestions: ["开始研判"],
-          }),
-          "paused",
-        );
       }
 
-      // 普通文本/任意文件：统一走附件通道（write_uploaded_blob 存临时文件 → 作为
-      // ChatMessageAttachment 挂在用户消息上 → 发送时收集进 attachments.files 交给 host）。
-      // 不再把文件内容读进输入框文本（旧逻辑会污染对话框，且大文件撑爆 prompt）。
-      if (regularFiles.length > 0) {
-        const regularAttachments: ChatMessageAttachment[] = [];
-        for (const file of regularFiles) {
-          const base64 = await fileToBase64(file);
-          const ext = fileExt(file.name) || "txt";
-          const tmpPath = await invoke<string>("write_uploaded_blob", {
-            base64Data: base64,
-            extension: ext,
-            fileName: file.name,
-          });
-          regularAttachments.push({ kind: "file", name: file.name, path: tmpPath, ext });
-        }
-        appendUserMessageToConversation(
-          conversationId,
-          `已上传文件：${regularFiles.map((f) => f.name).join("、")}`,
-          regularAttachments,
-        );
-        // 累积到会话上下文，submitPrompt 时收集传给 host。
-        const previous = fileAttachmentContextsRef.current[conversationId] ?? [];
-        fileAttachmentContextsRef.current[conversationId] = [...previous, ...regularAttachments];
-        appendMessageToConversation(
-          conversationId,
-          progressToMessage({
-            title: "文件已就绪",
-            content: `已上传 ${regularFiles.length} 个文件，内容将在发送时一并交给数字员工。可在输入框补充说明后提交。`,
-          }),
-          "paused",
-        );
-      }
+      await delegateAttachmentsToAgent(conversationId, uploaded);
     } catch (error) {
+      setBusy(false);
       appendMessageToConversation(
         conversationId,
         progressToMessage({
-          title: "附件读取失败",
+          title: "附件上传失败",
           content: error instanceof Error ? error.message : String(error),
         }),
         "paused",
       );
-    } finally {
-      setBusy(false);
     }
   };
 
-  const handlePickRiskAssessmentMaterial = async () => {
-    if (currentConversationRunning || selectedHuman.id !== "data-security-risk-assessment") return;
-    const conversationId = ensureConversation();
-    setActiveNav("tasks");
+  const handlePickAttachments = async () => {
+    if (currentConversationRunning) return;
     setBusy(true);
-    setConversationRunning(conversationId, true);
-    let uploadMessageId: string | undefined;
-    let selectedFileName = "评估材料.zip";
-    let unlisten = () => {};
     try {
-      unlisten = await listen<{ fileName: string; totalSize: number }>(
-        "risk-assessment-upload-started",
-        (event) => {
-          if (uploadMessageId) return;
-          selectedFileName = event.payload.fileName || selectedFileName;
-          uploadMessageId = beginRiskMaterialUpload(conversationId, selectedFileName);
-        },
-      );
-      const uploaded = await pickAndUploadRemoteRiskMaterial();
-      selectedFileName = uploaded.fileName || selectedFileName;
-      uploadMessageId ??= beginRiskMaterialUpload(conversationId, selectedFileName);
-      const attachment = finishRiskMaterialUpload(
-        conversationId,
-        uploadMessageId,
-        selectedFileName,
-        "ready",
-      );
-      await prepareRiskAssessmentMaterial(
-        conversationId,
-        uploaded,
-        selectedFileName,
-        [attachment],
-      );
-    } catch (error) {
-      const message = error instanceof Error ? error.message : String(error);
-      if (message !== "已取消") {
-        if (uploadMessageId) {
-          finishRiskMaterialUpload(
-            conversationId,
-            uploadMessageId,
-            selectedFileName,
-            "failed",
-            undefined,
-            message,
-          );
-        }
-        appendMessageToConversation(
-          conversationId,
-          progressToMessage({ title: "材料上传失败", content: message }),
-          "paused",
-        );
+      const uploaded = await invoke<ChatMessageAttachment[]>("pick_and_store_attachments");
+      if (!uploaded.length) {
+        setBusy(false);
+        return;
       }
-    } finally {
-      unlisten();
-      setConversationRunning(conversationId, false);
+      const conversationId = ensureConversation();
+      setActiveNav("tasks");
+      await delegateAttachmentsToAgent(conversationId, uploaded);
+    } catch (error) {
       setBusy(false);
+      if (String(error).includes("已取消")) return;
+      const conversationId = ensureConversation();
+      appendMessageToConversation(
+        conversationId,
+        progressToMessage({
+          title: "附件上传失败",
+          content: error instanceof Error ? error.message : String(error),
+        }),
+        "paused",
+      );
     }
   };
 
@@ -3126,7 +2745,6 @@ export default function App() {
     for (const key of Object.keys(toolMessageIdRef.current)) {
       if (key.startsWith(prefix)) delete toolMessageIdRef.current[key];
     }
-    clearAlertAttachmentContext(conversationId);
     clearRiskAssessmentContext(conversationId);
   };
 
@@ -3263,18 +2881,14 @@ export default function App() {
             mentionHumans={mentionableHumans}
             taskTitle={selectedTask?.title ?? "新任务"}
             taskStatus={selectedTaskStatus}
+            showToolMessages={appPreferences.showToolMessages}
             taskStartedAt={selectedTask?.createdAt}
             updatedTime={selectedTask?.time}
             backLabel={activeNav === "projects" ? "返回归档列表" : "返回任务中心"}
             onBack={handleBackFromConversation}
             onPromptChange={setPrompt}
             onAttachFiles={handleAttachFiles}
-            onPickAttachment={
-              selectedHuman.id === "data-security-risk-assessment"
-              && riskAssessmentTransport === "http"
-                ? handlePickRiskAssessmentMaterial
-                : undefined
-            }
+            onPickAttachment={handlePickAttachments}
             onSubmit={submitPrompt}
             onCancel={handleCancel}
             onSuggestionSelect={handleSuggestionSelect}
@@ -3295,12 +2909,7 @@ export default function App() {
               modelError={modelError}
               onPromptChange={setPrompt}
               onAttachFiles={handleAttachFiles}
-              onPickAttachment={
-                selectedHuman.id === "data-security-risk-assessment"
-                && riskAssessmentTransport === "http"
-                  ? handlePickRiskAssessmentMaterial
-                  : undefined
-              }
+              onPickAttachment={handlePickAttachments}
               onSubmit={submitPrompt}
               onCancel={handleCancel}
             />

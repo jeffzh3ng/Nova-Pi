@@ -56,7 +56,7 @@ export function ComputerAgentSettingsPanel() {
         setStatus(settings.enabled
           ? granted > 0
             ? `Nova 已启用，${granted} 项能力已授权。`
-            : "Nova 已启用，但尚未授权本机任务能力；普通对话仍可使用。"
+            : "Nova 已启用但尚未授权本机任务能力；已启用的 MCP 仍可调用。"
           : "Nova 默认存在，当前尚未启用。");
       })
       .catch((error) => {
@@ -124,7 +124,7 @@ export function ComputerAgentSettingsPanel() {
             <span className="mcp-card-icon"><Bot size={22} /></span>
             <div>
               <h2>基础配置</h2>
-              <p>设置员工名称、默认工作目录和可使用的任务能力。</p>
+              <p>Nova 可调度所有已启用的 MCP；此处设置本机工作目录和高权限任务能力。</p>
             </div>
           </div>
           <label className="computer-agent-master-toggle">
@@ -169,7 +169,7 @@ export function ComputerAgentSettingsPanel() {
             <strong>能力授权</strong>
             <span>已选择 {authorizedCount} / {PERMISSIONS.length}</span>
           </div>
-          <p>仅为 Nova 开放所选能力，其他数字员工不会继承这些权限。</p>
+          <p>这些开关只控制本机高权限能力；Nova 始终可发现所有已启用 MCP，其他数字员工不会继承本机权限。</p>
         </div>
         <div className="computer-agent-permissions">
           {PERMISSIONS.map((permission) => {

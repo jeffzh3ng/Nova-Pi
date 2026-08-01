@@ -158,6 +158,8 @@ export type ChatMessageAttachment = {
   path?: string;
   /** 扩展名，用于标签着色 */
   ext?: string;
+  /** 原始文件字节数，用于 Agent 判断处理方式。 */
+  size?: number;
   /** 上传过渡状态；省略等同于 ready，兼容历史会话。 */
   uploadStatus?: "uploading" | "ready" | "failed";
   uploadError?: string;

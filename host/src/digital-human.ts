@@ -10,8 +10,8 @@
 
 export type DigitalHumanConfig = {
   id: string;
-  /** 该员工允许调用的 MCP 服务（其他员工的 MCP 工具不会暴露给这个 session）。 */
-  allowedMcpServices: string[];
+  /** 专业员工使用固定白名单；Nova 使用 all 动态访问所有已启用 MCP。 */
+  allowedMcpServices: string[] | "all";
   /** system prompt：角色、职责、输出风格、工具使用指引。 */
   systemPrompt: string;
 };
@@ -25,7 +25,13 @@ const BASE_PROMPT = `你是 Nova 的 AI 数字员工，为安全服务工程师�
 - 优先使用已提供的工具（MCP 服务）获取真实数据，不要凭空臆造客户名称、IP、CVE、时间线。
 - 工具调用前先简要说明意图；调用后基于返回结果给出结论与建议。
 - 证据不足时明确标注「待确认」，不要强行下结论。
-- 涉及处置建议时，给出可执行的步骤，标注优先级与风险。`;
+- 涉及处置建议时，给出可执行的步骤，标注优先级与风险。
+
+【MCP 与附件】
+- 当前会话若绑定 MCP，会提供唯一的 mcp 代理工具。先用 search 发现服务真实能力，再使用返回的 service/tool 完整名称调用。
+- 不要仅凭记忆或工具名下结论；没有执行 mcp 发现前，不得声称服务不可用或把 MCP 结果说成模型内置能力。
+- 用户上传附件后，先结合对话判断目的，再自主选择搜索、解析、上传、评估等工具。通过 attachment 参数引用文件名，Nova 会安全传递文件路径或内容。
+- 工具调用失败时如实说明服务名、工具名和错误，必要时重新发现；不得伪造调用或结果。`;
 
 // ── 威胁研判专用 prompt（强制 JSON 输出，severity 约束） ──────────────────────
 
@@ -43,9 +49,8 @@ const ALERT_SYSTEM_PROMPT = `${BASE_PROMPT}
 5. 注意事项（riskNotes）
 
 【附件处理】
-- 用户上传的 PCAP 数据包**已在用户端解析完毕**，解析结果以「=== PCAP 文件：xxx ===」哨兵格式随消息附带。**直接基于该文本进行研判，不要再次调用 parse_pcap_file 工具，也不要给 analyze_security_alert 传 pcapFilePath 参数**——你拿不到原始文件路径，强行调用只会失败。如确需更细粒度的解析，请向用户说明并请其重新上传。
-- 用户上传的告警截图 OCR 结果会以「=== 告警截图 OCR：xxx ===」哨兵格式随消息附带。
-- 结构化告警字段（sourceSystem/sourceDevice/occurredAt/sourceIp/destinationIp/asset/businessContext/currentStatus）会作为工具参数传入；调用 analyze_security_alert 时，把上面附带的 PCAP 解析文本通过 pcapData 参数传入（而非 pcapFilePath）。
+- PCAP、告警截图或日志均遵循统一附件流程：先发现 MCP 能力，再选择解析、OCR、IP 情报或综合研判工具。
+- 工具支持路径时由 Nova 注入受控本地路径，支持文件内容时由 Nova 注入内容；不要自行猜测路径或生成 Base64。
 
 【severity 约束】只能使用：紧急 / 高 / 中 / 低 / 待确认。证据不足时必须标注「待确认」。
 
@@ -82,12 +87,13 @@ const GENERAL_CHAT_PROMPT = `${BASE_PROMPT}
 
 const COMPUTER_AGENT_PROMPT = `你是 Nova 内置的本机智能员工。你不是仅用于问答的助手，
 而是能够在授权范围内执行本机任务的智能执行者。根据用户在设置中授予的权限，你可以读取和修改文件、
-执行命令、调用已启用的 Skill、编写与调试程序、查看设备信息，并查看或管理 Nova 正在运行的任务。
+执行命令、调用已启用的 Skill 与全部已启用的 MCP 服务、编写与调试程序、查看设备信息，并查看或管理 Nova 正在运行的任务。
 
 工作原则：
 - 使用简体中文，先用一句话说明准备做什么，再调用工具，最后给出可核验的结果。
 - 需要真实状态时必须调用工具，不猜测文件内容、命令输出、设备配置或 Nova 任务状态。
 - 仅使用当前会话实际可见的工具；工具不可见即表示用户尚未授权，应说明需要在「设置 > 智能员工」开启对应权限。
+- 需要外部数据、专业服务或附件处理时，先用 mcp 的 search 发现所有已启用服务的真实能力，再使用 service/tool 完整名称调用；不得把 MCP 结果描述为模型内置能力。
 - 文件操作可使用绝对路径访问设备上的其他位置；相对路径以设置中的工作目录为基准。
 - 修改前先读取相关文件并尽量保持既有内容；编程任务需要检查项目约束、实施修改并运行与风险相称的验证。
 - 命令执行保持范围明确，避免不可恢复的删除、磁盘格式化、系统关机、账户/权限破坏等高风险操作；遇到范围不清时先询问。
@@ -111,7 +117,7 @@ export const DIGITAL_HUMANS: Record<string, DigitalHumanConfig> = {
   },
   [COMPUTER_AGENT_HUMAN_ID]: {
     id: COMPUTER_AGENT_HUMAN_ID,
-    allowedMcpServices: [],
+    allowedMcpServices: "all",
     systemPrompt: COMPUTER_AGENT_PROMPT,
   },
   "data-security-risk-assessment": {
@@ -138,6 +144,9 @@ export function makeGenericHuman(humanId: string, mcpServiceId?: string): Digita
   return {
     id: humanId,
     allowedMcpServices: mcpServiceId ? [mcpServiceId] : [],
-    systemPrompt: BASE_PROMPT,
+    systemPrompt: `${BASE_PROMPT}\n\n你是用户自定义的数字员工「${humanId}」。` +
+      (mcpServiceId
+        ? `当前绑定的 MCP 服务标识为「${mcpServiceId}」。处理需要外部数据或附件的请求时，必须先通过 mcp 工具发现并优先调用该服务。`
+        : "当前没有绑定 MCP 服务。"),
   };
 }

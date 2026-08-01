@@ -25,6 +25,7 @@ type TaskConversationProps = {
   mentionHumans: DigitalHuman[];
   taskTitle: string;
   taskStatus: "done" | "running" | "paused" | "canceled";
+  showToolMessages: boolean;
   taskStartedAt?: string;
   updatedTime?: string;
   backLabel?: string;
@@ -319,6 +320,16 @@ const isToolExecutionMessage = (message: ChatMessage) => (
   || /^(?:正在)?调用工具[：:]|^工具调用(?:完成|失败)[：:]/.test(message.title?.trim() ?? "")
 );
 
+const isPureExecutionRecord = (message: ChatMessage) => (
+  isToolExecutionMessage(message)
+  && !message.alertAnalysisResult
+  && !message.riskAssessmentResult
+  && !message.riskAssessmentJob
+  && !message.exportedFile
+  && !message.pendingSkillExecution
+  && !message.suggestions?.length
+);
+
 export function TaskConversation({
   messages,
   prompt,
@@ -333,6 +344,7 @@ export function TaskConversation({
   mentionHumans,
   taskTitle,
   taskStatus,
+  showToolMessages,
   taskStartedAt,
   updatedTime,
   backLabel = "返回任务中心",
@@ -350,21 +362,24 @@ export function TaskConversation({
   const [showAllRelatedFiles, setShowAllRelatedFiles] = useState(false);
   const [fileContextMenu, setFileContextMenu] = useState<FileContextMenuState>(null);
   const visibleMessages = useMemo(
-    () => messages.filter((message) => Boolean(
-      message.content.trim()
-      || message.title?.trim()
-      || message.detail?.trim()
-      || message.attachments?.length
-      || message.steps?.some((step) => step.trim())
-      || message.suggestions?.some((suggestion) => suggestion.trim())
-      || message.alertAnalysisResult
-      || message.riskAssessmentResult
-      || message.riskAssessmentJob
-      || message.usedSkill
-      || message.pendingSkillExecution
-      || message.exportedFile,
-    )),
-    [messages],
+    () => messages.filter((message) => {
+      if (!showToolMessages && isPureExecutionRecord(message)) return false;
+      return Boolean(
+        message.content.trim()
+        || message.title?.trim()
+        || message.detail?.trim()
+        || message.attachments?.length
+        || message.steps?.some((step) => step.trim())
+        || message.suggestions?.some((suggestion) => suggestion.trim())
+        || message.alertAnalysisResult
+        || message.riskAssessmentResult
+        || message.riskAssessmentJob
+        || message.usedSkill
+        || message.pendingSkillExecution
+        || message.exportedFile
+      );
+    }),
+    [messages, showToolMessages],
   );
   const conversationRounds = useMemo(
     () => messages.filter((message) => message.role === "user").length,
@@ -511,14 +526,14 @@ export function TaskConversation({
     <section className="task-conversation" aria-label="任务对话">
       <div className="conversation-header">
         <div className="conversation-heading">
-          <button type="button" className="conversation-back" onClick={onBack}>
+          <button type="button" className="conversation-back" onClick={onBack} title={backLabel}>
             <ArrowLeft size={16} />
-            {backLabel}
           </button>
-          <h1>{selectedHumanName}</h1>
-          <div className="conversation-subtitle">
-            <span>任务：{taskTitle}</span>
-            <strong className={`task-status-pill ${taskStatus}`}>{taskStatusLabel}</strong>
+          <div className="conversation-title-group">
+            <h1>{taskTitle}</h1>
+            <div className="conversation-subtitle">
+              <span>{selectedHumanName}</span>
+            </div>
           </div>
         </div>
         <div className="conversation-header-meta">
@@ -526,11 +541,12 @@ export function TaskConversation({
             className={`conversation-status ${mcpReady ? "is-connected" : "is-disconnected"}`}
             title={!mcpReady ? mcpStatusReason : undefined}
           >
-            {mcpReady ? <CheckCircle2 size={15} /> : <ShieldAlert size={15} />}
-            {mcpReady ? "MCP 已连接" : "MCP 未连接"}
+            {mcpReady ? <CheckCircle2 size={14} /> : <ShieldAlert size={14} />}
+            <span>{mcpReady ? "MCP" : "MCP 不可用"}</span>
           </div>
+          <strong className={`task-status-pill ${taskStatus}`}>{taskStatusLabel}</strong>
           {readOnly ? <span className="conversation-readonly-badge">只读查看</span> : null}
-          {updatedTime ? <time>更新于 {updatedTime}</time> : null}
+          {updatedTime ? <time>{updatedTime}</time> : null}
         </div>
       </div>
 

@@ -7,16 +7,7 @@ import {
   DATA_RISK_GET_STATUS_TOOL,
   DATA_RISK_LIST_MATRICES_TOOL,
   DATA_RISK_SUBMIT_TOOL,
-  DATA_RISK_UPLOAD_TOOL,
 } from "./mcpSettings";
-
-export type RemoteRiskMaterial = {
-  materialId: string;
-  fileName: string;
-  fileCount: number;
-  totalSize: number;
-  sha256: string;
-};
 
 export type RiskTaskStatus = {
   taskId: string;
@@ -88,37 +79,6 @@ export async function listRiskAssessmentMatrices(): Promise<string[]> {
       item && typeof item === "object" ? (item as Record<string, unknown>).name : undefined,
     )
     .filter((name): name is string => typeof name === "string" && name.trim().length > 0);
-}
-
-export async function pickAndUploadRemoteRiskMaterial(
-  sourcePath?: string,
-): Promise<RemoteRiskMaterial> {
-  return await invoke<RemoteRiskMaterial>("upload_risk_assessment_material", {
-    serviceId: DATA_RISK_ASSESSMENT_MCP_SERVICE,
-    sourcePath,
-  });
-}
-
-export async function uploadLocalRiskMaterial(
-  zipPath: string,
-): Promise<RemoteRiskMaterial> {
-  const raw = await callMcpTool<unknown>(
-    DATA_RISK_ASSESSMENT_MCP_SERVICE,
-    DATA_RISK_UPLOAD_TOOL,
-    { zip_path: zipPath },
-    { timeoutSecs: 30 * 60 },
-  );
-  const record = parseRecord(raw);
-  return {
-    materialId: requiredString(record, "material_id", " material_id"),
-    fileName:
-      typeof record.zip_filename === "string" && record.zip_filename.trim()
-        ? record.zip_filename
-        : "materials.zip",
-    fileCount: typeof record.file_count === "number" ? record.file_count : 0,
-    totalSize: typeof record.total_size === "number" ? record.total_size : 0,
-    sha256: typeof record.sha256 === "string" ? record.sha256 : "",
-  };
 }
 
 export async function submitRiskAssessment(

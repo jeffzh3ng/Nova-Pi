@@ -16,7 +16,8 @@ import {
   type Skill,
   type ResourceLoader,
 } from "@earendil-works/pi-coding-agent";
-import { createMcpExtension } from "../mcp/extension.js";
+import { createMcpExtension, type McpServiceScope } from "../mcp/extension.js";
+import type { AttachmentRuntime } from "../attachments.js";
 import {
   filterEnabledSkills,
   formatSkillInventoryForPrompt,
@@ -57,9 +58,10 @@ export function getBaseResourceLoader(): ResourceLoader | null {
  */
 export async function createSessionResourceLoader(
   humanSystemPrompt: string,
-  allowedMcpServices: string[],
+  allowedMcpServices: McpServiceScope,
   cwd = process.cwd(),
   allowSkills = false,
+  attachments?: AttachmentRuntime,
 ): Promise<ResourceLoader> {
   if (!configuredAgentDir) {
     throw new Error("技能加载器尚未初始化。");
@@ -78,7 +80,9 @@ export async function createSessionResourceLoader(
       const inventory = allowSkills ? formatSkillInventoryForPrompt(enabledSkills) : "";
       return inventory ? [...current, inventory] : current;
     },
-    extensionFactories: allowedMcpServices.length > 0 ? [createMcpExtension(allowedMcpServices)] : [],
+    extensionFactories: allowedMcpServices === "all" || allowedMcpServices.length > 0
+      ? [createMcpExtension(allowedMcpServices, attachments)]
+      : [],
   });
   await loader.reload();
   return loader;

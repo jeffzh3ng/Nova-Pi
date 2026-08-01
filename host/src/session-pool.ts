@@ -5,7 +5,6 @@
  * + 该员工的 system prompt）。pi 的事件流订阅后转发为 RPC event，由 Rust emit 给前端。
  */
 
-import { readFile } from "node:fs/promises";
 import {
   AgentSession,
   SessionManager,
@@ -19,6 +18,8 @@ import { getDigitalHuman, makeGenericHuman } from "./digital-human.js";
 import { getModelRuntime, resolveModel, applyApiKey, type HostModelSettings } from "./model-setup.js";
 import { writeEvent, type ConversationAttachments } from "./rpc-protocol.js";
 import { createSessionResourceLoader } from "./skills/loader.js";
+import { AttachmentRuntime, type AgentAttachment } from "./attachments.js";
+import { MCP_PROXY_TOOL_NAME } from "./mcp/extension.js";
 import {
   builtInToolNamesForSettings,
   COMPUTER_AGENT_ID,
@@ -43,6 +44,7 @@ type SessionEntry = {
   session: AgentSession;
   humanId: string;
   mcpServiceId?: string;
+  attachments: AttachmentRuntime;
   /**
    * 后台会话标记。true 表示不写入 conversationToSession（前端主路由找不到），
    * 也不落 SQLite 历史索引。供微信机器人这类"非用户对话"场景使用。
@@ -75,7 +77,7 @@ export class SessionPool {
   private computerAgentSettings: ComputerAgentSettings = { ...DEFAULT_COMPUTER_AGENT_SETTINGS };
   private novaConversations: NovaConversationContext[] = [];
 
-  constructor() {}
+  constructor(private readonly attachmentRoot: string) {}
 
   setResourceLoader(_loader: ResourceLoader): void {
     // base loader 在 skills/loader.ts 里全局缓存；这里保留接口供未来扩展。
@@ -197,6 +199,7 @@ export class SessionPool {
     conversationId: string;
     mcpServiceId?: string;
     resumeMessages?: Array<{ role: string; content: string }>;
+    resumeAttachments?: AgentAttachment[];
   }): Promise<string> {
     // 若该 conversation 已有 session：仅当员工与 MCP 绑定均一致时复用，否则销毁重建。
     // 否则切换数字员工后会沿用旧员工的 system prompt 和 MCP 白名单，角色错乱。
@@ -222,6 +225,7 @@ export class SessionPool {
     // pi 无"静默灌入 assistant 回复"的公开 API（sendUserMessage 会触发 turn），
     // 因此用 system prompt 承载历史文本，避免协议层撒谎（resumeMessages 之前收到后直接 break）。
     const computerSetup = await this.computerAgentSetup(params.humanId, params.conversationId);
+    const attachmentRuntime = new AttachmentRuntime(this.attachmentRoot, params.resumeAttachments);
     const systemPromptWithHistory = this.computerAgentSystemPrompt(
       this.injectHistory(human.systemPrompt, params.resumeMessages),
       computerSetup,
@@ -231,6 +235,7 @@ export class SessionPool {
       human.allowedMcpServices,
       computerSetup.cwd,
       computerSetup.allowSkills,
+      attachmentRuntime,
     );
 
     const sessionId = `pi-${params.conversationId}-${Date.now().toString(36)}`;
@@ -267,6 +272,7 @@ export class SessionPool {
       session,
       humanId: params.humanId,
       mcpServiceId: params.mcpServiceId,
+      attachments: attachmentRuntime,
       status: "idle",
       createdAt: now,
       lastActivityAt: now,
@@ -307,6 +313,7 @@ export class SessionPool {
     const human = getDigitalHuman(params.humanId) ?? makeGenericHuman(params.humanId, params.mcpServiceId);
     const model = this.resolveCurrentModel();
     const computerSetup = await this.computerAgentSetup(params.humanId, params.conversationId);
+    const attachmentRuntime = new AttachmentRuntime(this.attachmentRoot);
     const systemPromptWithHistory = this.computerAgentSystemPrompt(
       this.injectHistory(human.systemPrompt, params.resumeMessages),
       computerSetup,
@@ -316,6 +323,7 @@ export class SessionPool {
       human.allowedMcpServices,
       computerSetup.cwd,
       computerSetup.allowSkills,
+      attachmentRuntime,
     );
 
     const sessionId = `bg-${params.conversationId}-${Date.now().toString(36)}`;
@@ -348,6 +356,7 @@ export class SessionPool {
       session,
       humanId: params.humanId,
       mcpServiceId: params.mcpServiceId,
+      attachments: attachmentRuntime,
       isBackground: true,
       status: "idle",
       createdAt: now,
@@ -402,10 +411,9 @@ export class SessionPool {
       }
     }
 
-    // 附件上下文拼到消息前（PCAP/OCR 哨兵格式，与原 Nova 一致）
     entry.status = "running";
     entry.lastActivityAt = Date.now();
-    const message = await this.injectAttachments(params.message, params.attachments);
+    const message = await entry.attachments.buildPrompt(params.message, params.attachments);
     try {
       await entry.session.prompt(message);
     } catch (error) {
@@ -488,7 +496,15 @@ export class SessionPool {
       isComputerAgent: true,
       cwd: settings.workingDirectory,
       allowSkills: settings.allowSkills,
-      tools: [...builtInToolNamesForSettings(settings), ...customToolNamesForSettings(settings)],
+      // The computer agent uses an explicit pi tool allowlist for host-enforced
+      // native permissions. Extension tools are filtered by that same list, so
+      // the MCP proxy must be named explicitly as Nova's always-available base
+      // capability; the extension still limits it to enabled MCP configs.
+      tools: [
+        ...builtInToolNamesForSettings(settings),
+        ...customToolNamesForSettings(settings),
+        MCP_PROXY_TOOL_NAME,
+      ],
       customTools,
       authorizationPrompt: computerAgentAuthorizationPrompt(settings),
     };
@@ -619,49 +635,6 @@ export class SessionPool {
       });
     if (turns.length === 0) return basePrompt;
     return `${basePrompt}\n\n--- 以下是之前的历史对话，作为上下文参考（请基于此继续，不要重复已回答的内容）---\n${turns.join("\n")}`;
-  }
-
-  private async injectAttachments(message: string, attachments?: ConversationAttachments): Promise<string> {
-    if (!attachments) return message;
-    const parts: string[] = [];
-    if (attachments.pcapSections?.length) {
-      parts.push(attachments.pcapSections.join("\n\n"));
-    }
-    if (attachments.imageSections?.length) {
-      parts.push(attachments.imageSections.join("\n\n"));
-    }
-    if (attachments.alertFields && Object.keys(attachments.alertFields).length) {
-      const fieldLines = Object.entries(attachments.alertFields)
-        .filter(([, v]) => v)
-        .map(([k, v]) => `${k}: ${v}`);
-      if (fieldLines.length) {
-        parts.push(`结构化告警字段：\n${fieldLines.join("\n")}`);
-      }
-    }
-    if (attachments.files?.length) {
-      // 读取每个文件的临时盘路径内容，拼成哨兵段注入。单个文件截断到 50k 字符
-      // 避免超大文件撑爆 prompt；读取失败时附错误说明而非整段中断。
-      // 用异步 readFile 而非 readFileSync：同步读会阻塞 Node 事件循环，大文件读取
-      // 期间会卡住整个 sidecar（包括其他 session 的 token 流转发）。
-      const FILE_CHAR_LIMIT = 50_000;
-      const fileSections = await Promise.all(
-        attachments.files.map(async (file) => {
-          try {
-            const raw = await readFile(file.path, { encoding: "utf-8" });
-            const clipped = raw.length > FILE_CHAR_LIMIT
-              ? `${raw.slice(0, FILE_CHAR_LIMIT)}\n...(已截断，原始 ${raw.length} 字符)`
-              : raw;
-            return `=== 附件文件：${file.name} ===\n${clipped}`;
-          } catch (error) {
-            const reason = error instanceof Error ? error.message : String(error);
-            return `=== 附件文件：${file.name}（读取失败）===\n${reason}`;
-          }
-        }),
-      );
-      parts.push(fileSections.join("\n\n"));
-    }
-    if (parts.length === 0) return message;
-    return `${parts.join("\n\n")}\n\n用户请求：${message}`;
   }
 
   private forwardEvent(sessionId: string, event: AgentSessionEvent): void {

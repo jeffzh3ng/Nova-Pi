@@ -9,9 +9,9 @@ export const digitalHumans: DigitalHuman[] = [
   {
     id: COMPUTER_AGENT_ID,
     name: "Nova",
-    role: "文件处理、编程与任务执行",
-    description: "使用本机智能能力操作文件、执行命令、编程，并查看应用运行状态。",
-    welcomeMessage: "我可以在授权范围内读取和修改文件、执行命令、编程，并协助管理运行任务。",
+    role: "本机执行与综合能力调度",
+    description: "统一调度所有已启用的 MCP、Skill 与本机授权能力，完成综合任务。",
+    welcomeMessage: "我可以调用所有已启用的 MCP 与 Skill，并在授权范围内操作文件、执行命令和管理任务。",
     accent: "primary",
     status: "pending",
     disabledReason: "请在设置 > 智能员工中开启并授权",

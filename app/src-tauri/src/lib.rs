@@ -9,6 +9,7 @@
 //! - 技能 zip 安装/脚本执行（gongwen_format.py）
 
 mod app_database;
+mod app_preferences;
 mod computer_agent_settings;
 mod conversation_store;
 mod files;
@@ -21,6 +22,7 @@ mod secrets;
 mod sidecar;
 mod skill_registry;
 
+use app_preferences::{get_app_preferences, save_app_preferences};
 use computer_agent_settings::{
     get_computer_agent_settings, pick_computer_agent_working_directory,
     save_computer_agent_settings,
@@ -31,32 +33,90 @@ use conversation_store::{
     restore_conversation, save_conversation_snapshot,
 };
 use files::{
-    extract_alert_image_text_cmd, open_file_path, parse_pcap_file_cmd, save_file_as,
-    show_file_in_folder, write_temp_text_file, write_uploaded_blob,
+    open_file_path, pick_and_store_attachments, save_file_as, show_file_in_folder,
+    write_temp_text_file, write_uploaded_blob,
 };
 use llm_settings::{
     get_model_settings, list_token_usage, reset_model_settings, save_model_settings,
     test_model_connection,
 };
 use mcp_settings::{
-    delete_mcp_connection_settings, list_mcp_connection_settings, load_mcp_connection_settings,
-    save_mcp_connection_settings,
+    delete_mcp_connection_settings as delete_mcp_connection_settings_persisted,
+    list_mcp_connection_settings, load_mcp_connection_settings,
+    save_mcp_connection_settings as save_mcp_connection_settings_persisted, McpConnectionSettings,
+    McpConnectionSettingsStatus,
 };
 use message_channels::{
     delete_message_channel, get_message_channel, list_message_channel_records,
     list_message_channels, save_message_channel,
 };
-use risk_http::{
-    download_risk_assessment_matrix_template, download_risk_assessment_result,
-    upload_risk_assessment_material,
-};
+use risk_http::{download_risk_assessment_matrix_template, download_risk_assessment_result};
 use rpc::{get_sidecar_health, send_rpc};
 use serde_json::json;
 use skill_registry::{
     delete_user_skill, execute_skill_plan, get_skill, list_skill_catalog, list_skills,
     open_user_skill_dir, pick_and_install_skill, set_skill_enabled,
 };
-use tauri::Manager;
+use std::sync::atomic::{AtomicBool, Ordering};
+use tauri::menu::{Menu, MenuItem};
+use tauri::tray::{MouseButton, MouseButtonState, TrayIconBuilder, TrayIconEvent};
+use tauri::{Manager, RunEvent};
+
+static EXITING: AtomicBool = AtomicBool::new(false);
+
+fn show_main_window(app: &tauri::AppHandle) {
+    if let Some(window) = app.get_webview_window("main") {
+        let _ = window.show();
+        let _ = window.unminimize();
+        let _ = window.set_focus();
+    }
+}
+
+fn setup_tray(app: &mut tauri::App) -> tauri::Result<()> {
+    let open = MenuItem::with_id(app, "open", "打开 Nova", true, None::<&str>)?;
+    let quit = MenuItem::with_id(app, "quit", "退出 Nova", true, None::<&str>)?;
+    let menu = Menu::with_items(app, &[&open, &quit])?;
+    let mut tray = TrayIconBuilder::with_id("nova-tray")
+        .tooltip("Nova AI 数字员工")
+        .menu(&menu)
+        .show_menu_on_left_click(false);
+    if let Some(icon) = app.default_window_icon().cloned() {
+        tray = tray.icon(icon);
+    }
+    tray.build(app)?;
+    Ok(())
+}
+
+/// Persist and immediately publish MCP changes to the sidecar registry. This
+/// makes an already-open Nova session see newly enabled services on its next
+/// discovery call instead of waiting for a connection test or app restart.
+#[tauri::command]
+async fn save_mcp_connection_settings(
+    app: tauri::AppHandle,
+    settings: McpConnectionSettings,
+) -> Result<McpConnectionSettingsStatus, String> {
+    let status = save_mcp_connection_settings_persisted(app.clone(), settings)?;
+    if let Err(error) = sync_mcp_config_to_sidecar(&app).await {
+        // The persisted settings remain authoritative and startup/reconnect
+        // will retry synchronization if the sidecar is temporarily offline.
+        eprintln!("[mcp] 配置已保存，但暂时无法同步到 sidecar：{error}");
+    }
+    Ok(status)
+}
+
+/// Remove the service from both persistent settings and the live registry so
+/// Nova cannot continue using a deleted MCP through an existing session.
+#[tauri::command]
+async fn delete_mcp_connection_settings(
+    app: tauri::AppHandle,
+    service_id: String,
+) -> Result<(), String> {
+    delete_mcp_connection_settings_persisted(app.clone(), service_id)?;
+    if let Err(error) = sync_mcp_config_to_sidecar(&app).await {
+        eprintln!("[mcp] 配置已删除，但暂时无法同步到 sidecar：{error}");
+    }
+    Ok(())
+}
 
 /// MCP 连接测试：经 sidecar 的 MCP 客户端做 initialize + tools/list 握手。
 #[tauri::command]
@@ -121,7 +181,7 @@ async fn list_mcp_tools(
 }
 
 /// 把 Rust 存的 MCP 配置全量同步给 sidecar（configure_mcp 命令）。
-/// 前端 McpSquarePanel 保存配置后、test/list 调用前都需要 sidecar 已加载最新配置。
+/// 保存/删除配置后会立即调用；test/list 之前也会兜底刷新。
 pub(crate) async fn sync_mcp_config_to_sidecar(app: &tauri::AppHandle) -> Result<(), String> {
     let catalog = list_mcp_connection_settings(app.clone())?;
     // 把上传目录路径通过环境变量传给外部 MCP 子进程，供服务按需加入读取白名单。
@@ -176,18 +236,54 @@ fn start_sidecar(app: tauri::AppHandle) -> Result<(), String> {
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
     rpc::init();
-    tauri::Builder::default()
+    let app = tauri::Builder::default()
+        // 必须最先注册：第二次启动时只唤醒主窗口，不再创建新的 sidecar 或应用实例。
+        .plugin(tauri_plugin_single_instance::init(|app, _argv, _cwd| {
+            show_main_window(app);
+        }))
         .setup(|app| {
+            if let Err(error) = app_preferences::refresh_cache(app.handle()) {
+                eprintln!("[lib] 读取应用偏好失败：{error}");
+            }
+            setup_tray(app)?;
             // 应用启动时拉起 Node sidecar
             if let Err(error) = sidecar::start_sidecar(app.handle()) {
                 eprintln!("[lib] 启动 sidecar 失败：{error}");
             }
             Ok(())
         })
-        .on_window_event(|_window, event| {
-            // 窗口关闭时停止 sidecar
-            if let tauri::WindowEvent::Destroyed = event {
+        .on_window_event(|window, event| {
+            if let tauri::WindowEvent::CloseRequested { api, .. } = event {
+                if EXITING.load(Ordering::Relaxed) {
+                    return;
+                }
+                api.prevent_close();
+                if app_preferences::should_close_to_tray() {
+                    let _ = window.hide();
+                } else {
+                    EXITING.store(true, Ordering::Relaxed);
+                    sidecar::stop_sidecar();
+                    window.app_handle().exit(0);
+                }
+            }
+        })
+        .on_menu_event(|app, event| match event.id().as_ref() {
+            "open" => show_main_window(app),
+            "quit" => {
+                EXITING.store(true, Ordering::Relaxed);
                 sidecar::stop_sidecar();
+                app.exit(0);
+            }
+            _ => {}
+        })
+        .on_tray_icon_event(|app, event| {
+            if let TrayIconEvent::Click {
+                button: MouseButton::Left,
+                button_state: MouseButtonState::Up,
+                ..
+            } = event
+            {
+                show_main_window(app);
             }
         })
         .invoke_handler(tauri::generate_handler![
@@ -195,6 +291,8 @@ pub fn run() {
             start_sidecar,
             send_rpc,
             get_sidecar_health,
+            get_app_preferences,
+            save_app_preferences,
             test_mcp_connection,
             reconnect_mcp_connection,
             list_mcp_tools,
@@ -208,8 +306,7 @@ pub fn run() {
             save_file_as,
             write_temp_text_file,
             write_uploaded_blob,
-            parse_pcap_file_cmd,
-            extract_alert_image_text_cmd,
+            pick_and_store_attachments,
             // MCP 配置
             list_mcp_connection_settings,
             save_mcp_connection_settings,
@@ -246,10 +343,16 @@ pub fn run() {
             delete_user_skill,
             execute_skill_plan,
             // 风评大文件
-            upload_risk_assessment_material,
             download_risk_assessment_matrix_template,
             download_risk_assessment_result
         ])
-        .run(tauri::generate_context!())
-        .expect("error while running tauri application");
+        .build(tauri::generate_context!())
+        .expect("error while building tauri application");
+
+    app.run(|_app, event| {
+        if matches!(event, RunEvent::Exit) {
+            EXITING.store(true, Ordering::Relaxed);
+            sidecar::stop_sidecar();
+        }
+    });
 }

@@ -22,6 +22,12 @@ import { showAppWarning } from "../services/appDialog";
 import { ComputerAgentSettingsPanel } from "./ComputerAgentSettingsPanel";
 import { MessageChannelsPanel } from "./MessageChannelsPanel";
 import { TokenActivityCard } from "./TokenActivityCard";
+import {
+  DEFAULT_APP_PREFERENCES,
+  getAppPreferences,
+  saveAppPreferences,
+  type AppPreferences,
+} from "../services/appPreferences";
 
 type ProviderDraft = {
   id: string;
@@ -854,6 +860,105 @@ function ModelSettingsPanel() {
   );
 }
 
+function AppBehaviorSettingsPanel() {
+  const [preferences, setPreferences] = useState<AppPreferences>(DEFAULT_APP_PREFERENCES);
+  const [status, setStatus] = useState("正在读取应用偏好...");
+  const [loaded, setLoaded] = useState(false);
+  const preferencesRef = useRef<AppPreferences>(DEFAULT_APP_PREFERENCES);
+  const persistedPreferencesRef = useRef<AppPreferences>(DEFAULT_APP_PREFERENCES);
+  const saveQueueRef = useRef<Promise<void>>(Promise.resolve());
+  const saveRevisionRef = useRef(0);
+
+  useEffect(() => {
+    let active = true;
+    void getAppPreferences()
+      .then((loaded) => {
+        if (!active) return;
+        preferencesRef.current = loaded;
+        persistedPreferencesRef.current = loaded;
+        setPreferences(loaded);
+        setLoaded(true);
+        setStatus("");
+      })
+      .catch((error) => {
+        if (active) {
+          setLoaded(false);
+          setStatus(toUserFacingError(error, "读取应用偏好失败。"));
+        }
+      });
+    return () => { active = false; };
+  }, []);
+
+  const update = (patch: Partial<AppPreferences>): Promise<void> => {
+    if (!loaded) return Promise.resolve();
+    const next = { ...preferencesRef.current, ...patch };
+    preferencesRef.current = next;
+    setPreferences(next);
+    setStatus("正在保存...");
+    const revision = saveRevisionRef.current + 1;
+    saveRevisionRef.current = revision;
+    const operation = saveQueueRef.current.then(() => saveAppPreferences(next));
+    saveQueueRef.current = operation.then(() => undefined, () => undefined);
+    return operation.then(
+      (saved) => {
+        persistedPreferencesRef.current = saved;
+        if (revision !== saveRevisionRef.current) return;
+        preferencesRef.current = saved;
+        setPreferences(saved);
+        setStatus("已保存");
+        window.dispatchEvent(new CustomEvent("nova-app-preferences-changed", { detail: saved }));
+      },
+      (error) => {
+        if (revision !== saveRevisionRef.current) return;
+        const persisted = persistedPreferencesRef.current;
+        preferencesRef.current = persisted;
+        setPreferences(persisted);
+        setStatus(toUserFacingError(error, "保存应用偏好失败。"));
+        window.dispatchEvent(new CustomEvent("nova-app-preferences-changed", { detail: persisted }));
+      },
+    );
+  };
+
+  return (
+    <section className="settings-section" aria-label="应用行为">
+      <header className="settings-section-header">
+        <div>
+          <span>应用行为</span>
+          <h2>窗口与对话显示</h2>
+          <p className="mcp-status-line">控制关闭行为与对话中的执行细节。</p>
+        </div>
+        {status ? <small className="settings-preference-status">{status}</small> : null}
+      </header>
+      <div className="settings-card settings-preference-card">
+        <label className="settings-toggle">
+          <input
+            type="checkbox"
+            checked={preferences.closeToTray}
+            disabled={!loaded}
+            onChange={(event) => void update({ closeToTray: event.target.checked })}
+          />
+          <span>
+            <strong>关闭窗口后驻留后台</strong>
+            <small>开启后，关闭主窗口会回到 Windows 系统托盘或 macOS 顶部菜单栏，可从菜单彻底退出。</small>
+          </span>
+        </label>
+        <label className="settings-toggle">
+          <input
+            type="checkbox"
+            checked={preferences.showToolMessages}
+            disabled={!loaded}
+            onChange={(event) => void update({ showToolMessages: event.target.checked })}
+          />
+          <span>
+            <strong>显示工具与 Skill 执行记录</strong>
+            <small>默认关闭，只展示用户消息、数字员工结论和业务结果；开启后显示调试用执行过程。</small>
+          </span>
+        </label>
+      </div>
+    </section>
+  );
+}
+
 export function SettingsPanel() {
   const [appVersion, setAppVersion] = useState("");
   const [sidecarHealth, setSidecarHealth] = useState<"checking" | "online" | "offline">("checking");
@@ -979,6 +1084,7 @@ export function SettingsPanel() {
           </span>
         </div>
       </header>
+      <AppBehaviorSettingsPanel />
       <ModelSettingsPanel />
       <MessageChannelsPanel />
       <ComputerAgentSettingsPanel />

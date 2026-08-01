@@ -56,6 +56,15 @@ export class McpRegistry {
     return this.servers.get(serviceId);
   }
 
+  getConfig(serviceId: string): McpServerConfig | undefined {
+    return this.configs.get(serviceId);
+  }
+
+  /** IDs of every currently enabled service. Config sync keeps this list current. */
+  listConfiguredServiceIds(): string[] {
+    return [...this.configs.keys()];
+  }
+
   subscribe(listener: RegistryListener): () => void {
     this.listeners.add(listener);
     return () => this.listeners.delete(listener);
@@ -75,7 +84,7 @@ export class McpRegistry {
     return result;
   }
 
-  /** Replace enabled configuration and eagerly test newly added/changed servers. */
+  /** Replace enabled configuration. Connections are created only when a session discovers or calls a tool. */
   async configure(servers: McpServerConfig[]): Promise<Array<{
     serviceId: string;
     ok: boolean;
@@ -96,20 +105,41 @@ export class McpRegistry {
     }
     this.configs = nextConfigs;
 
-    const results = await Promise.all([...nextConfigs.keys()].map(async (serviceId) => {
+    this.notifyChanged();
+    return [...nextConfigs.keys()].map((serviceId) => ({
+      serviceId,
+      ok: true as const,
+      toolCount: this.servers.get(serviceId)?.tools.length,
+    }));
+  }
+
+  async discoverTools(allowedMcpServices: string[]): Promise<{
+    tools: RegisteredMcpTool[];
+    errors: Array<{ serviceId: string; error: string }>;
+  }> {
+    // Nova can see every enabled MCP. Discover in parallel so one unavailable
+    // service does not make the user wait for every preceding handshake timeout.
+    const services = [...new Set(allowedMcpServices)];
+    const results = await Promise.all(services.map(async (serviceId) => {
       try {
         const server = await this.getOrConnect(serviceId);
-        return { serviceId, ok: true as const, toolCount: server.tools.length };
+        return {
+          tools: server.tools
+            .filter((tool) => isAllowedTool(serviceId, tool.name))
+            .map((tool) => ({ serviceId, server, tool })),
+          errors: [] as Array<{ serviceId: string; error: string }>,
+        };
       } catch (error) {
         return {
-          serviceId,
-          ok: false as const,
-          error: error instanceof Error ? error.message : String(error),
+          tools: [] as RegisteredMcpTool[],
+          errors: [{ serviceId, error: error instanceof Error ? error.message : String(error) }],
         };
       }
     }));
-    this.notifyChanged();
-    return results;
+    return {
+      tools: results.flatMap((result) => result.tools),
+      errors: results.flatMap((result) => result.errors),
+    };
   }
 
   async getOrConnect(serviceId: string): Promise<ConnectedMcpServer> {

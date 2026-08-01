@@ -394,7 +394,7 @@ export function PromptComposer({
             type="file"
             multiple
             disabled={disabled}
-            accept=".txt,.log,.md,.csv,.tsv,.json,.xml,.yaml,.yml,.pcap,.pcapng,.cap,.png,.jpg,.jpeg,.bmp,.webp,.tif,.tiff,.zip"
+            accept=".txt,.log,.md,.csv,.tsv,.json,.jsonl,.xml,.yaml,.yml,.ini,.cfg,.conf,.sql,.har,.html,.htm,.pdf,.doc,.docx,.xls,.xlsx,.ppt,.pptx,.js,.jsx,.ts,.tsx,.py,.rs,.java,.go,.sh,.ps1,.pcap,.pcapng,.cap,.png,.jpg,.jpeg,.bmp,.webp,.tif,.tiff,.zip"
             onChange={(event) => {
               const files = Array.from(event.target.files ?? []);
               event.currentTarget.value = "";

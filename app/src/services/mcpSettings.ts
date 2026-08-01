@@ -39,7 +39,6 @@ export const DATA_CLASSIFICATION_MCP_SERVICE = "data-classification-mcp";
 export const DATA_RISK_ASSESSMENT_MCP_SERVICE = "data-security-risk-assessment-mcp";
 /// 列出评估矩阵的工具名（上传 zip 后调用，让用户选择评估矩阵）。
 export const DATA_RISK_LIST_MATRICES_TOOL = "list_assessment_matrices";
-export const DATA_RISK_UPLOAD_TOOL = "upload_materials";
 export const DATA_RISK_SUBMIT_TOOL = "submit_evaluation";
 export const DATA_RISK_GET_STATUS_TOOL = "get_task_status";
 export const DATA_RISK_CANCEL_TOOL = "cancel_evaluation";

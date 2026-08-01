@@ -1,41 +1,14 @@
-use std::{fs::File, io::Read, path::PathBuf, time::Duration};
+use std::{path::PathBuf, time::Duration};
 
-use reqwest::{multipart, Url};
-use serde::{Deserialize, Serialize};
-use tauri::{AppHandle, Emitter, Manager};
+use reqwest::Url;
+use serde::Serialize;
+use tauri::{AppHandle, Manager};
 use tokio::io::AsyncWriteExt;
 
 use crate::mcp_settings::load_mcp_connection_settings;
 
-const MAX_RISK_ARCHIVE_BYTES: u64 = 200 * 1024 * 1024;
 const MAX_RISK_RESULT_BYTES: u64 = 300 * 1024 * 1024;
 const MAX_RISK_MATRIX_BYTES: u64 = 50 * 1024 * 1024;
-
-#[derive(Debug, Deserialize)]
-struct RemoteMaterialResponse {
-    material_id: String,
-    file_name: String,
-    file_count: usize,
-    total_size: u64,
-    sha256: String,
-}
-
-#[derive(Debug, Serialize)]
-#[serde(rename_all = "camelCase")]
-pub struct RemoteMaterialUpload {
-    material_id: String,
-    file_name: String,
-    file_count: usize,
-    total_size: u64,
-    sha256: String,
-}
-
-#[derive(Debug, Clone, Serialize)]
-#[serde(rename_all = "camelCase")]
-struct RiskUploadStarted {
-    file_name: String,
-    total_size: u64,
-}
 
 #[derive(Debug, Serialize)]
 #[serde(rename_all = "camelCase")]
@@ -186,33 +159,6 @@ fn risk_api_url(mcp_url: &str, suffix: &str) -> Result<Url, String> {
     Ok(url)
 }
 
-fn validate_zip(path: &PathBuf) -> Result<u64, String> {
-    if path
-        .extension()
-        .and_then(|value| value.to_str())
-        .is_none_or(|value| !value.eq_ignore_ascii_case("zip"))
-    {
-        return Err("仅支持 zip 压缩包。".to_string());
-    }
-    let metadata = path
-        .metadata()
-        .map_err(|error| format!("读取压缩包失败：{error}"))?;
-    if metadata.len() > MAX_RISK_ARCHIVE_BYTES {
-        return Err("压缩包超过 200 MB 上限。".to_string());
-    }
-    let mut signature = [0_u8; 4];
-    File::open(path)
-        .and_then(|mut file| file.read_exact(&mut signature))
-        .map_err(|error| format!("读取压缩包失败：{error}"))?;
-    if !matches!(
-        signature,
-        [0x50, 0x4b, 0x03, 0x04] | [0x50, 0x4b, 0x05, 0x06]
-    ) {
-        return Err("所选文件不是有效的 zip 压缩包。".to_string());
-    }
-    Ok(metadata.len())
-}
-
 async fn response_error(response: reqwest::Response, operation: &str) -> String {
     let status = response.status();
     let text = response.text().await.unwrap_or_default();
@@ -226,82 +172,6 @@ async fn response_error(response: reqwest::Response, operation: &str) -> String 
         })
         .unwrap_or_else(|| text.chars().take(500).collect());
     format!("{operation}失败（HTTP {status}）：{detail}")
-}
-
-#[tauri::command]
-pub async fn upload_risk_assessment_material(
-    app: AppHandle,
-    service_id: String,
-    source_path: Option<String>,
-) -> Result<RemoteMaterialUpload, String> {
-    let settings = load_http_settings(&app, service_id.trim())?;
-    let source = if let Some(path) = source_path.filter(|value| !value.trim().is_empty()) {
-        let upload_root = crate::files::upload_storage_dir(&app)?;
-        let upload_root = upload_root
-            .canonicalize()
-            .map_err(|error| format!("读取上传文件目录失败：{error}"))?;
-        let source = PathBuf::from(path)
-            .canonicalize()
-            .map_err(|error| format!("读取待上传材料失败：{error}"))?;
-        if !source.starts_with(upload_root) {
-            return Err("只能上传本应用接收的临时压缩包。".to_string());
-        }
-        source
-    } else {
-        tokio::task::spawn_blocking(|| {
-            rfd::FileDialog::new()
-                .add_filter("压缩包", &["zip"])
-                .set_title("选择数据安全风险评估材料")
-                .pick_file()
-        })
-        .await
-        .map_err(|error| format!("打开文件选择器失败：{error}"))?
-        .ok_or_else(|| "已取消".to_string())?
-    };
-    let total_size = validate_zip(&source)?;
-    let file_name = source
-        .file_name()
-        .and_then(|value| value.to_str())
-        .unwrap_or("materials.zip")
-        .to_string();
-    let _ = app.emit(
-        "risk-assessment-upload-started",
-        RiskUploadStarted {
-            file_name,
-            total_size,
-        },
-    );
-
-    let endpoint = risk_api_url(&settings.http_url, "materials")?;
-    let form = multipart::Form::new()
-        .file("file", &source)
-        .await
-        .map_err(|error| format!("读取待上传材料失败：{error}"))?;
-    let client = reqwest::Client::builder()
-        .timeout(Duration::from_secs(30 * 60))
-        .redirect(reqwest::redirect::Policy::none())
-        .build()
-        .map_err(|error| format!("创建上传请求失败：{error}"))?;
-    let response = client
-        .post(endpoint)
-        .multipart(form)
-        .send()
-        .await
-        .map_err(|error| format!("上传评估材料失败：{error}"))?;
-    if !response.status().is_success() {
-        return Err(response_error(response, "上传评估材料").await);
-    }
-    let uploaded = response
-        .json::<RemoteMaterialResponse>()
-        .await
-        .map_err(|error| format!("解析材料上传结果失败：{error}"))?;
-    Ok(RemoteMaterialUpload {
-        material_id: uploaded.material_id,
-        file_name: uploaded.file_name,
-        file_count: uploaded.file_count,
-        total_size: uploaded.total_size,
-        sha256: uploaded.sha256,
-    })
 }
 
 #[tauri::command]

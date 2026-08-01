@@ -15,7 +15,7 @@
 import { createInterface } from "node:readline";
 import { randomUUID } from "node:crypto";
 import { mkdirSync } from "node:fs";
-import { join } from "node:path";
+import { join, resolve } from "node:path";
 // ModelRuntime 来自 coding-agent 自带的 pi-ai 实例。显式注册同一实例的静态 OAuth
 // loaders，确保 tsup 的单文件安装包不会保留运行时无法解析的动态 import。
 import { registerBunOAuthFlows } from "../../node_modules/@earendil-works/pi-coding-agent/node_modules/@earendil-works/pi-ai/dist/bun-oauth.js";
@@ -78,7 +78,22 @@ let telegramBot: TelegramBotManager | null = null;
 /** 飞书按渠道实例 ID 管理，允许多个应用同时连接并分别绑定数字员工。 */
 const feishuBots = new Map<string, FeishuBotManager>();
 let shuttingDown = false;
+let parentWatchdog: NodeJS.Timeout | null = null;
 const pendingOAuthLogins = new Map<string, AbortController>();
+
+function startParentWatchdog(): void {
+  const parentPid = Number(process.env.NOVA_PI_PARENT_PID);
+  if (!Number.isInteger(parentPid) || parentPid <= 0) return;
+  parentWatchdog = setInterval(() => {
+    try {
+      process.kill(parentPid, 0);
+    } catch {
+      stderrLog(`[nova-pi-host] parent process ${parentPid} exited; shutting down orphan sidecar`);
+      void gracefulShutdown();
+    }
+  }, 1_500);
+  parentWatchdog.unref();
+}
 
 async function bootstrap(): Promise<void> {
   stderrLog(`[nova-pi-host] agentDir=${agentDir}`);
@@ -87,7 +102,7 @@ async function bootstrap(): Promise<void> {
   initExtensionsManagerPaths(agentDir);
   initSkillRuntime(agentDir, additionalSkillPaths, skillStatePath);
   await initBaseResourceLoader(agentDir, additionalSkillPaths);
-  pool = new SessionPool();
+  pool = new SessionPool(resolve(agentDir, "..", "..", "uploads"));
   weixinBot = new WeixinBotManager(pool, agentDir);
   try {
     const defaultModel = await getDefaultModel();
@@ -226,6 +241,7 @@ async function handleCommand(command: RpcCommand): Promise<void> {
           conversationId: command.conversationId,
           mcpServiceId: command.mcpServiceId,
           resumeMessages: command.resumeMessages,
+          resumeAttachments: command.resumeAttachments,
         });
         writeResponse(id, true, sessionId);
         return;
@@ -672,16 +688,27 @@ function startRpcLoop(): void {
 async function gracefulShutdown(): Promise<void> {
   if (shuttingDown) return;
   shuttingDown = true;
+  if (parentWatchdog) {
+    clearInterval(parentWatchdog);
+    parentWatchdog = null;
+  }
   stderrLog("[nova-pi-host] shutting down");
   try {
     for (const controller of pendingOAuthLogins.values()) controller.abort();
     pendingOAuthLogins.clear();
-    await weixinBot?.stop();
-    await telegramBot?.stop();
-    await Promise.all([...feishuBots.values()].map((manager) => manager.stop().catch(() => {})));
-    feishuBots.clear();
     await pool?.disposeAll();
+    // MCP stdio transports own the external Node/Python children. Close them first so
+    // a slow message-channel logout cannot leave those processes orphaned on app exit.
     await mcpRegistry.dispose();
+    await Promise.race([
+      Promise.all([
+        weixinBot?.stop(),
+        telegramBot?.stop(),
+        ...[...feishuBots.values()].map((manager) => manager.stop().catch(() => {})),
+      ]),
+      new Promise<void>((resolve) => setTimeout(resolve, 1_500)),
+    ]);
+    feishuBots.clear();
   } catch (error) {
     stderrLog(`[nova-pi-host] shutdown error: ${error}`);
   }
@@ -704,7 +731,10 @@ function stderrLog(message: string): void {
 // ── 启动 ─────────────────────────────────────────────────────────────────────
 
 void bootstrap()
-  .then(() => startRpcLoop())
+  .then(() => {
+    startParentWatchdog();
+    startRpcLoop();
+  })
   .catch((error) => {
     stderrLog(`[nova-pi-host] bootstrap failed: ${error instanceof Error ? error.stack ?? error.message : error}`);
     process.exit(1);

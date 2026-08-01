@@ -6,11 +6,7 @@
 
 use std::path::{Path, PathBuf};
 
-use serde_json::json;
 use tauri::{AppHandle, Manager};
-
-use crate::mcp_settings::load_mcp_connection_settings;
-use crate::rpc::send_rpc_blocking_with_timeout;
 
 const MAX_UPLOADED_PCAP_BYTES: usize = 25 * 1024 * 1024;
 const MAX_UPLOADED_ALERT_IMAGE_BYTES: usize = 10 * 1024 * 1024;
@@ -24,10 +20,10 @@ const ALLOWED_TEXT_EXPORT_EXTENSIONS: &[&str] = &["md", "txt", "csv", "json", "l
 /// write_uploaded_blob 接受的普通文档/文本扩展名（与前端 PromptComposer accept 对齐）。
 /// 这些文件走通用附件通道：存临时文件 → 作为 attachment → host 读取内容注入。
 const ALLOWED_UPLOADED_DOC_EXTENSIONS: &[&str] = &[
-    "txt", "log", "md", "csv", "tsv", "json", "xml", "yaml", "yml",
+    "txt", "log", "md", "csv", "tsv", "json", "jsonl", "xml", "yaml", "yml", "ini", "cfg", "conf",
+    "sql", "har", "html", "htm", "pdf", "doc", "docx", "xls", "xlsx", "ppt", "pptx", "js", "jsx",
+    "ts", "tsx", "py", "rs", "java", "go", "sh", "ps1",
 ];
-
-const ALERT_ANALYSIS_MCP_SERVICE: &str = "alert-analysis-mcp";
 
 /// 使用系统默认程序打开文件（跨平台）
 #[tauri::command]
@@ -317,7 +313,9 @@ fn sanitize_uploaded_doc_extension(extension: &str) -> Result<&'static str, Stri
         .iter()
         .copied()
         .find(|candidate| *candidate == normalized)
-        .ok_or_else(|| "仅支持 txt/log/md/csv/tsv/json/xml/yaml/yml 文档".to_string())
+        .ok_or_else(|| {
+            "不支持该附件格式，请选择文档、表格、代码、图片、抓包或 zip 文件".to_string()
+        })
 }
 
 fn sanitize_uploaded_blob_extension(extension: &str) -> Result<(&'static str, usize), String> {
@@ -365,46 +363,6 @@ fn sanitize_uploaded_file_name(file_name: Option<&str>, extension: &str) -> Stri
     format!("{stem}.{extension}")
 }
 
-fn validate_uploaded_pcap_path(app: &AppHandle, path: &str) -> Result<PathBuf, String> {
-    let path = Path::new(path);
-    let upload_dir = upload_storage_dir(app)?;
-    let upload_dir = upload_dir
-        .canonicalize()
-        .map_err(|e| format!("读取上传文件目录失败：{e}"))?;
-    let canonical = path
-        .canonicalize()
-        .map_err(|e| format!("读取上传文件失败：{e}"))?;
-    if !canonical.starts_with(&upload_dir) {
-        return Err("只能解析本应用接收的 PCAP 文件".to_string());
-    }
-    let extension = canonical
-        .extension()
-        .and_then(|value| value.to_str())
-        .unwrap_or_default();
-    sanitize_pcap_extension(extension)?;
-    Ok(canonical)
-}
-
-fn validate_uploaded_alert_image_path(app: &AppHandle, path: &str) -> Result<PathBuf, String> {
-    let path = Path::new(path);
-    let upload_dir = upload_storage_dir(app)?;
-    let upload_dir = upload_dir
-        .canonicalize()
-        .map_err(|e| format!("读取上传文件目录失败：{e}"))?;
-    let canonical = path
-        .canonicalize()
-        .map_err(|e| format!("读取上传图片失败：{e}"))?;
-    if !canonical.starts_with(&upload_dir) {
-        return Err("只能识别本应用接收的告警截图".to_string());
-    }
-    let extension = canonical
-        .extension()
-        .and_then(|value| value.to_str())
-        .unwrap_or_default();
-    sanitize_alert_image_extension(extension)?;
-    Ok(canonical)
-}
-
 /// 将 base64 编码的文件数据写入应用持久化上传目录，返回文件路径。
 #[tauri::command]
 pub fn write_uploaded_blob(
@@ -443,117 +401,106 @@ pub fn write_uploaded_blob(
     Ok(path.to_string_lossy().to_string())
 }
 
-/// 解析 PCAP/PCAPNG 文件：经 sidecar 调用 alert-analysis-mcp 的 parse_pcap_file 工具。
+#[derive(serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct StoredAttachment {
+    name: String,
+    path: String,
+    ext: String,
+    size: u64,
+    kind: String,
+}
+
+/// 使用系统文件选择器直接把附件复制进应用上传目录，避免大文件先在 WebView 中转成 Base64。
 #[tauri::command]
-pub async fn parse_pcap_file_cmd(app: AppHandle, path: String) -> Result<String, String> {
-    let canonical = validate_uploaded_pcap_path(&app, &path)?;
-    let normalized = strip_extended_path_prefix(canonical.to_string_lossy().as_ref());
-    let result =
-        call_alert_mcp_tool(&app, "parse_pcap_file", &json!({ "path": normalized }), 600).await;
-    result.and_then(|value| extract_text_result(value, "PCAP 解析"))
-}
-
-/// 识别告警截图：经 sidecar 调用 alert-analysis-mcp 的 extract_alert_image 工具。
-#[tauri::command]
-pub async fn extract_alert_image_text_cmd(app: AppHandle, path: String) -> Result<String, String> {
-    let canonical = validate_uploaded_alert_image_path(&app, &path)?;
-    let normalized = strip_extended_path_prefix(canonical.to_string_lossy().as_ref());
-    let result = call_alert_mcp_tool(
-        &app,
-        "extract_alert_image",
-        &json!({ "path": normalized }),
-        600,
-    )
-    .await;
-    result.and_then(|value| extract_text_result(value, "告警截图识别"))
-}
-
-/// 通过 sidecar 调用一个 alert-analysis MCP 工具（host 内的 MCP 客户端转发）。
-async fn call_alert_mcp_tool(
-    app: &AppHandle,
-    tool_name: &str,
-    args: &serde_json::Value,
-    timeout_secs: u64,
-) -> Result<serde_json::Value, String> {
-    // 确保 sidecar 已收到带 env（含 NOVA_PI_UPLOADS_DIR）的最新 MCP 配置。
-    // 配置未变时 host 的 configEquals 走快速路径不重连，开销仅一次 RPC 往返；
-    // 配置变化（如首次解析、刚启用服务）时 host 自动重连 Python 子进程以使新 env 生效。
-    crate::sync_mcp_config_to_sidecar(app).await?;
-    let settings = load_mcp_connection_settings(app, ALERT_ANALYSIS_MCP_SERVICE)?;
-    if !settings.enabled {
-        return Err("威胁研判 MCP 服务尚未启用。请在数字员工管理中配置并启用。".to_string());
-    }
-    let command = json!({
-        "type": "mcp_call",
-        "serviceId": ALERT_ANALYSIS_MCP_SERVICE,
-        "toolName": tool_name,
-        "args": args,
-        "timeoutSecs": timeout_secs,
-    });
-    // Rust 侧超时 = sidecar 任务超时 + 30s 缓冲，避免 Rust 先超时导致 sidecar 响应被丢弃。
-    let rpc_timeout = std::time::Duration::from_secs(timeout_secs.saturating_add(30));
-    let response = send_rpc_blocking_with_timeout(app, command, rpc_timeout).await?;
-    // response 是 host 返回的 MCP callTool 原始结果（可能含 content/structuredContent）
-    Ok(response)
-}
-
-fn strip_extended_path_prefix(path: &str) -> String {
-    path.trim_start_matches(r"\\?\").to_string()
-}
-
-fn extract_text_result(value: serde_json::Value, operation: &str) -> Result<String, String> {
-    // 兼容 MCP 的 text-content 数组和 structuredContent.text 两种形态。
-    // 注意：MCP 协议的「软错误」会把工具内部抛出的异常（如路径越界）包装成
-    // { content:[{type:"text", text:"<错误信息>"}], isError:true } 返回。
-    // 若不检查 isError，会把 Python 的报错文本当成成功结果回传给前端，
-    // 导致「路径越界」之类错误被伪装成 PCAP 解析成功。这里显式检查并转 Err。
-    let is_error = value
-        .get("isError")
-        .and_then(|v| v.as_bool())
-        .unwrap_or(false);
-    let collected = collect_mcp_text(&value);
-    if is_error {
-        return Err(match collected {
-            Some(text) if !text.trim().is_empty() => text,
-            _ => format!("威胁研判 MCP 执行{operation}失败。"),
-        });
-    }
-    if let Some(text) = collected {
-        return Ok(text);
-    }
-    Err(format!(
-        "威胁研判 MCP 返回的{operation}结果中没有文本内容。"
-    ))
-}
-
-/// 从 MCP callTool 响应中提取首个文本块（兼容 text / content[] / structuredContent）。
-fn collect_mcp_text(value: &serde_json::Value) -> Option<String> {
-    if let Some(text) = value.get("text").and_then(|v| v.as_str()) {
-        return Some(text.to_string());
-    }
-    if let Some(content) = value.get("content").and_then(|v| v.as_array()) {
-        for block in content {
-            if block.get("type").and_then(|v| v.as_str()) == Some("text") {
-                if let Some(text) = block.get("text").and_then(|v| v.as_str()) {
-                    return Some(text.to_string());
-                }
-            }
+pub async fn pick_and_store_attachments(app: AppHandle) -> Result<Vec<StoredAttachment>, String> {
+    tokio::task::spawn_blocking(move || {
+        let sources = rfd::FileDialog::new()
+            .set_title("选择要交给数字员工处理的附件")
+            .add_filter(
+                "支持的附件",
+                &[
+                    "txt", "log", "md", "csv", "tsv", "json", "jsonl", "xml", "yaml", "yml", "ini",
+                    "cfg", "conf", "sql", "har", "html", "htm", "pdf", "doc", "docx", "xls",
+                    "xlsx", "ppt", "pptx", "js", "jsx", "ts", "tsx", "py", "rs", "java", "go",
+                    "sh", "ps1", "pcap", "pcapng", "cap", "png", "jpg", "jpeg", "bmp", "webp",
+                    "tif", "tiff", "zip",
+                ],
+            )
+            .pick_files()
+            .unwrap_or_default();
+        if sources.is_empty() {
+            return Ok(Vec::new());
         }
-    }
-    if let Some(text) = value
-        .get("structuredContent")
-        .and_then(|v| v.get("text"))
-        .and_then(|v| v.as_str())
-    {
-        return Some(text.to_string());
-    }
-    None
+
+        // Validate every source before creating a persistent batch. Otherwise
+        // a later invalid/oversized file would leave earlier copies orphaned.
+        let prepared = sources
+            .into_iter()
+            .map(|source| {
+                let ext = source
+                    .extension()
+                    .and_then(|value| value.to_str())
+                    .unwrap_or_default();
+                let (ext, max_bytes) = sanitize_uploaded_blob_extension(ext)?;
+                let size = source
+                    .metadata()
+                    .map_err(|error| format!("读取附件大小失败：{error}"))?
+                    .len();
+                if size > max_bytes as u64 {
+                    return Err(format!(
+                        "附件 {} 过大，当前限制为 {} MB",
+                        source.display(),
+                        max_bytes / 1024 / 1024
+                    ));
+                }
+                let original_name = source.file_name().and_then(|value| value.to_str());
+                let safe_name = sanitize_uploaded_file_name(original_name, ext);
+                Ok((source, ext, size, safe_name))
+            })
+            .collect::<Result<Vec<_>, String>>()?;
+
+        let upload_root = upload_storage_dir(&app)?;
+        let ts = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_nanos();
+        let batch = upload_root.join(format!("upload-{ts}"));
+        std::fs::create_dir_all(&batch)
+            .map_err(|error| format!("创建上传批次目录失败：{error}"))?;
+
+        let result: Result<Vec<StoredAttachment>, String> = (|| {
+            let mut stored = Vec::with_capacity(prepared.len());
+            for (index, (source, ext, size, safe_name)) in prepared.into_iter().enumerate() {
+                let destination = batch.join(format!("{index}-{safe_name}"));
+                std::fs::copy(&source, &destination)
+                    .map_err(|error| format!("保存附件 {} 失败：{error}", source.display()))?;
+                stored.push(StoredAttachment {
+                    name: safe_name,
+                    path: destination.to_string_lossy().to_string(),
+                    ext: ext.to_string(),
+                    size,
+                    kind: if ALLOWED_ALERT_IMAGE_EXTENSIONS.contains(&ext) {
+                        "image".to_string()
+                    } else {
+                        "file".to_string()
+                    },
+                });
+            }
+            Ok(stored)
+        })();
+        if result.is_err() {
+            let _ = std::fs::remove_dir_all(&batch);
+        }
+        result
+    })
+    .await
+    .map_err(|error| format!("选择附件失败：{error}"))?
 }
 
 #[cfg(test)]
 mod tests {
-    use super::{collect_mcp_text, extract_text_result, sanitize_uploaded_file_name};
-    use serde_json::json;
+    use super::sanitize_uploaded_file_name;
 
     #[test]
     fn uploaded_file_name_preserves_user_visible_name() {
@@ -574,43 +521,5 @@ mod tests {
             "evil_name.pcap"
         );
         assert_eq!(sanitize_uploaded_file_name(None, "zip"), "upload.zip");
-    }
-
-    #[test]
-    fn extract_text_result_unwraps_text_content_block() {
-        let value = json!({
-            "content": [{ "type": "text", "text": "包统计：10 条" }]
-        });
-        assert_eq!(
-            extract_text_result(value, "PCAP 解析").unwrap(),
-            "包统计：10 条"
-        );
-    }
-
-    #[test]
-    fn extract_text_result_treats_soft_error_as_err() {
-        // Python safe_resolve 抛 ValueError 时，FastMCP 包成 isError:true 的软错误。
-        // 必须转成 Err，否则前端会把「路径越界」当成解析成功的正文显示。
-        let value = json!({
-            "content": [{ "type": "text", "text": "路径越界，只能访问允许目录内的文件" }],
-            "isError": true,
-        });
-        let result = extract_text_result(value, "PCAP 解析");
-        assert!(result.is_err());
-        assert!(result.unwrap_err().contains("路径越界"));
-    }
-
-    #[test]
-    fn extract_text_result_soft_error_without_text_uses_fallback_message() {
-        let value = json!({ "isError": true });
-        let result = extract_text_result(value, "告警截图识别");
-        assert!(result.is_err());
-        assert!(result.unwrap_err().contains("告警截图识别"));
-    }
-
-    #[test]
-    fn collect_mcp_text_reads_structured_content() {
-        let value = json!({ "structuredContent": { "text": "hello" } });
-        assert_eq!(collect_mcp_text(&value).as_deref(), Some("hello"));
     }
 }
