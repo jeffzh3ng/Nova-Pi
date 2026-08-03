@@ -162,7 +162,7 @@ JSON-line over stdin/stdout。详见 `host/src/rpc-protocol.ts`。
 
 ### GitHub 同步规则
 
-- 每次向 GitHub 推送代码前，必须先更新 `app/src-tauri/tauri.conf.json` 中的应用版本号；默认按语义化版本递增，并确保版本号变更包含在同一次推送中。
+- 每次向 GitHub 推送代码前，必须先递增应用版本号，并确保版本号变更包含在同一次推送中。版本号散布在 7 处，用 `npm run sync-version -- <新版本|patch|minor|major>` 一键同步（`scripts/sync-version.mjs`，支持 `--dry-run` 预览；默认按语义化版本递增）：根 / `app` / `host` 三个 `package.json` 的 `"version"` + 对应 `package-lock.json`、`app/src-tauri/Cargo.toml` 的 `version` + `Cargo.lock`、`app/src-tauri/tauri.conf.json` 的 `"version"`。
 
 ```bash
 # 安装依赖（根目录）
