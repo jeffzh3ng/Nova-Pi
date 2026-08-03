@@ -205,10 +205,22 @@ const buildCumulativeView = (
   };
 };
 
-const intensityLevel = (tokens: number, maxTokens: number) => {
-  if (tokens <= 0 || maxTokens <= 0) return 0;
-  const ratio = Math.log1p(tokens) / Math.log1p(maxTokens);
-  return Math.min(4, Math.max(1, Math.ceil(ratio * 4)));
+/** 按分位数划分强度档位:非零格子升序后取 p40 / p75 / p92 三个阈值,
+    tokens >= 对应阈值时进入 2 / 3 / 4 档。保证大部分日子落在浅色档,
+    只有最高约 8% 的日子取最深色。 */
+const computeLevelThresholds = (tokensList: number[]): readonly [number, number, number] => {
+  const sorted = [...tokensList].sort((a, b) => a - b);
+  const n = sorted.length;
+  const pick = (q: number) => sorted[Math.min(n - 1, Math.floor(q * n))];
+  return [pick(0.4), pick(0.75), pick(0.92)];
+};
+
+const intensityLevel = (tokens: number, thresholds: readonly [number, number, number] | null) => {
+  if (tokens <= 0 || !thresholds) return 0;
+  if (tokens >= thresholds[2]) return 4;
+  if (tokens >= thresholds[1]) return 3;
+  if (tokens >= thresholds[0]) return 2;
+  return 1;
 };
 
 export function TokenActivityCard() {
@@ -243,7 +255,10 @@ export function TokenActivityCard() {
     if (mode === "cumulative") return buildCumulativeView(dailyTotals, data);
     return buildDailyView(dailyTotals);
   }, [data, mode]);
-  const maxTokens = Math.max(...view.cells.map((cell) => cell.tokens), 0);
+  const levelThresholds = useMemo(() => {
+    const nonzero = view.cells.map((cell) => cell.tokens).filter((tokens) => tokens > 0);
+    return nonzero.length > 0 ? computeLevelThresholds(nonzero) : null;
+  }, [view]);
   const chartStyle = {
     gridTemplateColumns: `repeat(${view.columns}, 12px)`,
     gridTemplateRows: `repeat(${view.rows}, 12px)`,
@@ -300,7 +315,7 @@ export function TokenActivityCard() {
             aria-label={`${view.periodLabel} Token 使用热力图`}
           >
             {view.cells.map((cell) => {
-              const level = intensityLevel(cell.tokens, maxTokens);
+              const level = intensityLevel(cell.tokens, levelThresholds);
               return (
                 <span
                   className={`token-activity-cell level-${level} ${cell.padding ? "is-padding" : ""}`}
