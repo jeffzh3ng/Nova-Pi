@@ -1634,7 +1634,7 @@ body.is-resizing-sidebar * {
 
 .task-conversation {
   display: grid;
-  grid-template-columns: minmax(0, 1fr) 172px;
+  grid-template-columns: minmax(0, 1fr) 200px;
   grid-template-rows: auto minmax(0, 1fr) auto;
   gap: 8px;
   width: min(1560px, 100%);
