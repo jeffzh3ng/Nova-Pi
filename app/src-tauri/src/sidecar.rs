@@ -81,6 +81,109 @@ fn write_sidecar_log(log_path: Option<&Path>, message: &str) {
     let _ = writeln!(file, "[{timestamp}] {message}");
 }
 
+/// Build the stable command prefix used to identify this exact Nova sidecar.
+/// Requiring the runtime, host entry and app-data agent directory together keeps
+/// startup recovery from matching unrelated Node processes or another build.
+#[cfg(any(target_os = "macos", test))]
+fn sidecar_process_prefix(program: &str, args: &[String], agent_dir: &Path) -> String {
+    let mut parts = Vec::with_capacity(args.len() + 2);
+    parts.push(program.to_string());
+    parts.extend(args.iter().cloned());
+    parts.push(process_compatible_path(agent_dir));
+    parts.join(" ")
+}
+
+#[cfg(any(target_os = "macos", test))]
+fn command_matches_sidecar_prefix(command: &str, expected_prefix: &str) -> bool {
+    command
+        .strip_prefix(expected_prefix)
+        .is_some_and(|rest| rest.is_empty() || rest.chars().next().is_some_and(char::is_whitespace))
+}
+
+#[cfg(any(target_os = "macos", test))]
+fn stale_sidecar_pids(process_list: &str, expected_prefix: &str) -> Vec<u32> {
+    process_list
+        .lines()
+        .filter_map(|line| {
+            let trimmed = line.trim_start();
+            let pid_end = trimmed.find(char::is_whitespace)?;
+            let pid = trimmed[..pid_end].parse::<u32>().ok()?;
+            let after_pid = trimmed[pid_end..].trim_start();
+            let ppid_end = after_pid.find(char::is_whitespace)?;
+            let ppid = after_pid[..ppid_end].parse::<u32>().ok()?;
+            let command = after_pid[ppid_end..].trim_start();
+            (pid != std::process::id()
+                && ppid == 1
+                && command_matches_sidecar_prefix(command, expected_prefix))
+            .then_some(pid)
+        })
+        .collect()
+}
+
+/// macOS has no Windows Job Object equivalent. If Nova was force-quit, reclaim
+/// sidecars from the same installation before starting a replacement. Matching
+/// uses the complete known prefix rather than a broad process-name search.
+#[cfg(target_os = "macos")]
+fn reclaim_stale_sidecars(
+    program: &str,
+    args: &[String],
+    agent_dir: &Path,
+    log_path: Option<&Path>,
+) {
+    let expected_prefix = sidecar_process_prefix(program, args, agent_dir);
+    let list_matching = || -> Vec<u32> {
+        let Ok(output) = Command::new("/bin/ps")
+            .args(["-axww", "-o", "pid=", "-o", "ppid=", "-o", "command="])
+            .output()
+        else {
+            return Vec::new();
+        };
+        if !output.status.success() {
+            return Vec::new();
+        }
+        stale_sidecar_pids(&String::from_utf8_lossy(&output.stdout), &expected_prefix)
+    };
+
+    let stale = list_matching();
+    if stale.is_empty() {
+        return;
+    }
+    write_sidecar_log(
+        log_path,
+        &format!("startup recovery found stale sidecar pids={stale:?}"),
+    );
+
+    for pid in &stale {
+        let _ = Command::new("/bin/kill")
+            .args(["-TERM", &pid.to_string()])
+            .status();
+    }
+
+    // Give the host enough time to finish its own graceful shutdown: disposing
+    // sessions and closing MCP stdio transports (which kills their child
+    // processes) can take up to ~2s. SIGKILLing earlier would orphan the MCP
+    // children a second time. Re-scan with the exact command prefix before
+    // SIGKILL so a reused PID is never targeted.
+    for _ in 0..20 {
+        thread::sleep(Duration::from_millis(100));
+        if list_matching().is_empty() {
+            write_sidecar_log(log_path, "startup recovery terminated stale sidecar");
+            return;
+        }
+    }
+
+    let remaining = list_matching();
+    for pid in &remaining {
+        let _ = Command::new("/bin/kill")
+            .args(["-KILL", &pid.to_string()])
+            .status();
+    }
+    write_sidecar_log(
+        log_path,
+        &format!("startup recovery force-terminated stale sidecar pids={remaining:?}"),
+    );
+}
+
 /// Keep the complete Node/MCP process tree in a Windows Job Object. The
 /// KILL_ON_JOB_CLOSE limit is the last-resort cleanup path when Nova itself is
 /// terminated and therefore cannot run its normal shutdown handler.
@@ -201,6 +304,8 @@ fn start_sidecar_internal(app: &AppHandle, reset_watchdog_failures: bool) -> Res
 
     // 先关闭旧实例，避免重复调用产生孤儿进程。
     kill_existing();
+    #[cfg(target_os = "macos")]
+    reclaim_stale_sidecars(&program, &args, &agent_dir, log_path.as_deref());
 
     let mut command = Command::new(&program);
     command
@@ -608,7 +713,9 @@ pub fn stop_sidecar() {
 mod tests {
     #[cfg(windows)]
     use super::process_compatible_path;
-    use super::{find_bundled_node, resolve_production_entry};
+    use super::{
+        find_bundled_node, resolve_production_entry, sidecar_process_prefix, stale_sidecar_pids,
+    };
     use std::fs;
     use std::path::PathBuf;
     use std::time::{SystemTime, UNIX_EPOCH};
@@ -653,6 +760,25 @@ mod tests {
 
         assert_eq!(find_bundled_node(&runtime_dir), Some(executable));
         fs::remove_dir_all(runtime_dir).expect("temp runtime dir should be removed");
+    }
+
+    #[test]
+    fn identifies_only_the_exact_nova_sidecar_command() {
+        let program = "/Applications/Nova.app/Contents/Resources/runtime/node";
+        let entry = "/Applications/Nova.app/Contents/Resources/host/main.js".to_string();
+        let agent_dir =
+            PathBuf::from("/Users/test/Library/Application Support/com.nova.app/.pi/agent");
+        let prefix = sidecar_process_prefix(program, &[entry], &agent_dir);
+        let processes = format!(
+            "  101     1 {prefix} /Applications/Nova.app/Contents/Resources/skills state.json\n\
+               102     1 /usr/local/bin/node /Applications/Nova.app/Contents/Resources/host/main.js {}\n\
+               103     1 /bin/zsh -c {prefix}\n\
+               104     1 {prefix}-other\n\
+               105   999 {prefix}\n",
+            agent_dir.to_string_lossy()
+        );
+
+        assert_eq!(stale_sidecar_pids(&processes, &prefix), vec![101]);
     }
 
     #[cfg(windows)]
