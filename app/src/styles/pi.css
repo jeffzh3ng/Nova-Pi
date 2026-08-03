@@ -55,7 +55,12 @@ body,
 }
 
 .settings-app-version {
-  color: var(--color-muted);
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  color: var(--color-accent);
+  border-color: #c5e4ec;
+  background: var(--color-accent-weak);
 }
 
 .sidecar-health-badge {
@@ -64,7 +69,8 @@ body,
   gap: 6px;
 }
 
-.sidecar-health-badge i {
+.sidecar-health-badge i,
+.settings-app-version i {
   width: 7px;
   height: 7px;
   border-radius: 50%;

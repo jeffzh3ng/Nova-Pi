@@ -1083,6 +1083,7 @@ export function SettingsPanel() {
         <div className="settings-runtime-status">
           {appVersion ? (
             <p className="settings-app-version" aria-label={`当前版本 ${appVersion}`}>
+              <i aria-hidden="true" />
               Nova v{appVersion}
             </p>
           ) : null}
