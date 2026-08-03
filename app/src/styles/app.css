@@ -494,7 +494,7 @@ body.is-resizing-sidebar * {
 .tasks-workspace {
   justify-content: flex-start;
   gap: 0;
-  padding: 24px clamp(22px, 3vw, 48px);
+  padding: 14px clamp(22px, 3vw, 48px);
   transition: padding-right 240ms cubic-bezier(0.22, 1, 0.36, 1);
 }
 
@@ -1648,11 +1648,11 @@ body.is-resizing-sidebar * {
   grid-column: 1 / -1;
   grid-row: 1;
   display: flex;
-  align-items: center;
+  align-items: flex-start;
   justify-content: space-between;
   gap: 16px;
-  min-height: 38px;
-  padding: 0 0 5px;
+  min-height: 33px;
+  padding: 0 0 10px;
   border-bottom: 1px solid rgba(221, 229, 234, 0.9);
 }
 
@@ -1693,6 +1693,19 @@ body.is-resizing-sidebar * {
   text-overflow: ellipsis;
   white-space: nowrap;
   line-height: 1.25;
+}
+
+.conversation-title-line {
+  display: flex;
+  align-items: baseline;
+  gap: 8px;
+  min-width: 0;
+}
+
+.conversation-title-line time {
+  flex-shrink: 0;
+  color: var(--color-muted);
+  font-size: 11px;
 }
 
 .conversation-subtitle {

@@ -530,7 +530,10 @@ export function TaskConversation({
             <ArrowLeft size={16} />
           </button>
           <div className="conversation-title-group">
-            <h1>{taskTitle}</h1>
+            <div className="conversation-title-line">
+              <h1>{taskTitle}</h1>
+              {updatedTime ? <time>{updatedTime}</time> : null}
+            </div>
             <div className="conversation-subtitle">
               <span>{selectedHumanName}</span>
             </div>
@@ -546,7 +549,6 @@ export function TaskConversation({
           </div>
           <strong className={`task-status-pill ${taskStatus}`}>{taskStatusLabel}</strong>
           {readOnly ? <span className="conversation-readonly-badge">只读查看</span> : null}
-          {updatedTime ? <time>{updatedTime}</time> : null}
         </div>
       </div>
 
