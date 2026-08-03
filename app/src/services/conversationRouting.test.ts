@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import { requiresNewPiSession } from "./conversationRouting";
+import { getWritableConversationId, requiresNewPiSession } from "./conversationRouting";
 
 test("rebuilds a general session when the user mentions an MCP employee", () => {
   assert.equal(
@@ -31,4 +31,16 @@ test("rebuilds a custom employee session when its MCP binding changes", () => {
     ),
     true,
   );
+});
+
+test("first attachment upload reuses the conversation created earlier in the same event", () => {
+  let currentConversationRef: string | undefined;
+  const uploadConversationId = getWritableConversationId(currentConversationRef, false) ?? "conversation-a";
+  currentConversationRef = uploadConversationId;
+  const promptConversationId = getWritableConversationId(currentConversationRef, false) ?? "conversation-b";
+  assert.equal(promptConversationId, uploadConversationId);
+});
+
+test("read-only conversations are never reused for a new attachment", () => {
+  assert.equal(getWritableConversationId("archived", true), undefined);
 });

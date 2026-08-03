@@ -12,3 +12,11 @@ export function requiresNewPiSession(
     || existing.humanId !== target.humanId
     || existing.mcpServiceId !== target.mcpServiceId;
 }
+
+/** React state may lag behind refs during one upload event; route by the synchronous ref. */
+export function getWritableConversationId(
+  currentConversationId: string | undefined,
+  readOnly: boolean,
+): string | undefined {
+  return currentConversationId && !readOnly ? currentConversationId : undefined;
+}

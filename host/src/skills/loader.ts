@@ -18,6 +18,8 @@ import {
 } from "@earendil-works/pi-coding-agent";
 import { createMcpExtension, type McpServiceScope } from "../mcp/extension.js";
 import type { AttachmentRuntime } from "../attachments.js";
+import { createAttachmentExtension } from "../attachment-processing.js";
+import type { ImageArtifactStore } from "../mcp/image-artifacts.js";
 import {
   filterEnabledSkills,
   formatSkillInventoryForPrompt,
@@ -62,6 +64,7 @@ export async function createSessionResourceLoader(
   cwd = process.cwd(),
   allowSkills = false,
   attachments?: AttachmentRuntime,
+  imageArtifacts?: ImageArtifactStore,
 ): Promise<ResourceLoader> {
   if (!configuredAgentDir) {
     throw new Error("技能加载器尚未初始化。");
@@ -80,9 +83,12 @@ export async function createSessionResourceLoader(
       const inventory = allowSkills ? formatSkillInventoryForPrompt(enabledSkills) : "";
       return inventory ? [...current, inventory] : current;
     },
-    extensionFactories: allowedMcpServices === "all" || allowedMcpServices.length > 0
-      ? [createMcpExtension(allowedMcpServices, attachments)]
-      : [],
+    extensionFactories: [
+      ...(attachments ? [createAttachmentExtension(attachments)] : []),
+      ...(allowedMcpServices === "all" || allowedMcpServices.length > 0
+        ? [createMcpExtension(allowedMcpServices, attachments, imageArtifacts)]
+        : []),
+    ],
   });
   await loader.reload();
   return loader;

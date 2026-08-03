@@ -2239,6 +2239,24 @@ body.is-resizing-sidebar * {
   text-underline-offset: 2px;
 }
 
+.markdown-sandbox-image-link {
+  display: inline;
+  padding: 0;
+  color: var(--color-accent);
+  background: transparent;
+  border: 0;
+  font: inherit;
+  text-align: inherit;
+  text-decoration: underline;
+  text-underline-offset: 2px;
+  cursor: pointer;
+}
+
+.markdown-sandbox-image-link:disabled {
+  color: var(--color-muted);
+  cursor: wait;
+}
+
 .markdown-body hr {
   margin: 1em 0;
   border: 0;
@@ -2353,6 +2371,84 @@ body.is-resizing-sidebar * {
 .attachment-thumb:hover {
   transform: translateY(-1px);
   border-color: #94a3b8;
+}
+
+/* 拖放图片到输入框时的高亮（仅文件拖入触发） */
+.prompt-composer.is-drag-over {
+  outline: 2px dashed #2781a2;
+  outline-offset: -2px;
+  border-radius: 12px;
+  background: rgba(39, 129, 162, 0.06);
+}
+
+/* 图片大图预览（lightbox）：点遮罩 / Esc / 关闭按钮退出；顶栏支持系统打开 / 另存 */
+.image-viewer-overlay {
+  position: fixed;
+  inset: 0;
+  z-index: 1300;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: 14px;
+  padding: 56px 24px 24px;
+  background: rgba(15, 22, 33, 0.82);
+  backdrop-filter: blur(6px);
+  animation: modalFadeIn 140ms ease both;
+}
+.image-viewer-toolbar {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 16px;
+  width: min(960px, 100%);
+  padding: 8px 12px;
+  border-radius: 10px;
+  background: rgba(22, 30, 43, 0.7);
+  color: #e7ecf1;
+  font-size: 13px;
+}
+.image-viewer-name {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  opacity: 0.9;
+}
+.image-viewer-actions {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  flex-shrink: 0;
+}
+.image-viewer-actions button {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  height: 32px;
+  padding: 0 12px;
+  border-radius: 8px;
+  border: 1px solid transparent;
+  background: transparent;
+  color: #e7ecf1;
+  font-size: 12px;
+  font-weight: 600;
+  cursor: pointer;
+  transition: background 0.12s, border-color 0.12s;
+}
+.image-viewer-actions button:hover:not(:disabled) {
+  background: rgba(255, 255, 255, 0.12);
+}
+.image-viewer-actions button:disabled {
+  opacity: 0.4;
+  cursor: not-allowed;
+}
+.image-viewer-img {
+  max-width: 100%;
+  max-height: calc(100vh - 140px);
+  object-fit: contain;
+  border-radius: 8px;
+  box-shadow: 0 24px 70px rgba(0, 0, 0, 0.45);
+  user-select: none;
 }
 .attachment-file {
   display: inline-flex;

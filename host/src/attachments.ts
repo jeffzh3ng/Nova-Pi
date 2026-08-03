@@ -1,5 +1,6 @@
 import { readFile, stat } from "node:fs/promises";
 import path from "node:path";
+import type { ImageContent } from "@earendil-works/pi-ai/compat";
 import type { ConversationAttachments } from "./rpc-protocol.js";
 
 export type AgentAttachment = NonNullable<ConversationAttachments["files"]>[number];
@@ -11,6 +12,15 @@ const TEXT_EXTENSIONS = new Set([
 ]);
 const FILE_PREVIEW_LIMIT = 32_000;
 const TOTAL_PREVIEW_LIMIT = 80_000;
+const MAX_VISION_IMAGES = 4;
+const MAX_VISION_IMAGE_BYTES = 10 * 1024 * 1024;
+const IMAGE_MIME_BY_EXTENSION: Record<string, string> = {
+  png: "image/png",
+  jpg: "image/jpeg",
+  jpeg: "image/jpeg",
+  gif: "image/gif",
+  webp: "image/webp",
+};
 
 function normalizedExt(file: AgentAttachment): string {
   return (file.ext || path.extname(file.name)).replace(/^\./, "").toLowerCase();
@@ -70,6 +80,24 @@ export class AttachmentRuntime {
     return file;
   }
 
+  /** 当前轮图片在所选模型支持视觉输入时直接交给 pi，不经过 SQLite 或工作目录。 */
+  async currentImages(): Promise<ImageContent[]> {
+    const images: ImageContent[] = [];
+    for (const file of this.current) {
+      if (images.length >= MAX_VISION_IMAGES) break;
+      const mimeType = IMAGE_MIME_BY_EXTENSION[normalizedExt(file)];
+      if (!mimeType) continue;
+      const info = await stat(file.path);
+      if (!info.isFile() || info.size > MAX_VISION_IMAGE_BYTES) continue;
+      images.push({
+        type: "image",
+        data: (await readFile(file.path)).toString("base64"),
+        mimeType,
+      });
+    }
+    return images;
+  }
+
   async buildPrompt(message: string, attachments?: ConversationAttachments): Promise<string> {
     const incoming = attachments?.files ?? [];
     this.remember(incoming);
@@ -100,7 +128,8 @@ export class AttachmentRuntime {
     }
 
     return `${message}\n\n[本轮附件]\n${sections.join("\n")}\n\n` +
-      `请先结合对话判断用户目的。需要外部处理时，先调用 mcp 工具发现能力，再用 attachment 参数引用文件名；` +
-      `不要猜测文件内容、远端路径或伪造工具结果。二进制内容由 Nova 在工具调用时安全传递。`;
+      `请先结合对话判断用户目的。DOCX 或文本优先用 attachment 工具安全读取；` +
+      `图片若已作为视觉输入提供则直接理解，否则调用 mcp 发现外部图片识别能力，并用 attachment 参数引用文件名。` +
+      `不要猜测文件内容、工作目录、远端路径或伪造工具结果。`;
   }
 }

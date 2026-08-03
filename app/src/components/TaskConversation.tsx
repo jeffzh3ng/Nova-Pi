@@ -2,12 +2,14 @@ import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import type { MouseEvent as ReactMouseEvent } from "react";
 import { ArrowLeft, Bot, CheckCircle2, ChevronDown, ChevronUp, CircleAlert, Clock3, Download, FileText, FolderOpen, Link2, LoaderCircle, Paperclip, MessageSquareText, Pin, Play, Save, ShieldAlert, Sparkles, User } from "lucide-react";
 import { invoke } from "@tauri-apps/api/core";
-import ReactMarkdown from "react-markdown";
+import ReactMarkdown, { defaultUrlTransform } from "react-markdown";
 import remarkGfm from "remark-gfm";
 import { AlertAnalysisCard } from "./AlertAnalysisCard";
+import { ImageViewer, type ImageViewerState } from "./ImageViewer";
 import { PromptComposer } from "./PromptComposer";
 import { limitText, MAX_SUGGESTION_TEXT_LENGTH } from "../services/alertAnalysisText";
 import { isConversationNearBottom } from "../services/conversationScroll";
+import { sandboxImageFileName } from "../services/imageLinks";
 import { showAppError } from "../services/appDialog";
 import type { ChatMessage, ChatMessageAttachment, DigitalHuman, PendingSkillExecution } from "../types";
 
@@ -64,10 +66,49 @@ type FileContextMenuState = {
 /// stays explicit; the collapse wrapper treats both variants the same way
 /// (CSS-based visual collapse rather than string truncation, which would chop
 /// Markdown tables/lists mid-structure).
-function MarkdownContent({ content }: { content: string }) {
+function MarkdownContent({
+  content,
+  attachments,
+  onOpenImage,
+}: {
+  content: string;
+  attachments?: ChatMessageAttachment[];
+  onOpenImage?: (attachment: ChatMessageAttachment) => void;
+}) {
   return (
     <div className="markdown-body">
-      <ReactMarkdown remarkPlugins={[remarkGfm]}>{content}</ReactMarkdown>
+      <ReactMarkdown
+        remarkPlugins={[remarkGfm]}
+        urlTransform={(value) => (
+          value.toLowerCase().startsWith("sandbox:") ? value : defaultUrlTransform(value)
+        )}
+        components={{
+          a: ({ href, children }) => {
+            const sandboxName = href ? sandboxImageFileName(href) : undefined;
+            if (sandboxName) {
+              const attachment = attachments?.find((item) => (
+                item.kind === "image" && item.name === sandboxName && Boolean(item.path)
+              ));
+              return (
+                <button
+                  type="button"
+                  className="markdown-sandbox-image-link"
+                  disabled={!attachment}
+                  title={attachment ? `查看图片：${sandboxName}` : `正在恢复图片：${sandboxName}`}
+                  onClick={() => {
+                    if (attachment) onOpenImage?.(attachment);
+                  }}
+                >
+                  {children}
+                </button>
+              );
+            }
+            return <a href={href}>{children}</a>;
+          },
+        }}
+      >
+        {content}
+      </ReactMarkdown>
     </div>
   );
 }
@@ -75,9 +116,13 @@ function MarkdownContent({ content }: { content: string }) {
 function CollapsibleContent({
   content,
   variant = "text",
+  attachments,
+  onOpenImage,
 }: {
   content: string;
   variant?: "text" | "markdown";
+  attachments?: ChatMessageAttachment[];
+  onOpenImage?: (attachment: ChatMessageAttachment) => void;
 }) {
   const [expanded, setExpanded] = useState(false);
   const isLong = content.length > COLLAPSE_THRESHOLD;
@@ -85,7 +130,7 @@ function CollapsibleContent({
   // Short content: render inline without the collapse affordance.
   if (!isLong) {
     return variant === "markdown" ? (
-      <MarkdownContent content={content} />
+      <MarkdownContent content={content} attachments={attachments} onOpenImage={onOpenImage} />
     ) : (
       <p>{content}</p>
     );
@@ -97,7 +142,7 @@ function CollapsibleContent({
   return (
     <div className={`collapsible-content is-markdown-${variant} ${expanded ? "" : "is-collapsed"}`}>
       {variant === "markdown" ? (
-        <MarkdownContent content={content} />
+        <MarkdownContent content={content} attachments={attachments} onOpenImage={onOpenImage} />
       ) : (
         <p>{content}</p>
       )}
@@ -116,7 +161,14 @@ function CollapsibleContent({
   );
 }
 
-function MessageAttachments({ attachments }: { attachments: ChatMessageAttachment[] }) {
+function MessageAttachments({
+  attachments,
+  onOpenImage,
+}: {
+  attachments: ChatMessageAttachment[];
+  /// 图片双击打开 lightbox 大图预览。未提供时回退到系统程序打开。
+  onOpenImage?: (attachment: ChatMessageAttachment) => void;
+}) {
   const open = (path?: string) => {
     if (!path) return;
     invoke("open_file_path", { path }).catch((error: unknown) => {
@@ -130,14 +182,14 @@ function MessageAttachments({ attachments }: { attachments: ChatMessageAttachmen
     <div className="message-attachments">
       {attachments.map((att) =>
         att.kind === "image" ? (
-          <div
-            key={att.name}
-            className="attachment-thumb"
-            title={`双击打开：${att.name}`}
-            onDoubleClick={() => open(att.path)}
-          >
-            {att.previewUrl ? <img src={att.previewUrl} alt={att.name} /> : <span>{att.name}</span>}
-          </div>
+          <AttachmentImageThumb
+            key={att.path || att.name}
+            attachment={att}
+            onOpen={(previewUrl) => {
+              if (previewUrl && onOpenImage) onOpenImage({ ...att, previewUrl });
+              else open(att.path);
+            }}
+          />
         ) : (
           <div
             key={att.name}
@@ -177,6 +229,40 @@ function MessageAttachments({ attachments }: { attachments: ChatMessageAttachmen
           </div>
         ),
       )}
+    </div>
+  );
+}
+
+function AttachmentImageThumb({
+  attachment,
+  onOpen,
+}: {
+  attachment: ChatMessageAttachment;
+  onOpen: (previewUrl?: string) => void;
+}) {
+  const [previewUrl, setPreviewUrl] = useState(attachment.previewUrl);
+
+  useEffect(() => {
+    let active = true;
+    setPreviewUrl(attachment.previewUrl);
+    if (attachment.previewUrl || !attachment.path) return () => { active = false; };
+    void invoke<string>("read_image_preview", { path: attachment.path })
+      .then((url) => {
+        if (active) setPreviewUrl(url);
+      })
+      .catch((error: unknown) => {
+        console.error("读取图片预览失败", error);
+      });
+    return () => { active = false; };
+  }, [attachment.path, attachment.previewUrl]);
+
+  return (
+    <div
+      className="attachment-thumb"
+      title={previewUrl ? `双击查看大图：${attachment.name}` : `双击打开：${attachment.name}`}
+      onDoubleClick={() => onOpen(previewUrl)}
+    >
+      {previewUrl ? <img src={previewUrl} alt={attachment.name} /> : <span>{attachment.name}</span>}
     </div>
   );
 }
@@ -326,6 +412,7 @@ const isPureExecutionRecord = (message: ChatMessage) => (
   && !message.riskAssessmentResult
   && !message.riskAssessmentJob
   && !message.exportedFile
+  && !message.attachments?.length
   && !message.pendingSkillExecution
   && !message.suggestions?.length
 );
@@ -361,6 +448,23 @@ export function TaskConversation({
   const followConversationTailRef = useRef(true);
   const [showAllRelatedFiles, setShowAllRelatedFiles] = useState(false);
   const [fileContextMenu, setFileContextMenu] = useState<FileContextMenuState>(null);
+  const [imageViewer, setImageViewer] = useState<ImageViewerState>(null);
+  const openImagePreview = useCallback((attachment: ChatMessageAttachment) => {
+    const showPreview = (src: string) => {
+      setImageViewer({ src, fileName: attachment.name, path: attachment.path });
+    };
+    if (attachment.previewUrl) {
+      showPreview(attachment.previewUrl);
+      return;
+    }
+    if (!attachment.path) return;
+    void invoke<string>("read_image_preview", { path: attachment.path })
+      .then(showPreview)
+      .catch((error: unknown) => {
+        console.error("读取图片预览失败", error);
+        showAppError(error, "读取图片预览失败");
+      });
+  }, []);
   const visibleMessages = useMemo(
     () => messages.filter((message) => {
       if (!showToolMessages && isPureExecutionRecord(message)) return false;
@@ -599,7 +703,10 @@ export function TaskConversation({
                 </div>
                 {message.title ? <h2>{message.title}</h2> : null}
                 {message.attachments?.length ? (
-                  <MessageAttachments attachments={message.attachments} />
+                  <MessageAttachments
+                    attachments={message.attachments}
+                    onOpenImage={openImagePreview}
+                  />
                 ) : null}
                 {(() => {
                   // 有结构化结果（告警研判 / 数安风评）时抑制默认 summary/steps，
@@ -628,6 +735,8 @@ export function TaskConversation({
                     <CollapsibleContent
                       content={message.content}
                       variant={message.role === "assistant" ? "markdown" : "text"}
+                      attachments={message.attachments}
+                      onOpenImage={openImagePreview}
                     />
                   );
                 })()}
@@ -807,6 +916,8 @@ export function TaskConversation({
           </button>
         </div>
       ) : null}
+
+      <ImageViewer state={imageViewer} onClose={() => setImageViewer(null)} />
     </section>
   );
 }

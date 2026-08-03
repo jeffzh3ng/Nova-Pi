@@ -102,7 +102,10 @@ async function bootstrap(): Promise<void> {
   initExtensionsManagerPaths(agentDir);
   initSkillRuntime(agentDir, additionalSkillPaths, skillStatePath);
   await initBaseResourceLoader(agentDir, additionalSkillPaths);
-  pool = new SessionPool(resolve(agentDir, "..", "..", "uploads"));
+  pool = new SessionPool(
+    resolve(agentDir, "..", "..", "uploads"),
+    resolve(agentDir, "..", "..", "generated-images"),
+  );
   weixinBot = new WeixinBotManager(pool, agentDir);
   try {
     const defaultModel = await getDefaultModel();
@@ -392,6 +395,30 @@ async function handleCommand(command: RpcCommand): Promise<void> {
           command.args,
           command.timeoutSecs,
         );
+        writeResponse(id, true, result);
+        return;
+      }
+      case "cache_remote_images": {
+        if (!pool) throw new Error("host 尚未就绪");
+        const urls = (Array.isArray(command.urls) ? command.urls : [])
+          .filter((url): url is string => typeof url === "string" && url.length <= 8_192)
+          .slice(0, 8);
+        if (!command.conversationId.trim()) throw new Error("会话标识不能为空");
+        if (!urls.length) throw new Error("未提供可缓存的图片链接");
+        const result = await pool.cacheRemoteImages(command.conversationId, urls, command.label);
+        writeResponse(id, true, result);
+        return;
+      }
+      case "cache_sandbox_images": {
+        if (!pool) throw new Error("host 尚未就绪");
+        const references = (Array.isArray(command.references) ? command.references : [])
+          .filter((reference): reference is string => (
+            typeof reference === "string" && reference.length <= 8_192
+          ))
+          .slice(0, 8);
+        if (!command.conversationId.trim()) throw new Error("会话标识不能为空");
+        if (!references.length) throw new Error("未提供可恢复的 sandbox 图片引用");
+        const result = await pool.cacheSandboxImages(command.conversationId, references);
         writeResponse(id, true, result);
         return;
       }

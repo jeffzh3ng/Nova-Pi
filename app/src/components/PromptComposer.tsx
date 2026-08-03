@@ -93,6 +93,23 @@ function renderHighlightedValue(value: string, humans: DigitalHuman[]): ReactNod
   return parts;
 }
 
+/// 从剪贴板 / 拖放数据中收集图片文件（仅 image/*）。
+/// 优先取 .files；为空时回退到 .items（截图粘贴在部分 WebView 里只暴露在 items 上）。
+/// 两个来源互斥取其一，避免同一文件被收集两次。
+const collectImageFiles = (data: DataTransfer | null): File[] => {
+  if (!data) return [];
+  const fromFiles = Array.from(data.files ?? []).filter((file) => file.type.startsWith("image/"));
+  if (fromFiles.length) return fromFiles;
+  const fromItems: File[] = [];
+  for (const item of Array.from(data.items ?? [])) {
+    if (item.kind === "file" && item.type.startsWith("image/")) {
+      const file = item.getAsFile();
+      if (file) fromItems.push(file);
+    }
+  }
+  return fromItems;
+};
+
 type PromptComposerProps = {
   value: string;
   introduction?: string;
@@ -137,6 +154,9 @@ export function PromptComposer({
   const overlayRef = useRef<HTMLDivElement>(null);
   const overlayInnerRef = useRef<HTMLDivElement>(null);
   const isComposingRef = useRef(false);
+  // 拖放高亮：用进入/离开计数抵消子元素触发的 dragenter/dragleave 抖动。
+  const [isDragOver, setIsDragOver] = useState(false);
+  const dragDepthRef = useRef(0);
 
   // textarea 文字透明、可见文字由 overlay 渲染，二者必须同高同滚动，
   // 否则 caret 与可见文字错位。overlay 用 overflow:hidden 裁剪溢出内容，
@@ -323,13 +343,61 @@ export function PromptComposer({
     }
   };
 
+  /** 粘贴 / 拖入的图片交给上层走附件流程（与回形针选图一致）。busy/disabled 时不收。 */
+  const attachImages = (files: File[]) => {
+    if (!files.length || busy || disabled) return;
+    onAttachFiles(files);
+  };
+
+  const handlePaste = (event: React.ClipboardEvent<HTMLTextAreaElement>) => {
+    const files = collectImageFiles(event.clipboardData);
+    if (!files.length) return;
+    event.preventDefault();
+    attachImages(files);
+  };
+
+  // 仅对「文件」拖入拦截并阻止浏览器打开文件；文本/链接拖入保留默认行为。
+  const hasFileDrag = (event: React.DragEvent<HTMLFormElement>) =>
+    event.dataTransfer.types.includes("Files");
+
+  const handleDragEnter = (event: React.DragEvent<HTMLFormElement>) => {
+    if (!hasFileDrag(event)) return;
+    event.preventDefault();
+    dragDepthRef.current += 1;
+    if (!busy && !disabled) setIsDragOver(true);
+  };
+
+  const handleDragOver = (event: React.DragEvent<HTMLFormElement>) => {
+    if (!hasFileDrag(event)) return;
+    event.preventDefault();
+  };
+
+  const handleDragLeave = () => {
+    if (dragDepthRef.current > 0) dragDepthRef.current -= 1;
+    if (dragDepthRef.current === 0) setIsDragOver(false);
+  };
+
+  const handleDrop = (event: React.DragEvent<HTMLFormElement>) => {
+    dragDepthRef.current = 0;
+    setIsDragOver(false);
+    if (!hasFileDrag(event)) return;
+    event.preventDefault();
+    if (busy || disabled) return;
+    const files = collectImageFiles(event.dataTransfer);
+    if (files.length) attachImages(files);
+  };
+
   return (
     <form
-      className="prompt-composer"
+      className={`prompt-composer ${isDragOver ? "is-drag-over" : ""}`}
       onSubmit={(event) => {
         event.preventDefault();
         if (canSubmit) onSubmit();
       }}
+      onDragEnter={handleDragEnter}
+      onDragOver={handleDragOver}
+      onDragLeave={handleDragLeave}
+      onDrop={handleDrop}
     >
       {!value && introduction?.trim() ? (
         <p className="composer-introduction" aria-hidden="true">
@@ -364,6 +432,7 @@ export function PromptComposer({
           }
           title={disabled ? disabledReason : undefined}
           onChange={(event) => handleChange(event.target.value)}
+          onPaste={handlePaste}
           onScroll={syncOverlayScroll}
           onCompositionStart={() => {
             isComposingRef.current = true;

@@ -14,12 +14,15 @@ import {
   type ToolDefinition,
 } from "@earendil-works/pi-coding-agent";
 import type { Model } from "@earendil-works/pi-ai";
+import { join } from "node:path";
 import { getDigitalHuman, makeGenericHuman } from "./digital-human.js";
 import { getModelRuntime, resolveModel, applyApiKey, type HostModelSettings } from "./model-setup.js";
 import { writeEvent, type ConversationAttachments } from "./rpc-protocol.js";
 import { createSessionResourceLoader } from "./skills/loader.js";
 import { AttachmentRuntime, type AgentAttachment } from "./attachments.js";
 import { MCP_PROXY_TOOL_NAME } from "./mcp/extension.js";
+import { ATTACHMENT_TOOL_NAME } from "./attachment-processing.js";
+import { ImageArtifactStore, type PersistedImageResult } from "./mcp/image-artifacts.js";
 import {
   builtInToolNamesForSettings,
   COMPUTER_AGENT_ID,
@@ -77,11 +80,44 @@ export class SessionPool {
   private computerAgentSettings: ComputerAgentSettings = { ...DEFAULT_COMPUTER_AGENT_SETTINGS };
   private novaConversations: NovaConversationContext[] = [];
 
-  constructor(private readonly attachmentRoot: string) {}
+  constructor(
+    private readonly attachmentRoot: string,
+    private readonly generatedImageRoot: string,
+  ) {}
 
   setResourceLoader(_loader: ResourceLoader): void {
     // base loader 在 skills/loader.ts 里全局缓存；这里保留接口供未来扩展。
     void _loader;
+  }
+
+  async cacheRemoteImages(
+    conversationId: string,
+    urls: string[],
+    label = "assistant-image",
+  ): Promise<PersistedImageResult> {
+    const imageArtifacts = new ImageArtifactStore(
+      join(this.generatedImageRoot, this.safeConversationSegment(conversationId)),
+    );
+    return imageArtifacts.persistFromMcpResult(
+      { images: urls.map((url) => ({ url })) },
+      label,
+    );
+  }
+
+  async cacheSandboxImages(
+    conversationId: string,
+    references: string[],
+  ): Promise<PersistedImageResult> {
+    if (!this.computerAgentSettings.enabled || !this.computerAgentSettings.allowFileRead) {
+      throw new Error("恢复本机生成图片需要启用 Nova 并授权读取文件。");
+    }
+    const imageArtifacts = new ImageArtifactStore(
+      join(this.generatedImageRoot, this.safeConversationSegment(conversationId)),
+    );
+    return imageArtifacts.persistSandboxReferences(
+      references,
+      this.computerAgentSettings.workingDirectory,
+    );
   }
 
   async setModelSettings(settings: HostModelSettings): Promise<void> {
@@ -226,6 +262,9 @@ export class SessionPool {
     // 因此用 system prompt 承载历史文本，避免协议层撒谎（resumeMessages 之前收到后直接 break）。
     const computerSetup = await this.computerAgentSetup(params.humanId, params.conversationId);
     const attachmentRuntime = new AttachmentRuntime(this.attachmentRoot, params.resumeAttachments);
+    const imageArtifacts = new ImageArtifactStore(
+      join(this.generatedImageRoot, this.safeConversationSegment(params.conversationId)),
+    );
     const systemPromptWithHistory = this.computerAgentSystemPrompt(
       this.injectHistory(human.systemPrompt, params.resumeMessages),
       computerSetup,
@@ -236,6 +275,7 @@ export class SessionPool {
       computerSetup.cwd,
       computerSetup.allowSkills,
       attachmentRuntime,
+      imageArtifacts,
     );
 
     const sessionId = `pi-${params.conversationId}-${Date.now().toString(36)}`;
@@ -314,6 +354,9 @@ export class SessionPool {
     const model = this.resolveCurrentModel();
     const computerSetup = await this.computerAgentSetup(params.humanId, params.conversationId);
     const attachmentRuntime = new AttachmentRuntime(this.attachmentRoot);
+    const imageArtifacts = new ImageArtifactStore(
+      join(this.generatedImageRoot, this.safeConversationSegment(params.conversationId)),
+    );
     const systemPromptWithHistory = this.computerAgentSystemPrompt(
       this.injectHistory(human.systemPrompt, params.resumeMessages),
       computerSetup,
@@ -324,6 +367,7 @@ export class SessionPool {
       computerSetup.cwd,
       computerSetup.allowSkills,
       attachmentRuntime,
+      imageArtifacts,
     );
 
     const sessionId = `bg-${params.conversationId}-${Date.now().toString(36)}`;
@@ -413,9 +457,14 @@ export class SessionPool {
 
     entry.status = "running";
     entry.lastActivityAt = Date.now();
-    const message = await entry.attachments.buildPrompt(params.message, params.attachments);
+    let message = await entry.attachments.buildPrompt(params.message, params.attachments);
+    const supportsImages = entry.session.model?.input.includes("image") === true;
+    const images = supportsImages ? await entry.attachments.currentImages() : [];
+    if (images.length > 0) {
+      message = `${message}\n\n当前轮图片已作为视觉输入附加，请直接识别图片内容。`;
+    }
     try {
-      await entry.session.prompt(message);
+      await entry.session.prompt(message, images.length > 0 ? { images } : undefined);
     } catch (error) {
       entry.status = "idle";
       entry.activeTool = undefined;
@@ -504,10 +553,16 @@ export class SessionPool {
         ...builtInToolNamesForSettings(settings),
         ...customToolNamesForSettings(settings),
         MCP_PROXY_TOOL_NAME,
+        ATTACHMENT_TOOL_NAME,
       ],
       customTools,
       authorizationPrompt: computerAgentAuthorizationPrompt(settings),
     };
+  }
+
+  private safeConversationSegment(conversationId: string): string {
+    const safe = conversationId.replace(/[^a-zA-Z0-9._-]+/g, "-").slice(0, 120);
+    return safe || "conversation";
   }
 
   private computerAgentSystemPrompt(

@@ -155,7 +155,7 @@ fn allowed_open_roots(app: &AppHandle) -> Vec<PathBuf> {
     if let Ok(data_dir) = app.path().app_data_dir() {
         // Uploaded source files are persisted under app data because message
         // attachments remain actionable after parsing and across restarts.
-        for sub in ["uploads", "exports"] {
+        for sub in ["uploads", "exports", "generated-images"] {
             let dir = data_dir.join(sub);
             if let Ok(canonical) = dir.canonicalize() {
                 roots.push(canonical);
@@ -411,6 +411,61 @@ pub struct StoredAttachment {
     kind: String,
 }
 
+/// 图片扩展名 → MIME（与前端 IMAGE_MIME_BY_EXT 对齐）。
+fn image_mime_for_ext(ext: &str) -> Option<&'static str> {
+    match ext {
+        "png" => Some("image/png"),
+        "jpg" | "jpeg" => Some("image/jpeg"),
+        "gif" => Some("image/gif"),
+        "bmp" => Some("image/bmp"),
+        "webp" => Some("image/webp"),
+        "tif" | "tiff" => Some("image/tiff"),
+        _ => None,
+    }
+}
+
+/// 按需读取本应用受控目录内的图片用于界面预览。
+///
+/// 返回值只进入当前 WebView 内存，不写入会话快照；图片本体始终保存在文件中。
+#[tauri::command]
+pub fn read_image_preview(app: AppHandle, path: String) -> Result<String, String> {
+    use base64::Engine as _;
+    let requested = Path::new(path.trim());
+    if !requested.is_absolute() || path.starts_with(r"\\") || path.starts_with(r"\\?\") {
+        return Err("图片路径无效。".to_string());
+    }
+    let canonical = requested
+        .canonicalize()
+        .map_err(|error| format!("无法解析图片路径：{error}"))?;
+    if !allowed_open_roots(&app)
+        .iter()
+        .any(|root| canonical.starts_with(root))
+    {
+        return Err("只能预览本应用接收或生成的图片。".to_string());
+    }
+    let ext = canonical
+        .extension()
+        .and_then(|value| value.to_str())
+        .unwrap_or_default()
+        .to_ascii_lowercase();
+    let mime = image_mime_for_ext(&ext).ok_or_else(|| "未知图片格式".to_string())?;
+    let metadata = canonical
+        .metadata()
+        .map_err(|error| format!("读取图片信息失败：{error}"))?;
+    if !metadata.is_file() {
+        return Err("图片路径不是文件。".to_string());
+    }
+    if metadata.len() > MAX_UPLOADED_DOC_BYTES as u64 {
+        return Err(format!(
+            "图片过大，当前预览限制为 {} MB",
+            MAX_UPLOADED_DOC_BYTES / 1024 / 1024
+        ));
+    }
+    let bytes = std::fs::read(&canonical).map_err(|e| format!("读取图片失败：{e}"))?;
+    let encoded = base64::engine::general_purpose::STANDARD.encode(&bytes);
+    Ok(format!("data:{mime};base64,{encoded}"))
+}
+
 /// 使用系统文件选择器直接把附件复制进应用上传目录，避免大文件先在 WebView 中转成 Base64。
 #[tauri::command]
 pub async fn pick_and_store_attachments(app: AppHandle) -> Result<Vec<StoredAttachment>, String> {
@@ -475,12 +530,13 @@ pub async fn pick_and_store_attachments(app: AppHandle) -> Result<Vec<StoredAtta
                 let destination = batch.join(format!("{index}-{safe_name}"));
                 std::fs::copy(&source, &destination)
                     .map_err(|error| format!("保存附件 {} 失败：{error}", source.display()))?;
+                let is_image = ALLOWED_ALERT_IMAGE_EXTENSIONS.contains(&ext);
                 stored.push(StoredAttachment {
                     name: safe_name,
                     path: destination.to_string_lossy().to_string(),
                     ext: ext.to_string(),
                     size,
-                    kind: if ALLOWED_ALERT_IMAGE_EXTENSIONS.contains(&ext) {
+                    kind: if is_image {
                         "image".to_string()
                     } else {
                         "file".to_string()

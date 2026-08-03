@@ -8,7 +8,7 @@ function anchorFromTarget(target: EventTarget | null): HTMLAnchorElement | null 
   return target.closest("a[href]");
 }
 
-/** 仅把 http/https 视为"外部链接"；相对路径、#hash、mailto: 等一律放行 */
+/** 仅把 http/https 视为可交给系统浏览器的外部链接。 */
 function isExternalUrl(href: string | null): href is string {
   if (!href) return false;
   try {
@@ -17,6 +17,10 @@ function isExternalUrl(href: string | null): href is string {
   } catch {
     return false;
   }
+}
+
+function isInDocumentHash(href: string | null): boolean {
+  return Boolean(href?.startsWith("#"));
 }
 
 /** 经 Rust 命令用系统默认浏览器打开（Rust 侧再次校验只允许 http/https） */
@@ -116,17 +120,22 @@ export function LinkGuard() {
       }
       if (event.button !== 0) return;
       const anchor = anchorFromTarget(event.target);
+      if (!anchor) return;
       const href = anchor?.getAttribute("href") ?? null;
-      if (!isExternalUrl(href)) return;
+      if (isInDocumentHash(href)) return;
       event.preventDefault();
       event.stopPropagation();
-      openInBrowser(href);
+      if (isExternalUrl(href)) openInBrowser(href);
     };
 
     const handleContextMenuCapture = (event: MouseEvent) => {
       const anchor = anchorFromTarget(event.target);
+      if (!anchor) return;
       const href = anchor?.getAttribute("href") ?? null;
-      if (!isExternalUrl(href)) return;
+      if (!isExternalUrl(href)) {
+        if (!isInDocumentHash(href)) event.preventDefault();
+        return;
+      }
       event.preventDefault();
       event.stopPropagation();
       const x = Math.min(event.clientX, window.innerWidth - MENU_WIDTH);
@@ -152,6 +161,7 @@ export function LinkGuard() {
           openInBrowser(href);
           return null;
         }
+        if (!isInDocumentHash(href)) return null;
       }
       return originalOpen.call(window, url, target, features);
     };

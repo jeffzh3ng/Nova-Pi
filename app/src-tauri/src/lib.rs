@@ -33,8 +33,8 @@ use conversation_store::{
     restore_conversation, save_conversation_snapshot,
 };
 use files::{
-    open_file_path, pick_and_store_attachments, save_file_as, show_file_in_folder,
-    write_temp_text_file, write_uploaded_blob,
+    open_file_path, pick_and_store_attachments, read_image_preview, save_file_as,
+    show_file_in_folder, write_temp_text_file, write_uploaded_blob,
 };
 use llm_settings::{
     get_model_settings, list_token_usage, reset_model_settings, save_model_settings,
@@ -375,6 +375,7 @@ pub fn run() {
             write_temp_text_file,
             write_uploaded_blob,
             pick_and_store_attachments,
+            read_image_preview,
             // 外部链接（系统默认浏览器）
             open_external_url,
             // MCP 配置

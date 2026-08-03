@@ -29,7 +29,13 @@ import {
   summaryToRecentTask,
 } from "./services/conversationStore";
 import type { ConversationSnapshot, ConversationSummary } from "./services/conversationStore";
-import { requiresNewPiSession } from "./services/conversationRouting";
+import { getWritableConversationId, requiresNewPiSession } from "./services/conversationRouting";
+import {
+  extractRemoteImageUrls,
+  extractSandboxImageReferences,
+  extractWorkingDirectoryImageReferences,
+  sandboxImageFileName,
+} from "./services/imageLinks";
 import { executeSkillPlan } from "./services/skillExecution";
 import { sendRpc, subscribePiEvents } from "./services/hostBridge";
 import { listMessageChannels } from "./services/messageChannels";
@@ -417,8 +423,58 @@ type RiskAssessmentContext = {
 const waitForRiskPoll = (milliseconds: number) =>
   new Promise<void>((resolve) => window.setTimeout(resolve, milliseconds));
 
+/// MCP 工具结果里 image 内容块的 MIME → 扩展名（落盘命名 / 后端 write_uploaded_blob 校验）。
+const EXT_BY_IMAGE_MIME: Record<string, string> = {
+  "image/png": "png",
+  "image/jpeg": "jpg",
+  "image/gif": "gif",
+  "image/bmp": "bmp",
+  "image/webp": "webp",
+  "image/tiff": "tif",
+};
+
+const extFromImageMime = (mime: string): string =>
+  EXT_BY_IMAGE_MIME[mime.toLowerCase()] ?? "png";
+
+/// 从 MCP content 块数组里抽出 image 块的 { data(base64), mimeType }。
+const extractImageBlocks = (content: unknown): Array<{ data: string; mimeType: string }> => {
+  if (!Array.isArray(content)) return [];
+  const images: Array<{ data: string; mimeType: string }> = [];
+  for (const block of content) {
+    if (!block || typeof block !== "object") continue;
+    const node = block as { type?: unknown; data?: unknown; mimeType?: unknown };
+    if (node.type === "image" && typeof node.data === "string" && typeof node.mimeType === "string") {
+      images.push({ data: node.data, mimeType: node.mimeType });
+    }
+  }
+  return images;
+};
+
+type LocalImageArtifact = {
+  kind: "image";
+  name: string;
+  path: string;
+  ext: string;
+  size: number;
+  mimeType?: string;
+};
+
+const extractLocalImageArtifacts = (value: unknown): LocalImageArtifact[] => {
+  if (!Array.isArray(value)) return [];
+  return value.filter((item): item is LocalImageArtifact => {
+    if (!item || typeof item !== "object") return false;
+    const node = item as Partial<LocalImageArtifact>;
+    return node.kind === "image"
+      && typeof node.name === "string"
+      && typeof node.path === "string"
+      && typeof node.ext === "string"
+      && typeof node.size === "number";
+  });
+};
+
 /** 把 pi 的 tool_execution_end 结果映射为前端可识别的结构化负载。
- *  host 已在 details 里附带 module 字段（alert-analysis / data-risk-assessment / ip-threat-analysis）。 */
+ *  host 已在 details 里附带 module 字段（alert-analysis / data-risk-assessment / ip-threat-analysis）。
+ *  另从 content 块里抽 image 块（MCP 工具产出的图），落盘后作为附件缩略图渲染。 */
 const interpretToolResult = (
   result: unknown,
 ): {
@@ -429,40 +485,62 @@ const interpretToolResult = (
   pendingSkillExecution?: PendingSkillExecution;
   suggestions?: string[];
   riskMatrixTemplate?: { matrixName: string; fileName: string };
+  /// MCP 工具结果里的 image 内容块（data 为 base64）。
+  images?: Array<{ data: string; mimeType: string }>;
+  /// host 已经持久化到 generated-images 的图片文件。
+  imageArtifacts?: LocalImageArtifact[];
 } => {
   if (!result || typeof result !== "object") return {};
+  // image 块可能出现在顶层 content（pi 工具结果）或 details.result.content（归一化负载）。
+  const topImages = extractImageBlocks((result as { content?: unknown }).content);
+  const withImages = <T extends Record<string, unknown>>(
+    base: T,
+    extra: Array<{ data: string; mimeType: string }>,
+    artifacts: LocalImageArtifact[] = [],
+  ): T => {
+    const all = [...topImages, ...extra];
+    return {
+      ...base,
+      ...(all.length ? { images: all } : {}),
+      ...(artifacts.length ? { imageArtifacts: artifacts } : {}),
+    } as T;
+  };
+
   const rawDetails = (result as { details?: unknown }).details;
-  if (rawDetails && typeof rawDetails === "object") {
-    const envelope = rawDetails as Record<string, unknown>;
-    // 统一 mcp 代理保留 serviceId/toolName 来源，并把业务负载放在 result 中。
-    // 兼容旧工具直接把业务负载放 details 的历史会话。
-    const det = envelope.result && typeof envelope.result === "object"
-      ? envelope.result as Record<string, unknown>
-      : envelope;
-    if (det.module === "alert-analysis" || det.module === "ip-threat-analysis") {
-      return { alertAnalysisResult: det as unknown as AlertAnalysisResult };
-    }
-    if (det.module === "data-risk-assessment") {
-      return { riskAssessmentResult: det as unknown as RiskAssessmentResult };
-    }
-    const exported = det.exported_file;
-    if (exported && typeof exported === "object" && !Array.isArray(exported)) {
-      const file = exported as Record<string, unknown>;
-      if (
-        file.download_available === true
-        && typeof file.matrix_name === "string"
-        && typeof file.file_name === "string"
-      ) {
-        return {
-          riskMatrixTemplate: {
-            matrixName: file.matrix_name,
-            fileName: file.file_name,
-          },
-        };
-      }
+  if (!rawDetails || typeof rawDetails !== "object") {
+    return withImages({}, []);
+  }
+  const envelope = rawDetails as Record<string, unknown>;
+  const artifacts = extractLocalImageArtifacts(envelope.artifacts);
+  // 统一 mcp 代理保留 serviceId/toolName 来源，并把业务负载放在 result 中。
+  // 兼容旧工具直接把业务负载放 details 的历史会话。
+  const det = envelope.result && typeof envelope.result === "object"
+    ? envelope.result as Record<string, unknown>
+    : envelope;
+  const detImages = extractImageBlocks(det.content);
+  if (det.module === "alert-analysis" || det.module === "ip-threat-analysis") {
+    return withImages({ alertAnalysisResult: det as unknown as AlertAnalysisResult }, detImages, artifacts);
+  }
+  if (det.module === "data-risk-assessment") {
+    return withImages({ riskAssessmentResult: det as unknown as RiskAssessmentResult }, detImages, artifacts);
+  }
+  const exported = det.exported_file;
+  if (exported && typeof exported === "object" && !Array.isArray(exported)) {
+    const file = exported as Record<string, unknown>;
+    if (
+      file.download_available === true
+      && typeof file.matrix_name === "string"
+      && typeof file.file_name === "string"
+    ) {
+      return withImages({
+        riskMatrixTemplate: {
+          matrixName: file.matrix_name,
+          fileName: file.file_name,
+        },
+      }, detImages, artifacts);
     }
   }
-  return {};
+  return withImages({}, detImages, artifacts);
 };
 
 export default function App() {
@@ -522,6 +600,7 @@ export default function App() {
   const archivedTaskIdsRef = useRef<Set<string>>(new Set());
   const deletedConversationIdsRef = useRef<Set<string>>(new Set());
   const titleGenerationInFlightRef = useRef<Set<string>>(new Set());
+  const localizedImageLinksRef = useRef<Set<string>>(new Set());
   const titleGenerationTimersRef = useRef<Record<string, ReturnType<typeof setTimeout>>>({});
 
   useEffect(() => {
@@ -1321,6 +1400,117 @@ export default function App() {
     appendMessagesToConversation(conversationId, [message], status);
   };
 
+  useEffect(() => {
+    if (!currentConversationId || conversationReadOnly) return;
+
+    for (const message of conversationMessages) {
+      if (message.role !== "assistant") continue;
+      const applyLocalization = (
+        kind: "remote" | "sandbox",
+        pending: string[],
+        request: Promise<{ artifacts: LocalImageArtifact[]; errors: string[] }>,
+      ) => {
+        void request
+          .then((result) => {
+            const artifacts = extractLocalImageArtifacts(result.artifacts);
+            if (!artifacts.length) {
+              for (const reference of pending) {
+                localizedImageLinksRef.current.delete(
+                  `${currentConversationId}:${message.id}:${kind}:${reference}`,
+                );
+              }
+              if (result.errors.length) console.warn("缓存助手图片失败", result.errors);
+              return;
+            }
+            updateMessageInConversation(
+              currentConversationId,
+              message.id,
+              (current) => {
+                const attachments = [...(current.attachments ?? [])];
+                for (const artifact of artifacts) {
+                  if (attachments.some((attachment) => attachment.path === artifact.path)) continue;
+                  attachments.push({
+                    kind: "image",
+                    name: artifact.name,
+                    path: artifact.path,
+                    ext: artifact.ext,
+                    size: artifact.size,
+                    uploadStatus: "ready",
+                  });
+                }
+                return { ...current, attachments };
+              },
+              currentConversationRunning ? "running" : "done",
+            );
+          })
+          .catch((error) => {
+            for (const reference of pending) {
+              localizedImageLinksRef.current.delete(
+                `${currentConversationId}:${message.id}:${kind}:${reference}`,
+              );
+            }
+            console.warn("缓存助手图片失败", error);
+          });
+      };
+
+      const urls = extractRemoteImageUrls(message.content);
+      const pendingUrls = urls.filter((url) => {
+        const key = `${currentConversationId}:${message.id}:remote:${url}`;
+        if (localizedImageLinksRef.current.has(key)) return false;
+        localizedImageLinksRef.current.add(key);
+        return true;
+      });
+      if (pendingUrls.length) {
+        applyLocalization(
+          "remote",
+          pendingUrls,
+          sendRpc<{ artifacts: LocalImageArtifact[]; errors: string[] }>({
+            type: "cache_remote_images",
+            conversationId: currentConversationId,
+            urls: pendingUrls,
+            label: "assistant-image",
+          }),
+        );
+      }
+
+      if (!computerAgentSettings?.enabled || !computerAgentSettings.allowFileRead) continue;
+      const sandboxReferences = Array.from(new Set([
+        ...extractSandboxImageReferences(message.content),
+        ...extractWorkingDirectoryImageReferences(
+          message.content,
+          computerAgentSettings.workingDirectory,
+        ),
+      ])).slice(0, 8);
+      const pendingSandboxReferences = sandboxReferences.filter((reference) => {
+        const name = sandboxImageFileName(reference);
+        if (name && message.attachments?.some((attachment) => attachment.path && attachment.name === name)) {
+          return false;
+        }
+        const key = `${currentConversationId}:${message.id}:sandbox:${reference}`;
+        if (localizedImageLinksRef.current.has(key)) return false;
+        localizedImageLinksRef.current.add(key);
+        return true;
+      });
+      if (pendingSandboxReferences.length) {
+        applyLocalization(
+          "sandbox",
+          pendingSandboxReferences,
+          sendRpc<{ artifacts: LocalImageArtifact[]; errors: string[] }>({
+            type: "cache_sandbox_images",
+            conversationId: currentConversationId,
+            references: pendingSandboxReferences,
+          }),
+        );
+      }
+    }
+  }, [
+    computerAgentSettings,
+    conversationMessages,
+    conversationReadOnly,
+    currentConversationId,
+    currentConversationRunning,
+  ]);
+
   const runTitleGeneration = (conversationId: string): boolean => {
     if (!conversationId || conversationReadOnlyRef.current) return false;
     if (titleGenerationInFlightRef.current.has(conversationId)) return false;
@@ -1499,10 +1689,16 @@ export default function App() {
   };
 
   const ensureConversation = (metadata = metadataFromCurrentSelection()) => {
-    if (currentConversationId && activeNav === "tasks" && !conversationReadOnly) {
+    // 同一上传事件里 setCurrentConversationId 尚未触发 React 重渲染；必须读取同步 ref。
+    // 否则首次附件先创建会话 A，紧接着 submitPrompt 又创建会话 B，附件留在 A 而 prompt 发给 B。
+    const writableConversationId = getWritableConversationId(
+      currentConversationIdRef.current,
+      conversationReadOnlyRef.current,
+    );
+    if (writableConversationId) {
       conversationReadOnlyRef.current = false;
-      rememberConversationMetadata(currentConversationId, metadata);
-      return currentConversationId;
+      rememberConversationMetadata(writableConversationId, metadata);
+      return writableConversationId;
     }
     const id = makeLocalId();
     setCurrentConversationId(id);
@@ -1973,6 +2169,25 @@ export default function App() {
           if (!messageId) break;
           delete toolMessageIdRef.current[key];
           const interpreted = interpretToolResult(event.result);
+          // 新版 host 会先把 MCP 图片持久化；Base64 仅作为旧 host 的兼容回退。
+          const imageAttachments: ChatMessageAttachment[] = interpreted.imageArtifacts?.length
+            ? interpreted.imageArtifacts.map((artifact) => ({
+                kind: "image" as const,
+                name: artifact.name,
+                path: artifact.path,
+                ext: artifact.ext,
+                size: artifact.size,
+              }))
+            : (interpreted.images ?? []).map((img, index) => {
+                const ext = extFromImageMime(img.mimeType);
+                return {
+                  kind: "image" as const,
+                  name: `${event.toolName}-${index + 1}.${ext}`,
+                  previewUrl: `data:${img.mimeType};base64,${img.data}`,
+                  ext,
+                  size: Math.floor((img.data.length * 3) / 4),
+                };
+              });
           // 研判/风评结构化结果：把卡片负载合进工具气泡，并抽取 suggestions。
           updateMessageInConversation(
             conversationId,
@@ -1991,9 +2206,40 @@ export default function App() {
               usedSkill: interpreted.usedSkill ?? message.usedSkill,
               pendingSkillExecution: interpreted.pendingSkillExecution ?? message.pendingSkillExecution,
               suggestions: interpreted.suggestions ?? message.suggestions,
+              attachments: imageAttachments.length
+                ? [...(message.attachments ?? []), ...imageAttachments]
+                : message.attachments,
             }),
             "running",
           );
+          // 异步落盘，回填 path（使「系统打开 / 另存」可用；失败则静默，缩略图照常显示）。
+          if (!interpreted.imageArtifacts?.length) imageAttachments.forEach((att, index) => {
+            const img = interpreted.images?.[index];
+            if (!img) return;
+            invoke<string>("write_uploaded_blob", {
+              base64Data: img.data,
+              extension: att.ext!,
+              fileName: att.name,
+            })
+              .then((path) => {
+                updateMessageInConversation(
+                  conversationId,
+                  messageId,
+                  (message) => ({
+                    ...message,
+                    attachments: message.attachments?.map((existing) =>
+                      existing.name === att.name && existing.kind === "image" && !existing.path
+                        ? { ...existing, path }
+                        : existing,
+                    ),
+                  }),
+                  "running",
+                );
+              })
+              .catch((error: unknown) => {
+                console.error("AI 图片落盘失败", error);
+              });
+          });
           if (interpreted.riskMatrixTemplate) {
             const template = interpreted.riskMatrixTemplate;
             void downloadRiskAssessmentMatrixTemplate(template.matrixName, template.fileName).then(
@@ -2127,6 +2373,8 @@ export default function App() {
       request: string;
       userMessage?: string;
       skipUserMessage?: boolean;
+      /** 程序化附件提交必须沿用上传阶段已确定的会话，不能再次从异步 UI 状态推导。 */
+      conversationId?: string;
     },
   ) => {
     // override 是程序化调用（如风评卡片），request 已指定，不再走 @ 解析。
@@ -2155,7 +2403,8 @@ export default function App() {
     const runId = activeRunIdRef.current + 1;
     activeRunIdRef.current = runId;
 
-    const conversationId = ensureConversation(targetMetadata);
+    const conversationId = override?.conversationId ?? ensureConversation(targetMetadata);
+    rememberConversationMetadata(conversationId, targetMetadata);
     // Capture only prior turns. The current user message is sent through the
     // prompt command below and must not also be injected into rebuilt history.
     const resumeMessages = conversationMessageBuffersRef.current[conversationId]?.map((message) => ({
@@ -2455,6 +2704,7 @@ export default function App() {
     await submitPrompt({
       request: "请结合当前对话分析这些附件所对应的用户目的，并自主决定下一步处理。需要外部能力时，先发现并调用当前数字员工绑定的 MCP 服务；如果目的不明确，请先提出最少量的澄清问题。",
       skipUserMessage: true,
+      conversationId,
     });
   };
 

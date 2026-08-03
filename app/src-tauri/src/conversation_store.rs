@@ -193,14 +193,15 @@ pub fn save_conversation_snapshot(
             let exported_file_json = message
                 .exported_file
                 .as_ref()
-                .map(serde_json::to_string)
+                .map(|value| serde_json::to_string(&value))
                 .transpose()
                 .map_err(|error| format!("序列化导出文件信息失败：{error}"))?;
 
             let attachments_json = message
                 .attachments
                 .as_ref()
-                .map(serde_json::to_string)
+                .map(sanitize_attachment_metadata)
+                .map(|value| serde_json::to_string(&value))
                 .transpose()
                 .map_err(|error| format!("序列化消息附件失败：{error}"))?;
 
@@ -618,7 +619,8 @@ fn load_messages(
                 suggestions: serde_json::from_str::<Vec<String>>(&suggestions_json).ok(),
                 detail,
                 attachments: attachments_json
-                    .and_then(|text| serde_json::from_str::<Value>(&text).ok()),
+                    .and_then(|text| serde_json::from_str::<Value>(&text).ok())
+                    .map(|value| sanitize_attachment_metadata(&value)),
                 alert_analysis_result: alert_analysis_result_json
                     .and_then(|text| serde_json::from_str::<Value>(&text).ok()),
                 risk_assessment_result: risk_assessment_result_json
@@ -743,7 +745,78 @@ fn initialize_conversation_db(connection: &Connection) -> Result<(), String> {
         "TEXT",
     )?;
     migrate_legacy_conversation_schema(connection)?;
+    migrate_attachment_previews_to_files(connection)?;
 
+    Ok(())
+}
+
+/// 会话记录只保存附件文件元数据。`previewUrl` 是 WebView 的临时 data URL，
+/// 若随附件 JSON 落库会把整张图片 Base64 写进 SQLite。
+fn sanitize_attachment_metadata(value: &Value) -> Value {
+    let mut sanitized = value.clone();
+    strip_attachment_preview_fields(&mut sanitized);
+    sanitized
+}
+
+fn strip_attachment_preview_fields(value: &mut Value) -> bool {
+    match value {
+        Value::Array(items) => {
+            let mut changed = false;
+            for item in items {
+                changed = strip_attachment_preview_fields(item) || changed;
+            }
+            changed
+        }
+        Value::Object(map) => {
+            let removed_camel = map.remove("previewUrl").is_some();
+            let removed_snake = map.remove("preview_url").is_some();
+            let mut changed = removed_camel || removed_snake;
+            for item in map.values_mut() {
+                changed = strip_attachment_preview_fields(item) || changed;
+            }
+            changed
+        }
+        _ => false,
+    }
+}
+
+/// 清理旧版本已写入 attachments_json 的图片 data URL。图片文件路径仍保留，
+/// 下次展示时由 read_image_preview 按需读取。
+fn migrate_attachment_previews_to_files(connection: &Connection) -> Result<(), String> {
+    let mut statement = connection
+        .prepare(
+            "SELECT id, attachments_json FROM conversation_messages \
+             WHERE attachments_json LIKE '%previewUrl%' OR attachments_json LIKE '%preview_url%'",
+        )
+        .map_err(|error| format!("检查历史图片预览失败：{error}"))?;
+    let rows = statement
+        .query_map([], |row| {
+            Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))
+        })
+        .map_err(|error| format!("读取历史图片预览失败：{error}"))?;
+    let mut updates = Vec::new();
+    for row in rows {
+        let (id, raw) = row.map_err(|error| format!("读取历史图片预览记录失败：{error}"))?;
+        let Ok(mut value) = serde_json::from_str::<Value>(&raw) else {
+            continue;
+        };
+        if strip_attachment_preview_fields(&mut value) {
+            updates.push((
+                id,
+                serde_json::to_string(&value)
+                    .map_err(|error| format!("序列化清理后的附件信息失败：{error}"))?,
+            ));
+        }
+    }
+    drop(statement);
+    for (id, attachments_json) in updates {
+        connection
+            .execute(
+                "UPDATE conversation_messages SET attachments_json = ?1 WHERE id = ?2",
+                params![attachments_json, id],
+            )
+            .map_err(|error| format!("清理历史图片预览失败：{error}"))?;
+    }
     Ok(())
 }
 
@@ -1015,6 +1088,41 @@ mod tests {
             )
             .expect("conversation should remain");
         assert_eq!(source, "pending");
+    }
+
+    #[test]
+    fn attachment_preview_migration_keeps_file_metadata_and_removes_base64() {
+        let connection = Connection::open_in_memory().expect("in-memory db should open");
+        initialize_conversation_db(&connection).expect("schema should initialize");
+        connection
+            .execute(
+                "INSERT INTO conversations \
+                 (id, title, title_source, agent_id, agent_name, status, created_at, updated_at, archived) \
+                 VALUES ('c1', '图片', 'pending', 'agent', '员工', 'done', 'now', 'now', 0)",
+                [],
+            )
+            .expect("conversation should insert");
+        connection
+            .execute(
+                "INSERT INTO conversation_messages \
+                 (id, conversation_id, role, content, time, sort_order, steps_json, suggestions_json, attachments_json) \
+                 VALUES ('m1', 'c1', 'user', '图片', '10:00', 0, '[]', '[]', ?1)",
+                [r#"[{"kind":"image","name":"a.png","path":"C:\\uploads\\a.png","previewUrl":"data:image/png;base64,AAAA"}]"#],
+            )
+            .expect("message should insert");
+
+        initialize_conversation_db(&connection).expect("preview migration should run");
+        let raw: String = connection
+            .query_row(
+                "SELECT attachments_json FROM conversation_messages WHERE id = 'm1'",
+                [],
+                |row| row.get(0),
+            )
+            .expect("attachment metadata should remain");
+        assert!(raw.contains("a.png"));
+        assert!(raw.contains("path"));
+        assert!(!raw.contains("previewUrl"));
+        assert!(!raw.contains("base64"));
     }
 
     #[test]

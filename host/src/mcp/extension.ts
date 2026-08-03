@@ -12,6 +12,7 @@ import {
   isMcpCallError,
 } from "./payload.js";
 import { mcpRegistry, type RegisteredMcpTool } from "./registry.js";
+import { type ImageArtifactStore, type LocalImageArtifact } from "./image-artifacts.js";
 
 const DATA_RISK_MCP = "data-security-risk-assessment-mcp";
 const DEFAULT_RISK_UPLOAD_TIMEOUT_SECS = 30 * 60;
@@ -33,6 +34,8 @@ type McpProxyDetails = {
   serviceId?: string;
   toolName?: string;
   result?: unknown;
+  artifacts?: LocalImageArtifact[];
+  artifactErrors?: string[];
 };
 
 function stringifyForModel(data: unknown): string {
@@ -234,6 +237,7 @@ async function resolveRequestedTool(
 export function createMcpExtension(
   scope: McpServiceScope,
   attachments?: AttachmentRuntime,
+  imageArtifacts?: ImageArtifactStore,
 ): InlineExtension {
   return {
     name: "nova-mcp",
@@ -298,9 +302,20 @@ export function createMcpExtension(
           const modelText = text || stringifyForModel(data);
           const provenance = `[MCP 服务 ${entry.serviceId} / 工具 ${entry.tool.name}]`;
           const modelContent = extractMcpModelContent(raw, modelText);
+          // 工具返回的 Base64 图片或远程图片链接先持久化为本地文件，
+          // 前端只接收文件元数据，不把图片字节写入会话数据库。
+          const persistedImages = imageArtifacts
+            ? await imageArtifacts.persistFromMcpResult(raw, entry.tool.name, signal)
+            : { artifacts: [], errors: [] };
           return {
             content: [{ type: "text", text: provenance }, ...modelContent],
-            details: { serviceId: entry.serviceId, toolName: entry.tool.name, result: data } as McpProxyDetails,
+            details: {
+              serviceId: entry.serviceId,
+              toolName: entry.tool.name,
+              result: data,
+              artifacts: persistedImages.artifacts,
+              artifactErrors: persistedImages.errors,
+            } as McpProxyDetails,
           };
         },
       });

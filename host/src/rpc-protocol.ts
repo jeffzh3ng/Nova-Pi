@@ -51,6 +51,8 @@ export type RpcCommand =
   | { id?: string; type: "test_mcp"; serviceId: string }
   | { id?: string; type: "reconnect_mcp"; serviceId: string }
   | { id?: string; type: "mcp_call"; serviceId: string; toolName: string; args: Record<string, unknown>; timeoutSecs?: number }
+  | { id?: string; type: "cache_remote_images"; conversationId: string; urls: string[]; label?: string }
+  | { id?: string; type: "cache_sandbox_images"; conversationId: string; references: string[] }
   // 技能
   | { id?: string; type: "list_skills" }
   | { id?: string; type: "reload_skills" }
