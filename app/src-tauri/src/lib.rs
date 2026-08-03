@@ -67,6 +67,25 @@ static EXITING: AtomicBool = AtomicBool::new(false);
 #[cfg(target_os = "macos")]
 const MACOS_TRAY_ICON: tauri::image::Image<'static> = tauri::include_image!("icons/tray-icon.png");
 
+/// 主窗口导航白名单：只放行应用自身页面与内部协议。
+///
+/// 未拦截时，点击对话里的外部链接会把整个 webview 顶层导航到第三方站点，
+/// 主界面被外部网页整体替换且没有返回/关闭的浏览器操作。Tauri 的
+/// `on_navigation` 是 builder-only API，因此主窗口必须用
+/// `WebviewWindowBuilder` 创建（见 `setup`），不能放在 tauri.conf.json 里。
+fn is_app_navigation(url: &tauri::Url) -> bool {
+    match url.scheme() {
+        // 生产环境页面 tauri://localhost、IPC ipc://、打包资源 asset://
+        "tauri" | "ipc" | "asset" => true,
+        // 开发环境 vite http://127.0.0.1:1420、Windows 生产环境 http://tauri.localhost
+        "http" | "https" => matches!(
+            url.host_str(),
+            Some("localhost") | Some("127.0.0.1") | Some("tauri.localhost")
+        ),
+        _ => false,
+    }
+}
+
 fn show_main_window(app: &tauri::AppHandle) {
     if let Some(window) = app.get_webview_window("main") {
         let _ = window.show();
@@ -77,10 +96,11 @@ fn show_main_window(app: &tauri::AppHandle) {
 
 fn setup_tray(app: &mut tauri::App) -> tauri::Result<()> {
     let open = MenuItem::with_id(app, "open", "打开 Nova", true, None::<&str>)?;
+    let reload = MenuItem::with_id(app, "reload", "重新加载", true, None::<&str>)?;
     let quit = MenuItem::with_id(app, "quit", "退出 Nova", true, None::<&str>)?;
-    let menu = Menu::with_items(app, &[&open, &quit])?;
+    let menu = Menu::with_items(app, &[&open, &reload, &quit])?;
     let mut tray = TrayIconBuilder::with_id("nova-tray")
-        .tooltip("Nova AI 数字员工")
+        .tooltip("Nova AI")
         .menu(&menu)
         .show_menu_on_left_click(false);
 
@@ -243,6 +263,20 @@ fn start_sidecar(app: tauri::AppHandle) -> Result<(), String> {
     sidecar::start_sidecar(&app)
 }
 
+/// 用系统默认浏览器打开外部链接。
+///
+/// 只允许 http/https：链接文本来自 LLM/MCP 内容，放行其他协议（file://、
+/// vscode:// 等）等于给任意协议调用开了一个口子。前端点击拦截后统一走这里。
+#[tauri::command]
+fn open_external_url(url: String) -> Result<(), String> {
+    let parsed = tauri::Url::parse(&url).map_err(|error| format!("无效链接：{error}"))?;
+    if !matches!(parsed.scheme(), "http" | "https") {
+        return Err(format!("仅支持 http/https 链接：{url}"));
+    }
+    opener::open(&url).map_err(|error| format!("打开链接失败：{error}"))?;
+    Ok(())
+}
+
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
     rpc::init();
@@ -255,6 +289,23 @@ pub fn run() {
             if let Err(error) = app_preferences::refresh_cache(app.handle()) {
                 eprintln!("[lib] 读取应用偏好失败：{error}");
             }
+            // 主窗口用 builder 创建（而非 tauri.conf.json），以挂载 on_navigation
+            // 拦截外部导航；尺寸/标题与原配置文件保持一致。
+            let main_window = tauri::WebviewWindowBuilder::new(
+                app,
+                "main",
+                tauri::WebviewUrl::App("index.html".into()),
+            )
+            .title("Nova AI")
+            .inner_size(1260.0, 725.0)
+            .min_inner_size(1060.0, 680.0)
+            .resizable(true)
+            .center()
+            .on_navigation(is_app_navigation)
+            .build()?;
+            // builder 创建的窗口在部分平台不会自动置前/聚焦，启动时主动拉起。
+            let _ = main_window.show();
+            let _ = main_window.set_focus();
             setup_tray(app)?;
             // 应用启动时拉起 Node sidecar
             if let Err(error) = sidecar::start_sidecar(app.handle()) {
@@ -279,6 +330,13 @@ pub fn run() {
         })
         .on_menu_event(|app, event| match event.id().as_ref() {
             "open" => show_main_window(app),
+            "reload" => {
+                // 兜底恢复：正常情况下外部导航已被 on_navigation 拦截，
+                // 若页面异常仍可从这里重新加载主界面。
+                if let Some(window) = app.get_webview_window("main") {
+                    let _ = window.eval("window.location.reload()");
+                }
+            }
             "quit" => {
                 EXITING.store(true, Ordering::Relaxed);
                 sidecar::stop_sidecar();
@@ -317,6 +375,8 @@ pub fn run() {
             write_temp_text_file,
             write_uploaded_blob,
             pick_and_store_attachments,
+            // 外部链接（系统默认浏览器）
+            open_external_url,
             // MCP 配置
             list_mcp_connection_settings,
             save_mcp_connection_settings,

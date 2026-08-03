@@ -28,6 +28,7 @@ React UI ──invoke──► Rust ──spawn──► Node sidecar(nova-pi-ho
 - **pi 无原生 MCP 支持** → 用 `@modelcontextprotocol/client` v2 自建桥接，通过 `DefaultResourceLoader.extensionFactories` 注册单一 `mcp` 代理工具：服务与工具按需连接/发现，再用 `service/tool` 完整名称调用，避免一次性注入全部远端 schema。客户端以 `versionNegotiation: auto` 兼容 MCP 2026 `server/discover` 与 2025 `initialize`，并兼容旧 HTTP+SSE 服务。
 - **pi 内置 DeepSeek provider**（`api.deepseek.com`），与原 Nova 默认 LLM 一致。
 - **Rust 退化为薄壳**：窗口、文件对话框、sidecar 进程管理、RPC 编排、SQLite 会话索引、大文件 HTTP（风评 zip/xlsx）。
+- **主窗口由 Rust builder 创建**（非 tauri.conf.json）：Tauri 的 `on_navigation` 是 builder-only API，窗口需用 `WebviewWindowBuilder` 创建才能挂上导航白名单。外部链接点击不再导航 webview（界面整体被替换且无返回操作），统一走前端 LinkGuard 拦截 + `open_external_url` 命令在系统浏览器打开；导航白名单放行 `tauri://`/`ipc://`/`asset://` 与 localhost 系 http(s)。
 - **混合传输**：风评大文件走 Rust 直连 HTTP（`/mcp`→`/api` 推导），其余走 MCP。
 
 ## Tech Stack
@@ -111,6 +112,7 @@ JSON-line over stdin/stdout。详见 `host/src/rpc-protocol.ts`。
 | `download_risk_assessment_matrix_template` / `download_risk_assessment_result` | risk_http | 风评空白矩阵和结果文件下载 |
 | `open_file_path` / `show_file_in_folder` / `save_file_as` | files | 文件操作 |
 | `write_temp_text_file` / `write_uploaded_blob` / `pick_and_store_attachments` | files | 临时文件与统一附件接收 |
+| `open_external_url` | lib | 用系统默认浏览器打开外部链接（仅 http/https；前端 LinkGuard 点击拦截后调用）|
 | `get_app_preferences` / `save_app_preferences` | app_preferences | 托盘驻留与工具执行记录显示偏好 |
 | `list_mcp_connection_settings` / `save_mcp_connection_settings` / `delete_mcp_connection_settings` | mcp_settings | MCP 配置 CRUD |
 | `list_skills` / `list_skill_catalog` / `get_skill` / `set_skill_enabled` | skill_registry | 技能管理 |

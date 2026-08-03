@@ -5,6 +5,7 @@ import { listen } from "@tauri-apps/api/event";
 import { Archive } from "lucide-react";
 import { ConfirmModal } from "./components/ConfirmModal";
 import { DigitalHumanPicker } from "./components/DigitalHumanPicker";
+import { LinkGuard } from "./components/LinkGuard";
 import { Hero } from "./components/Hero";
 import { McpSquarePanel } from "./components/McpSquarePanel";
 import { SettingsPanel } from "./components/SettingsPanel";
@@ -2814,6 +2815,8 @@ export default function App() {
 
   return (
     <div className="app-shell">
+      {/* 外部链接守门人：点击走系统浏览器、右键菜单复制链接，兜底任何渲染路径 */}
+      <LinkGuard />
       <Sidebar
         quickActions={sortedQuickActions}
         recentTasks={displayedRecentTasks}
