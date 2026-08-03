@@ -160,6 +160,27 @@ export class WeixinBotManager {
     await this.service.stop();
   }
 
+  /**
+   * 登出并清空所有 token 缓存（删除渠道时调用）。
+   *
+   * 与 stop() 的差异：会清掉 sidecar 端落盘的 token 文件，确保重新添加渠道后
+   * 必须走扫码流程，而不是自动复用缓存恢复登录态。
+   */
+  async logout(): Promise<void> {
+    if (this.unsubscribeBackground) {
+      this.unsubscribeBackground();
+      this.unsubscribeBackground = null;
+    }
+    const bgSessionId = this.bgSessionId;
+    this.bgSessionId = null;
+    this.currentHumanId = null;
+    if (bgSessionId) {
+      await this.pool.dispose(bgSessionId).catch(() => {});
+    }
+    this.replyCollector.reset();
+    await this.service.clearAllAccounts();
+  }
+
   /** 触发扫码登录（或从缓存恢复）。 */
   async login(): Promise<boolean> {
     if (!this.bgSessionId) {

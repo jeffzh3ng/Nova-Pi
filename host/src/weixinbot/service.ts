@@ -294,6 +294,20 @@ export class WeixinBotService {
     this.emitStatus({ kind: "offline" });
   }
 
+  /**
+   * 清空所有已登录账号的 token 缓存（删除渠道时调用，强制下次扫码）。
+   *
+   * 与 logout() 的差异：不依赖 this.currentAccount（删除场景下往往已被 stop() 置空），
+   * 直接遍历磁盘上的全部已登录账号清理，规避「先 stop 再 logout 导致 token 清不掉」的陷阱。
+   */
+  async clearAllAccounts(): Promise<void> {
+    for (const acc of getLoggedInAccounts()) {
+      logoutAccount(acc.accountId);
+    }
+    // 复用 stop() 的连接断开 + 状态复位（stop 本身不删 token，token 已在上面清掉）
+    await this.stop();
+  }
+
   /** 停止一切活动（不登出账号，仅断开当前连接，保留 token 缓存）。 */
   async stop(): Promise<void> {
     this.stopMonitor();

@@ -569,6 +569,12 @@ async function handleCommand(command: RpcCommand): Promise<void> {
         writeResponse(id, true);
         return;
       }
+      case "weixin_logout": {
+        // 登出并清空 token 缓存：删除渠道时调用，确保重新添加后必须扫码而非自动复用。
+        await weixinBot?.logout();
+        writeResponse(id, true);
+        return;
+      }
       case "weixin_login": {
         if (!weixinBot) throw new Error("host 尚未就绪");
         // 异步触发：扫码流程较长，立即响应成功，二维码/状态通过事件回流

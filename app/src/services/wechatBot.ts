@@ -27,6 +27,11 @@ export async function stopWeixinBot(): Promise<void> {
   await sendRpc({ type: "weixin_stop" });
 }
 
+/** 登出并清空 token 缓存（删除渠道时调用，确保重加必须扫码）。 */
+export async function logoutWeixinBot(): Promise<void> {
+  await sendRpc({ type: "weixin_logout" });
+}
+
 /** 触发扫码登录（异步：二维码/状态通过事件回流）。 */
 export async function loginWeixinBot(): Promise<void> {
   await sendRpc({ type: "weixin_login" });

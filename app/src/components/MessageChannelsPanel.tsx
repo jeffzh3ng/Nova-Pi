@@ -31,6 +31,7 @@ import { syncComputerAgentSettingsToHost } from "../services/computerAgent";
 import {
   startWeixinBot,
   stopWeixinBot,
+  logoutWeixinBot,
   loginWeixinBot,
   getWeixinBotStatus,
 } from "../services/wechatBot";
@@ -611,6 +612,8 @@ export function MessageChannelsPanel() {
     if (target.channelId === "wechat") {
       const rt = runtime["wechat"];
       if (rt?.phase === "started") await handleWeixinStop().catch(() => {});
+      // 清空 sidecar 端 token 缓存，确保重新添加后必须扫码而非自动复用旧登录态
+      await logoutWeixinBot().catch(() => {});
     } else if (target.channelId === "telegram") {
       // C3：删除 Telegram 渠道必须释放 host 单例，否则长轮询继续跑 + 下次新建会复用旧实例
       const rt = runtime["telegram"];

@@ -87,6 +87,7 @@ export type RpcCommand =
   | { id?: string; type: "weixin_login" }
   | { id?: string; type: "weixin_status" }
   | { id?: string; type: "weixin_switch_human"; humanId: string }
+  | { id?: string; type: "weixin_logout" }
   // Telegram 机器人
   | { id?: string; type: "telegram_start"; humanId: string; config: Record<string, unknown> }
   | { id?: string; type: "telegram_stop" }
