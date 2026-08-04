@@ -1,6 +1,11 @@
+import { readFile } from "node:fs/promises";
+import path from "node:path";
 import type { FeishuConfig, FeishuIncomingMessage } from "./types.js";
 
 const MAX_TEXT_CHARS = 20_000;
+
+/** 飞书 im.file.create 的文件大小上限（30 MB）。 */
+const MAX_FILE_BYTES = 30 * 1024 * 1024;
 
 type FeishuIdentity = {
   appName?: string;
@@ -73,6 +78,34 @@ export class FeishuTransport {
         data: { msg_type: "text", content: JSON.stringify({ text: chunk }) },
       });
     }
+  }
+
+  /**
+   * 回复一条文件消息：先 im.file.create 上传拿 file_key，再 im.message.reply 发 file 类型消息。
+   * 上限 30 MB。file_type 飞书仅识别 opus/mp4/pdf/doc/xls/ppt/stream，其它一律用 stream。
+   * @returns 文件名（用于展示）
+   */
+  async replyFile(messageId: string, filePath: string): Promise<string> {
+    if (!this.sdkClient) throw new Error("飞书连接尚未启动");
+    const fileName = path.basename(filePath) || "file";
+    const buffer = await readFile(filePath);
+    if (buffer.length > MAX_FILE_BYTES) {
+      const mb = (buffer.length / 1024 / 1024).toFixed(1);
+      throw new Error(`文件过大（${mb} MB），飞书上限 30 MB`);
+    }
+    const fileType = inferFeishuFileType(fileName);
+    // 上传文件拿 file_key
+    const uploadRes = await this.sdkClient.im.file.create({
+      data: { file_type: fileType, file_name: fileName, file: buffer },
+    });
+    const fileKey = uploadRes?.data?.file_key;
+    if (!fileKey) throw new Error("飞书文件上传未返回 file_key");
+    // 以 file 类型消息回复
+    await this.sdkClient.im.message.reply({
+      path: { message_id: messageId },
+      data: { msg_type: "file", content: JSON.stringify({ file_key: fileKey }) },
+    });
+    return fileName;
   }
 
   private async probeIdentity(): Promise<FeishuIdentity> {
@@ -205,4 +238,16 @@ function splitText(text: string, maxChars: number): string[] {
   }
   if (remaining) result.push(remaining);
   return result;
+}
+
+/** 按扩展名推断飞书 file_type（opus/mp4/pdf/doc/xls/ppt/stream），未匹配用 stream。 */
+function inferFeishuFileType(fileName: string): string {
+  const ext = path.extname(fileName).toLowerCase().slice(1);
+  const known = new Set(["opus", "mp4", "pdf", "doc", "docx", "xls", "xlsx", "ppt", "pptx"]);
+  if (!ext || !known.has(ext)) return "stream";
+  // 飞书只认 doc/xls/ppt（不含 docx/xlsx/pptx），统一映射
+  if (ext === "docx") return "doc";
+  if (ext === "xlsx") return "xls";
+  if (ext === "pptx") return "ppt";
+  return ext;
 }

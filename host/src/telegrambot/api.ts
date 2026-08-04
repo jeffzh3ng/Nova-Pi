@@ -12,6 +12,7 @@ import type {
   TelegramBotInfo,
   SendMessageParams,
   SendMessageResult,
+  SendDocumentParams,
   GetUpdatesParams,
 } from "./types.js";
 
@@ -19,6 +20,12 @@ const API_BASE = "https://api.telegram.org";
 
 /** Telegram 单条消息长度上限（4096 字符）。 */
 export const MAX_MESSAGE_LENGTH = 4096;
+
+/** sendDocument 的 caption 长度上限（1024 字符）。 */
+export const MAX_CAPTION_LENGTH = 1024;
+
+/** sendDocument 文件大小上限（50 MB，Bot API 云端限制）。 */
+export const MAX_DOCUMENT_BYTES = 50 * 1024 * 1024;
 
 /**
  * 通用 Telegram API 调用。
@@ -39,6 +46,34 @@ export async function callTelegram<TResult>(
     method: "POST",
     headers: { "content-type": "application/json" },
     body: JSON.stringify(body),
+    signal,
+  });
+  const data = (await response.json()) as TelegramApiResponse<TResult>;
+  if (!data.ok || data.result === undefined) {
+    const detail = data.description
+      ? `${data.description}${data.error_code ? ` (code ${data.error_code})` : ""}`
+      : `Telegram API ${method} 失败`;
+    throw new Error(detail);
+  }
+  return data.result;
+}
+
+/**
+ * 通用 Telegram API 调用（multipart/form-data，用于上传文件）。
+ * 不设 content-type，让 fetch 根据 FormData 自动加 boundary。
+ * 复用 callTelegram 的 URL 拼接和响应解析逻辑。
+ */
+export async function callTelegramMultipart<TResult>(
+  botToken: string,
+  method: string,
+  form: FormData,
+  signal?: AbortSignal,
+): Promise<TResult> {
+  if (!botToken) throw new Error("Telegram bot token 未配置");
+  const url = `${API_BASE}/bot${botToken}/${method}`;
+  const response = await fetch(url, {
+    method: "POST",
+    body: form,
     signal,
   });
   const data = (await response.json()) as TelegramApiResponse<TResult>;
@@ -95,6 +130,33 @@ export async function sendMessage(
     params = { ...params, reply_to_message_id: undefined };
   }
   return results;
+}
+
+/**
+ * 发送文件（sendDocument）。
+ * caption 超过 MAX_CAPTION_LENGTH 会截断。文件上限 MAX_DOCUMENT_BYTES（50MB）。
+ */
+export async function sendDocument(
+  botToken: string,
+  params: SendDocumentParams,
+): Promise<SendMessageResult> {
+  if (params.document.size > MAX_DOCUMENT_BYTES) {
+    const mb = (params.document.size / 1024 / 1024).toFixed(1);
+    throw new Error(`文件过大（${mb} MB），Telegram 上限 50 MB`);
+  }
+  const form = new FormData();
+  form.set("chat_id", String(params.chat_id));
+  form.set("document", params.document, params.fileName);
+  if (params.caption) {
+    const caption = params.caption.length > MAX_CAPTION_LENGTH
+      ? params.caption.slice(0, MAX_CAPTION_LENGTH - 1) + "…"
+      : params.caption;
+    form.set("caption", caption);
+  }
+  if (params.reply_to_message_id) {
+    form.set("reply_to_message_id", String(params.reply_to_message_id));
+  }
+  return callTelegramMultipart<SendMessageResult>(botToken, "sendDocument", form);
 }
 
 /** 把文本按 maxLength 拆分，尽量在换行处断开。 */

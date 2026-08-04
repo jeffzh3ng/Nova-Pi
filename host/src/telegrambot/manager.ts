@@ -18,6 +18,8 @@ import {
   type TelegramIncomingMessage,
 } from "./service.js";
 import type { TelegramConfig } from "./types.js";
+import type { ChannelFileSink, ChannelFileTarget, ChannelFileResult } from "../channel-file-sink.js";
+import { createChannelToolsExtension } from "../channel-tools.js";
 
 /** 后台会话固定 conversationId（不进前端历史，仅作幂等键）。 */
 const BG_CONVERSATION_ID = "nova-telegram-bg";
@@ -30,6 +32,8 @@ export class TelegramBotManager {
   private unsubscribeBackground: (() => void) | null = null;
   /** 回复路由由 service 维护；manager 只聚合到 agent_settled 的最终文本。 */
   private readonly replyCollector = new ChannelReplyCollector();
+  /** 当前入站消息的发送目标（agent 调 send_file_to_channel 工具时用）。 */
+  private currentTarget: { chatId: number; messageId: number } | null = null;
 
   constructor(
     pool: SessionPool,
@@ -57,10 +61,7 @@ export class TelegramBotManager {
     this.service.updateConfig(config);
     this.currentHumanId = humanId;
     if (!this.bgSessionId || !this.pool.hasSession(this.bgSessionId)) {
-      this.bgSessionId = await this.pool.createBackgroundSession({
-        humanId,
-        conversationId: BG_CONVERSATION_ID,
-      });
+      this.bgSessionId = await this.createChannelSession(humanId);
       if (!this.unsubscribeBackground) {
         this.unsubscribeBackground = this.pool.subscribeBackgroundEvents((sessionId, event) => {
           if (sessionId !== this.bgSessionId) return;
@@ -69,6 +70,20 @@ export class TelegramBotManager {
       }
     }
     return this.service.start();
+  }
+
+  /**
+   * 创建带 send_file_to_channel 工具的 Telegram 后台会话。
+   * start / handleIncoming 兜底两处统一走这里，确保工具始终注入。
+   */
+  private async createChannelSession(humanId: string): Promise<string> {
+    return this.pool.createBackgroundSession({
+      humanId,
+      conversationId: BG_CONVERSATION_ID,
+      channelExtension: createChannelToolsExtension(this.channelSink, () =>
+        this.currentTarget ? { chatId: this.currentTarget.chatId, messageId: this.currentTarget.messageId } : null,
+      ),
+    });
   }
 
   /** 停止：销毁后台会话 + 停 service（保留 token + allowedUserId）。 */
@@ -118,6 +133,8 @@ export class TelegramBotManager {
 
   /** 收到 Telegram 消息：记录 + 推前端 + prompt 后台 session。 */
   private async handleIncoming(msg: TelegramIncomingMessage): Promise<void> {
+    // 记录当前发送目标，供 send_file_to_channel 工具使用
+    this.currentTarget = { chatId: msg.chatId, messageId: msg.messageId };
     this.replyCollector.begin(msg.reqId);
     writeEvent({
       type: "telegram_message",
@@ -129,10 +146,7 @@ export class TelegramBotManager {
     let sessionId = this.bgSessionId;
     try {
       if ((!sessionId || !this.pool.hasSession(sessionId)) && this.currentHumanId) {
-        sessionId = await this.pool.createBackgroundSession({
-          humanId: this.currentHumanId,
-          conversationId: BG_CONVERSATION_ID,
-        });
+        sessionId = await this.createChannelSession(this.currentHumanId);
         this.bgSessionId = sessionId;
       }
     } catch (error) {
@@ -174,6 +188,36 @@ export class TelegramBotManager {
       console.error("[telegram-manager] sendReply 失败：", err);
     });
   }
+
+  /** ChannelFileSink 实现：供 send_file_to_channel 工具调用。用箭头函数绑定 manager this。 */
+  private readonly channelSink: ChannelFileSink = {
+    channelName: "Telegram",
+    sendFile: async ({ target, filePath, caption }): Promise<ChannelFileResult> => {
+      const chatId = target.chatId;
+      const messageId = target.messageId;
+      if (typeof chatId !== "number") {
+        return { ok: false, error: "缺少 Telegram chatId" };
+      }
+      try {
+        const fileName = await this.service.sendFile(
+          chatId,
+          filePath,
+          caption,
+          typeof messageId === "number" ? messageId : undefined,
+        );
+        // 推一条前端展示消息
+        writeEvent({
+          type: "telegram_message",
+          role: "assistant",
+          text: `📎 已发送文件：${fileName}`,
+        });
+        return { ok: true, detail: `文件 ${fileName} 已发送` };
+      } catch (err) {
+        const detail = err instanceof Error ? err.message : String(err);
+        return { ok: false, error: detail };
+      }
+    },
+  };
 
   private emitStatus(status: TelegramStatus): void {
     switch (status.kind) {

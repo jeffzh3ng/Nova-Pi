@@ -11,8 +11,9 @@
  * 与微信的差异：无扫码、无 token 缓存文件、/start 配对。
  */
 
-import { getMe, getUpdates, sendMessage } from "./api.js";
+import { getMe, getUpdates, sendMessage, sendDocument } from "./api.js";
 import type { TelegramUpdate, TelegramConfig } from "./types.js";
+import { openAsBlob } from "node:fs";
 
 // ============================================================================
 // 类型
@@ -220,6 +221,34 @@ export class TelegramBotService {
   async sendDirect(chatId: number, text: string): Promise<void> {
     if (!this.config.botToken) throw new Error("未配置 bot token");
     await sendMessage(this.config.botToken, { chat_id: chatId, text });
+  }
+
+  /**
+   * 发送文件到指定 chat。供 ChannelFileSink 调用（agent 通过工具触发）。
+   * @param chatId  目标会话 id
+   * @param filePath  本地文件路径（已校验存在）
+   * @param caption  可选的说明文字
+   * @param replyToMessageId  可选的引用消息 id
+   * @returns 文件名，用于前端展示
+   */
+  async sendFile(
+    chatId: number,
+    filePath: string,
+    caption?: string,
+    replyToMessageId?: number,
+  ): Promise<string> {
+    if (!this.config.botToken) throw new Error("未配置 bot token");
+    const fileName = filePath.split(/[/\\]/).pop() || "file";
+    // openAsBlob 需文件系统支持，Node 22 已内置。用默认 MIME 让 Telegram 推断。
+    const blob = await openAsBlob(filePath);
+    await sendDocument(this.config.botToken, {
+      chat_id: chatId,
+      document: blob,
+      fileName,
+      caption,
+      reply_to_message_id: replyToMessageId,
+    });
+    return fileName;
   }
 
   // ── 内部：长轮询 ──

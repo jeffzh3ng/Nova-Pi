@@ -16,9 +16,12 @@ import { join } from "node:path";
 import {
   getUpdates,
   sendMessage as sendWeixinMessage,
+  sendFileMessage,
   DEFAULT_BASE_URL,
+  CDN_BASE_URL,
 } from "./weixin-api.js";
-import { MessageItemType, MessageType } from "./types.js";
+import { uploadMediaToCdn } from "./cdn-upload.js";
+import { MessageItemType, MessageType, UploadMediaType } from "./types.js";
 import type { WeixinMessage, WeixinAccountData } from "./types.js";
 import {
   fullQRLogin,
@@ -370,6 +373,64 @@ export class WeixinBotService {
       clientId: generateClientId(),
       contextToken,
     });
+  }
+
+  /**
+   * 发送文件给指定用户。供 ChannelFileSink 调用（agent 通过 send_file_to_channel 工具触发）。
+   * 流程：uploadMediaToCdn（AES 加密 + CDN POST）→ 可选 caption 文本 → sendFileMessage。
+   * @returns 文件名，用于前端展示
+   */
+  async sendFile(
+    userId: string,
+    filePath: string,
+    caption?: string,
+    contextToken?: string,
+  ): Promise<string> {
+    if (!this.currentAccount?.token) {
+      throw new Error("未登录微信");
+    }
+    const baseUrl = this.currentAccount.baseUrl ?? DEFAULT_BASE_URL;
+    const token = this.currentAccount.token;
+    const fileName = filePath.split(/[/\\]/).pop() || "file";
+
+    // 1. 上传到 CDN（统一按 FILE 类型，不区分图片/视频）
+    const uploaded = await uploadMediaToCdn({
+      filePath,
+      toUserId: userId,
+      baseUrl,
+      token,
+      cdnBaseUrl: CDN_BASE_URL,
+      mediaType: UploadMediaType.FILE,
+      label: "sendFile",
+    });
+
+    // 2. 可选：caption 作为独立文本消息先发（与 openclaw-weixin sendMediaItems 一致）
+    if (caption && caption.trim()) {
+      await sendWeixinMessage({
+        baseUrl,
+        token,
+        to: userId,
+        text: filterMarkdown(caption),
+        clientId: generateClientId(),
+        contextToken,
+      });
+    }
+
+    // 3. 发送文件消息
+    await sendFileMessage({
+      baseUrl,
+      token,
+      to: userId,
+      clientId: generateClientId(),
+      contextToken,
+      fileName,
+      encryptQueryParam: uploaded.downloadEncryptedQueryParam,
+      // aes_key：与 openclaw-weixin 一致，把 hex 字符串按 UTF-8 编码再转 base64
+      // （不是 Buffer.from(hex, "hex") 解码回原始 16 字节，那样微信端解密会失败）
+      aesKeyBase64: Buffer.from(uploaded.aeskeyHex).toString("base64"),
+      fileSize: uploaded.fileSize,
+    });
+    return fileName;
   }
 
   // ── 内部：消息监听 ──

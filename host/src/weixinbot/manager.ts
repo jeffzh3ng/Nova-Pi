@@ -21,6 +21,8 @@ import {
   type WeixinStatus,
   type WeixinIncomingMessage,
 } from "./service.js";
+import type { ChannelFileSink, ChannelFileResult } from "../channel-file-sink.js";
+import { createChannelToolsExtension } from "../channel-tools.js";
 
 /** 后台会话固定 conversationId（不进前端历史，仅作幂等键）。 */
 const BG_CONVERSATION_ID = "nova-weixin-bg";
@@ -79,6 +81,8 @@ export class WeixinBotManager {
    *   - manager 在 agent_settled 前持续接收多轮 assistant 消息，只发送最后一条结果。
    */
   private readonly replyCollector = new ChannelReplyCollector();
+  /** 当前入站消息的发送目标（agent 调 send_file_to_channel 工具时用）。 */
+  private currentTarget: { userId: string; contextToken?: string } | null = null;
 
   constructor(pool: SessionPool, agentDir: string) {
     this.pool = pool;
@@ -100,10 +104,7 @@ export class WeixinBotManager {
   async start(humanId: string): Promise<void> {
     if (this.bgSessionId && this.pool.hasSession(this.bgSessionId)) return;
     this.currentHumanId = humanId;
-    this.bgSessionId = await this.pool.createBackgroundSession({
-      humanId,
-      conversationId: BG_CONVERSATION_ID,
-    });
+    this.bgSessionId = await this.createChannelSession(humanId);
     if (!this.unsubscribeBackground) {
       this.unsubscribeBackground = this.pool.subscribeBackgroundEvents((sessionId, event) => {
         if (sessionId !== this.bgSessionId) return;
@@ -134,10 +135,7 @@ export class WeixinBotManager {
     if (oldId) {
       await this.pool.dispose(oldId).catch(() => {});
     }
-    this.bgSessionId = await this.pool.createBackgroundSession({
-      humanId,
-      conversationId: BG_CONVERSATION_ID,
-    });
+    this.bgSessionId = await this.createChannelSession(humanId);
     this.currentHumanId = humanId;
     return true;
   }
@@ -158,6 +156,22 @@ export class WeixinBotManager {
     }
     this.replyCollector.reset();
     await this.service.stop();
+  }
+
+  /**
+   * 创建带 send_file_to_channel 工具的微信后台会话。
+   * start / switchHuman / handleIncoming 兜底三处统一走这里，确保工具始终注入。
+   */
+  private async createChannelSession(humanId: string): Promise<string> {
+    return this.pool.createBackgroundSession({
+      humanId,
+      conversationId: BG_CONVERSATION_ID,
+      channelExtension: createChannelToolsExtension(this.channelSink, () =>
+        this.currentTarget
+          ? { userId: this.currentTarget.userId, contextToken: this.currentTarget.contextToken }
+          : null,
+      ),
+    });
   }
 
   /**
@@ -237,6 +251,8 @@ export class WeixinBotManager {
     }
 
     // 2. 正常流程
+    // 记录当前发送目标，供 send_file_to_channel 工具使用
+    this.currentTarget = { userId: msg.fromUserId, contextToken: msg.contextToken };
     this.replyCollector.begin(msg.reqId);
     writeEvent({
       type: "wechat_message",
@@ -248,10 +264,7 @@ export class WeixinBotManager {
     let sessionId = this.bgSessionId;
     try {
       if ((!sessionId || !this.pool.hasSession(sessionId)) && this.currentHumanId) {
-        sessionId = await this.pool.createBackgroundSession({
-          humanId: this.currentHumanId,
-          conversationId: BG_CONVERSATION_ID,
-        });
+        sessionId = await this.createChannelSession(this.currentHumanId);
         this.bgSessionId = sessionId;
       }
     } catch (error) {
@@ -328,6 +341,29 @@ export class WeixinBotManager {
       console.error("[weixinbot-manager] sendReply 失败：", err);
     });
   }
+
+  /** ChannelFileSink 实现：供 send_file_to_channel 工具调用。用箭头函数绑定 manager this。 */
+  private readonly channelSink: ChannelFileSink = {
+    channelName: "微信",
+    sendFile: async ({ target, filePath, caption }): Promise<ChannelFileResult> => {
+      const userId = target.userId;
+      if (typeof userId !== "string") {
+        return { ok: false, error: "缺少微信 userId" };
+      }
+      const contextToken = typeof target.contextToken === "string" ? target.contextToken : undefined;
+      try {
+        const fileName = await this.service.sendFile(userId, filePath, caption, contextToken);
+        writeEvent({
+          type: "wechat_message",
+          role: "assistant",
+          text: `📎 已发送文件：${fileName}`,
+        });
+        return { ok: true, detail: `文件 ${fileName} 已发送` };
+      } catch (err) {
+        return { ok: false, error: err instanceof Error ? err.message : String(err) };
+      }
+    },
+  };
 
   private emitStatus(status: WeixinStatus): void {
     switch (status.kind) {

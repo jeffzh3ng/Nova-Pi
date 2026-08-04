@@ -13,6 +13,7 @@
 
 import {
   DefaultResourceLoader,
+  type InlineExtension,
   type Skill,
   type ResourceLoader,
 } from "@earendil-works/pi-coding-agent";
@@ -65,6 +66,7 @@ export async function createSessionResourceLoader(
   allowSkills = false,
   attachments?: AttachmentRuntime,
   imageArtifacts?: ImageArtifactStore,
+  channelExtension?: InlineExtension,
 ): Promise<ResourceLoader> {
   if (!configuredAgentDir) {
     throw new Error("技能加载器尚未初始化。");
@@ -81,13 +83,23 @@ export async function createSessionResourceLoader(
     },
     appendSystemPromptOverride: (current) => {
       const inventory = allowSkills ? formatSkillInventoryForPrompt(enabledSkills) : "";
-      return inventory ? [...current, inventory] : current;
+      const extras = inventory ? [...current, inventory] : current;
+      // 消息渠道后台会话注入了 send_file_to_channel 工具，补一句引导提升触发率。
+      // 仅当有 channelExtension 时追加，不影响前端会话和非渠道后台会话。
+      if (channelExtension) {
+        return [
+          ...extras,
+          "你可以使用 send_file_to_channel 工具向用户发送本地文件（如评估结果、生成的报表等）。当用户索要文件或任务产出需要交付时，先确认文件路径再调用该工具。",
+        ];
+      }
+      return extras;
     },
     extensionFactories: [
       ...(attachments ? [createAttachmentExtension(attachments)] : []),
       ...(allowedMcpServices === "all" || allowedMcpServices.length > 0
         ? [createMcpExtension(allowedMcpServices, attachments, imageArtifacts)]
         : []),
+      ...(channelExtension ? [channelExtension] : []),
     ],
   });
   await loader.reload();

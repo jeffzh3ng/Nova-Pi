@@ -83,6 +83,18 @@ export interface SendMessageResult {
   chat: TelegramChat;
 }
 
+/** sendDocument 入参。 */
+export interface SendDocumentParams {
+  chat_id: number;
+  /** 文件二进制内容。 */
+  document: Blob;
+  /** 文件名（含扩展名，用于接收方展示和 MIME 推断）。 */
+  fileName: string;
+  /** 随文件的说明文字，上限 1024 字符。 */
+  caption?: string;
+  reply_to_message_id?: number;
+}
+
 /** getUpdates 入参。 */
 export interface GetUpdatesParams {
   offset?: number;

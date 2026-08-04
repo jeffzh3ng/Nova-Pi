@@ -10,6 +10,7 @@ import {
   SessionManager,
   createAgentSession,
   type AgentSessionEvent,
+  type InlineExtension,
   type ResourceLoader,
   type ToolDefinition,
 } from "@earendil-works/pi-coding-agent";
@@ -22,6 +23,7 @@ import { createSessionResourceLoader } from "./skills/loader.js";
 import { AttachmentRuntime, type AgentAttachment } from "./attachments.js";
 import { MCP_PROXY_TOOL_NAME } from "./mcp/extension.js";
 import { ATTACHMENT_TOOL_NAME } from "./attachment-processing.js";
+import { SEND_FILE_TOOL_NAME } from "./channel-tools.js";
 import { ImageArtifactStore, type PersistedImageResult } from "./mcp/image-artifacts.js";
 import {
   builtInToolNamesForSettings,
@@ -337,6 +339,7 @@ export class SessionPool {
     conversationId: string;
     mcpServiceId?: string;
     resumeMessages?: Array<{ role: string; content: string }>;
+    channelExtension?: InlineExtension;
   }): Promise<string> {
     // 后台会话也用 conversationId 做幂等键（service 内部维护），但不写 conversationToSession。
     for (const entry of this.sessions.values()) {
@@ -368,6 +371,7 @@ export class SessionPool {
       computerSetup.allowSkills,
       attachmentRuntime,
       imageArtifacts,
+      params.channelExtension,
     );
 
     const sessionId = `bg-${params.conversationId}-${Date.now().toString(36)}`;
@@ -554,6 +558,9 @@ export class SessionPool {
         ...customToolNamesForSettings(settings),
         MCP_PROXY_TOOL_NAME,
         ATTACHMENT_TOOL_NAME,
+        // 消息渠道后台会话注入的 send_file_to_channel 工具也需显式列入白名单，
+        // 否则 computer-agent 的 tools 白名单会把它过滤掉。
+        SEND_FILE_TOOL_NAME,
       ],
       customTools,
       authorizationPrompt: computerAgentAuthorizationPrompt(settings),

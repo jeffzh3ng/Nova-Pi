@@ -6,6 +6,8 @@ import { writeEvent } from "../rpc-protocol.js";
 import { FeishuChannelStore } from "./store.js";
 import { FeishuTransport } from "./transport.js";
 import type { FeishuConfig, FeishuIncomingMessage, FeishuStatus } from "./types.js";
+import type { ChannelFileSink, ChannelFileResult } from "../channel-file-sink.js";
+import { createChannelToolsExtension } from "../channel-tools.js";
 
 type PendingReply = {
   collector: ChannelReplyCollector;
@@ -17,6 +19,8 @@ type ConversationState = {
   conversationKey: string;
   sessionId: string;
   current?: PendingReply;
+  /** 当前正在处理的入站 messageId，供 send_file_to_channel 工具发文件用。 */
+  targetHolder: { messageId?: string };
 };
 
 export class FeishuBotManager {
@@ -115,6 +119,7 @@ export class FeishuBotManager {
     });
     const collector = new ChannelReplyCollector();
     collector.begin(message.messageId);
+    state.targetHolder.messageId = message.messageId;
     state.current = { collector, resolve: resolveDone, done };
     try {
       await this.pool.prompt({ sessionId: state.sessionId, message: message.text });
@@ -138,12 +143,19 @@ export class FeishuBotManager {
       .update(`${this.channelId}\0${conversationKey}`)
       .digest("hex")
       .slice(0, 24);
+    // 每个会话独立持有 targetHolder：extension 闭包引用它，
+    // processMessage 收到消息时写入 messageId，工具 execute 时读取。
+    const targetHolder: { messageId?: string } = {};
+    const channelSink = this.buildChannelSink(conversationKey, targetHolder);
     const sessionId = await this.pool.createBackgroundSession({
       humanId: this.humanId,
       conversationId: `nova-feishu-${digest}`,
       resumeMessages: this.store.resumeMessages(conversationKey),
+      channelExtension: createChannelToolsExtension(channelSink, () =>
+        targetHolder.messageId ? { messageId: targetHolder.messageId } : null,
+      ),
     });
-    const state = { conversationKey, sessionId };
+    const state: ConversationState = { conversationKey, sessionId, targetHolder };
     this.conversations.set(conversationKey, state);
     this.sessionToConversation.set(sessionId, state);
     return state;
@@ -174,6 +186,34 @@ export class FeishuBotManager {
     } catch (error) {
       console.error(`[feishu-manager:${this.channelId}] 回复发送失败`, error);
     }
+  }
+
+  /** 构造该会话专属的 ChannelFileSink：调 transport.replyFile 发文件。 */
+  private buildChannelSink(
+    conversationKey: string,
+    targetHolder: { messageId?: string },
+  ): ChannelFileSink {
+    return {
+      channelName: "飞书",
+      sendFile: async ({ target, filePath }): Promise<ChannelFileResult> => {
+        const messageId = target.messageId ?? targetHolder.messageId;
+        if (typeof messageId !== "string") {
+          return { ok: false, error: "缺少飞书 messageId（还未收到用户消息）" };
+        }
+        try {
+          const fileName = await this.transport?.replyFile(messageId, filePath);
+          if (!fileName) return { ok: false, error: "飞书连接未启动" };
+          this.emitMessage(
+            "assistant",
+            { messageId, conversationKey } as FeishuIncomingMessage,
+            `📎 已发送文件：${fileName}`,
+          );
+          return { ok: true, detail: `文件 ${fileName} 已发送` };
+        } catch (err) {
+          return { ok: false, error: err instanceof Error ? err.message : String(err) };
+        }
+      },
+    };
   }
 
   private emitMessage(

@@ -271,6 +271,57 @@ export async function sendMessage(params: {
 }
 
 /**
+ * 发送文件消息（type=4 FILE）。
+ * media 引用 CDN 上传后的下载凭证 + AES key。fileName 和 len 是文件元数据。
+ */
+export async function sendFileMessage(params: {
+  baseUrl: string;
+  token?: string;
+  to: string;
+  clientId: string;
+  contextToken?: string;
+  fileName: string;
+  /** CDN 下载凭证（encrypt_query_param）。 */
+  encryptQueryParam: string;
+  /** AES key，base64 编码。 */
+  aesKeyBase64: string;
+  /** 原始文件字节数（作为字符串填进 file_item.len）。 */
+  fileSize: number;
+}): Promise<void> {
+  await postRequest({
+    baseUrl: params.baseUrl,
+    endpoint: "ilink/bot/sendmessage",
+    body: JSON.stringify({
+      msg: {
+        from_user_id: "",
+        to_user_id: params.to,
+        client_id: params.clientId,
+        message_type: 2, // BOT
+        message_state: 2, // FINISH
+        item_list: [
+          {
+            type: 4, // FILE
+            file_item: {
+              media: {
+                encrypt_query_param: params.encryptQueryParam,
+                aes_key: params.aesKeyBase64,
+                encrypt_type: 1,
+              },
+              file_name: params.fileName,
+              len: String(params.fileSize),
+            },
+          },
+        ],
+        context_token: params.contextToken ?? undefined,
+      },
+      base_info: buildBaseInfo(),
+    }),
+    token: params.token,
+    timeoutMs: DEFAULT_API_TIMEOUT_MS,
+  });
+}
+
+/**
  * 获取上传 URL
  */
 export async function getUploadUrl(params: {
