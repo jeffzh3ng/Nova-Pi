@@ -59,6 +59,7 @@ async function uploadBufferToCdn(params: {
   let downloadParam: string | undefined;
   let lastError: unknown;
 
+  let isClientError = false;
   for (let attempt = 1; attempt <= UPLOAD_MAX_RETRIES; attempt++) {
     try {
       const res = await fetch(cdnUrl, {
@@ -68,6 +69,7 @@ async function uploadBufferToCdn(params: {
       });
       if (res.status >= 400 && res.status < 500) {
         const errMsg = res.headers.get("x-error-message") ?? (await res.text().catch(() => ""));
+        isClientError = true;
         throw new Error(`CDN 客户端错误 ${res.status}: ${errMsg}`);
       }
       if (res.status !== 200) {
@@ -81,8 +83,8 @@ async function uploadBufferToCdn(params: {
       break;
     } catch (err) {
       lastError = err;
-      // 4xx 客户端错误立即失败，不重试
-      if (err instanceof Error && err.message.includes("客户端错误")) throw err;
+      // 4xx 客户端错误立即失败，不重试（用标志位判定，不依赖错误信息文本）
+      if (isClientError) throw err;
       if (attempt < UPLOAD_MAX_RETRIES) {
         console.warn(`[weixin-cdn] ${label} 第 ${attempt} 次上传失败，重试...`);
       }
