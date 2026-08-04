@@ -653,7 +653,7 @@ export class SessionPool {
   private updateEntryRuntime(entry: SessionEntry, event: AgentSessionEvent): void {
     entry.lastActivityAt = Date.now();
     if (event.type === "agent_start" || event.type === "turn_start") entry.status = "running";
-    if (event.type === "agent_end") {
+    if (event.type === "agent_settled") {
       entry.status = "idle";
       entry.activeTool = undefined;
     }

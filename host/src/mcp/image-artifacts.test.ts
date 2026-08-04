@@ -23,13 +23,87 @@ test("MCP Base64 images are persisted as local artifacts", async () => {
   }
 });
 
-test("remote image localization rejects private network URLs", async () => {
+test("explicit remote image outputs reject private network URLs", async () => {
   const root = mkdtempSync(path.join(tmpdir(), "nova-image-artifacts-private-"));
   try {
     const store = new ImageArtifactStore(root);
-    const result = await store.persistFromMcpResult({ images: [{ url: "http://127.0.0.1/private.png" }] }, "run_model");
+    const result = await store.persistFromMcpResult({
+      structuredContent: { images: [{ url: "http://127.0.0.1/private.png" }] },
+    }, "run_model");
     assert.equal(result.artifacts.length, 0);
     assert.match(result.errors.join("\n"), /内网/);
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test("search and extraction page assets are not promoted to image artifacts", async () => {
+  const root = mkdtempSync(path.join(tmpdir(), "nova-image-artifacts-search-"));
+  try {
+    const store = new ImageArtifactStore(root);
+    const result = await store.persistFromMcpResult({
+      content: [{
+        type: "text",
+        text: "搜索正文含站点素材 https://cdn.example.com/code.png 和头像 https://cdn.example.com/avatar.webp",
+      }],
+      structuredContent: {
+        results: [{
+          title: "普通搜索结果",
+          image_url: "http://127.0.0.1/avatar.png",
+          page: { images: [{ url: "http://127.0.0.1/code.png" }] },
+        }],
+        thumbnail: "http://127.0.0.1/thumbnail.png",
+        preview: "http://127.0.0.1/preview.png",
+      },
+    }, "batch_search");
+    assert.deepEqual(result, { artifacts: [], errors: [] });
+
+    const wrappedResult = await store.persistFromMcpResult({
+      structuredContent: {
+        result: JSON.stringify({
+          results: [{
+            title: "FastMCP 搜索结果",
+            image_url: "http://127.0.0.1/avatar.png",
+          }],
+        }),
+      },
+    }, "batch_search");
+    assert.deepEqual(wrappedResult, { artifacts: [], errors: [] });
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test("only top-level explicit image fields are localized from structured output", async () => {
+  const root = mkdtempSync(path.join(tmpdir(), "nova-image-artifacts-explicit-"));
+  try {
+    const store = new ImageArtifactStore(root);
+    const result = await store.persistFromMcpResult({
+      structuredContent: {
+        image_url: "http://127.0.0.1/generated-image",
+        results: [{ image_url: "http://127.0.0.1/search-thumbnail.png" }],
+      },
+    }, "generate_image");
+    assert.equal(result.artifacts.length, 0);
+    assert.equal(result.errors.length, 1);
+    assert.match(result.errors[0], /内网/);
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test("FastMCP result wrappers preserve explicit image outputs", async () => {
+  const root = mkdtempSync(path.join(tmpdir(), "nova-image-artifacts-fastmcp-"));
+  try {
+    const store = new ImageArtifactStore(root);
+    const result = await store.persistFromMcpResult({
+      structuredContent: {
+        result: JSON.stringify({ images: [{ url: "http://127.0.0.1/generated.png" }] }),
+      },
+    }, "generate_image");
+    assert.equal(result.artifacts.length, 0);
+    assert.equal(result.errors.length, 1);
+    assert.match(result.errors[0], /内网/);
   } finally {
     rmSync(root, { recursive: true, force: true });
   }

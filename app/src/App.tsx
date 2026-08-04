@@ -31,6 +31,10 @@ import {
 import type { ConversationSnapshot, ConversationSummary } from "./services/conversationStore";
 import { getWritableConversationId, requiresNewPiSession } from "./services/conversationRouting";
 import {
+  isConversationPersistenceStateCurrent,
+  type ConversationPersistenceState,
+} from "./services/conversationPersistence";
+import {
   extractRemoteImageUrls,
   extractSandboxImageReferences,
   extractWorkingDirectoryImageReferences,
@@ -561,6 +565,7 @@ export default function App() {
   const [activeNav, setActiveNav] = useState<SidebarNavId>("home");
   const [sidebarPanelWidth, setSidebarPanelWidth] = useState(getInitialSidebarWidth);
   const [runningConversationIds, setRunningConversationIds] = useState<Set<string>>(() => new Set());
+  const runningConversationIdsRef = useRef<Set<string>>(new Set());
   const [mcpCatalog, setMcpCatalog] = useState<McpConnectionSettings[]>([]);
   const [mcpAvailability, setMcpAvailability] = useState<Record<string, McpAvailability>>({});
   const [computerAgentSettings, setComputerAgentSettings] = useState<ComputerAgentSettings | null>(null);
@@ -568,7 +573,7 @@ export default function App() {
   const activeRunIdRef = useRef(0);
   // busy 的 ref 镜像：catch/超时等非渲染上下文需要读最新值，避免 stale closure。
   const busyRef = useRef(false);
-  // busy 安全超时：agent_end 正常会清 busy，但若 sidecar 崩溃/事件流静默中断，
+  // busy 安全超时：agent_settled 正常会清 busy，但若 sidecar 崩溃/事件流静默中断，
   // 这里兜底防止 UI 永久卡死。key = `${runId}`。
   const busySafetyTimersRef = useRef<Map<string, ReturnType<typeof setTimeout>>>(new Map());
   const BUSY_SAFETY_TIMEOUT_MS = 5 * 60 * 1000;
@@ -596,7 +601,7 @@ export default function App() {
   const fileAttachmentContextsRef = useRef<Record<string, ChatMessageAttachment[]>>({});
   const riskAssessmentContextsRef = useRef<Partial<Record<string, RiskAssessmentContext>>>({});
   const riskAssessmentPollTokensRef = useRef<Record<string, number>>({});
-  const loadedConversationFingerprintRef = useRef<{ id: string; fingerprint: string } | null>(null);
+  const loadedConversationFingerprintRef = useRef<ConversationPersistenceState | null>(null);
   const archivedTaskIdsRef = useRef<Set<string>>(new Set());
   const deletedConversationIdsRef = useRef<Set<string>>(new Set());
   const titleGenerationInFlightRef = useRef<Set<string>>(new Set());
@@ -1326,7 +1331,8 @@ export default function App() {
       upsertRecentSummary(summary);
       loadedConversationFingerprintRef.current = {
         id: conversationId,
-        fingerprint: buildMessagesFingerprint(messages),
+        messageFingerprint: buildMessagesFingerprint(messages),
+        status: summary.status,
       };
       return summary;
     });
@@ -1440,7 +1446,12 @@ export default function App() {
                 }
                 return { ...current, attachments };
               },
-              currentConversationRunning ? "running" : "done",
+              runningConversationIdsRef.current.has(currentConversationId)
+                ? "running"
+                : resolveConversationStatus(
+                    conversationMessageBuffersRef.current[currentConversationId] ?? [],
+                    false,
+                  ),
             );
           })
           .catch((error) => {
@@ -1584,17 +1595,19 @@ export default function App() {
     // metadata 优先用会话已记住的（首次创建时由 submitPrompt 写入），见 buildSnapshotForConversation
     // 内部的 getConversationMetadata。这样会话进行中切换"最近使用"员工不会改写历史会话的 agent 元信息。
     const messageFingerprint = buildMessagesFingerprint(conversationMessages);
-    if (
-      loadedConversationFingerprintRef.current?.id === currentConversationId &&
-      loadedConversationFingerprintRef.current.fingerprint === messageFingerprint
-    ) {
-      return;
-    }
-
     const snapshotStatus =
       currentConversationId && runningConversationIds.has(currentConversationId)
         ? "running"
         : resolveConversationStatus(conversationMessages, busy);
+    const persistenceState: ConversationPersistenceState = {
+      id: currentConversationId,
+      messageFingerprint,
+      status: snapshotStatus,
+    };
+    if (isConversationPersistenceStateCurrent(loadedConversationFingerprintRef.current, persistenceState)) {
+      return;
+    }
+
     const snapshot = buildSnapshotForConversation(
       currentConversationId,
       conversationMessages,
@@ -1627,19 +1640,13 @@ export default function App() {
       return next.slice(0, 80);
     });
 
-    loadedConversationFingerprintRef.current = {
-      id: currentConversationId,
-      fingerprint: messageFingerprint,
-    };
+    loadedConversationFingerprintRef.current = persistenceState;
     queueConversationSave(currentConversationId, async () => saveConversationSnapshot(snapshot))
       .then((summary) => {
         if (summary) upsertRecentSummary(summary);
       })
       .catch((error) => {
-        if (
-          loadedConversationFingerprintRef.current?.id === currentConversationId &&
-          loadedConversationFingerprintRef.current.fingerprint === messageFingerprint
-        ) {
+        if (isConversationPersistenceStateCurrent(loadedConversationFingerprintRef.current, persistenceState)) {
           loadedConversationFingerprintRef.current = null;
         }
         console.error("保存会话失败", error);
@@ -1655,15 +1662,31 @@ export default function App() {
   ]);
 
   const setConversationRunning = (conversationId: string, running: boolean) => {
-    setRunningConversationIds((items) => {
-      const next = new Set(items);
-      if (running) {
-        next.add(conversationId);
-      } else {
-        next.delete(conversationId);
-      }
-      return next;
-    });
+    const next = new Set(runningConversationIdsRef.current);
+    if (running) {
+      next.add(conversationId);
+    } else {
+      next.delete(conversationId);
+    }
+    runningConversationIdsRef.current = next;
+    setRunningConversationIds(next);
+  };
+
+  const resolveConversationSaveStatus = (conversationId: string): RecentTask["status"] =>
+    runningConversationIdsRef.current.has(conversationId)
+      ? "running"
+      : resolveConversationStatus(conversationMessageBuffersRef.current[conversationId] ?? [], false);
+
+  const finalizeConversationRun = (conversationId: string) => {
+    setConversationRunning(conversationId, false);
+    const status = resolveConversationSaveStatus(conversationId);
+    setRecentTasks((items) =>
+      items.map((item) => (item.id === conversationId ? { ...item, status } : item)),
+    );
+    setArchivedTasks((items) =>
+      items.map((item) => (item.id === conversationId ? { ...item, status } : item)),
+    );
+    queueSaveConversationState(conversationId, status);
   };
 
   const createUserMessage = (content: string, attachments?: ChatMessageAttachment[]): ChatMessage => ({
@@ -2024,7 +2047,7 @@ export default function App() {
 
   const isCurrentRun = (runId: number) => activeRunIdRef.current === runId;
 
-  // 提交 prompt 成功后，启动一个安全超时：若超时后该 run 仍在跑（说明 agent_end
+  // 提交 prompt 成功后，启动一个安全超时：若超时后该 run 仍在跑（说明 agent_settled
   // 因 sidecar 崩溃/事件流中断而未到达），强制清理 running/busy，避免会话永久卡死。
   const scheduleBusySafetyTimeout = (runId: number, conversationId: string) => {
     const key = `${runId}`;
@@ -2032,10 +2055,10 @@ export default function App() {
     if (existing) clearTimeout(existing);
     const timer = setTimeout(() => {
       busySafetyTimersRef.current.delete(key);
-      // 仍在跑才需要兜底；正常已由 agent_end 清理并取消本 timer。
+      // 仍在跑才需要兜底；正常已由 agent_settled 清理并取消本 timer。
       if (activeRunIdRef.current === runId && busyRef.current) {
-        console.warn(`[busy-safety] run ${runId} 超时未收到 agent_end，强制清理`);
-        setConversationRunning(conversationId, false);
+        console.warn(`[busy-safety] run ${runId} 超时未收到 agent_settled，强制清理`);
+        finalizeConversationRun(conversationId);
         setBusy(false);
         busyRef.current = false;
         activeRunIdRef.current += 1; // 后续 run 失效
@@ -2233,7 +2256,7 @@ export default function App() {
                         : existing,
                     ),
                   }),
-                  "running",
+                  resolveConversationSaveStatus(conversationId),
                 );
               })
               .catch((error: unknown) => {
@@ -2253,7 +2276,7 @@ export default function App() {
                     content: "空白评估表已下载到本地，可点击下方文件另存或打开。",
                     exportedFile: downloaded,
                   }),
-                  "running",
+                  resolveConversationSaveStatus(conversationId),
                 );
               },
               (error: unknown) => {
@@ -2264,7 +2287,7 @@ export default function App() {
                     ...message,
                     content: `评估矩阵已获取，但空白评估表下载失败：${error instanceof Error ? error.message : String(error)}`,
                   }),
-                  "running",
+                  resolveConversationSaveStatus(conversationId),
                 );
               },
             );
@@ -2311,8 +2334,13 @@ export default function App() {
           break;
         }
         case "agent_end": {
+          // agent_end 只代表一次底层 agent run 结束；重试、压缩或排队消息仍可能继续。
+          // usage 仍由 host 在该事件上聚合，UI 终态统一等待 agent_settled。
+          break;
+        }
+        case "agent_settled": {
           delete streamingMessageIdRef.current[conversationId];
-          setConversationRunning(conversationId, false);
+          finalizeConversationRun(conversationId);
           clearBusySafetyTimeout(activeRunIdRef.current);
           if (currentConversationIdRef.current === conversationId) {
             setBusy(false);
@@ -2480,7 +2508,7 @@ export default function App() {
       }
     } catch (error) {
       // prompt 调用本身失败（网络/会话不存在等），pi 尚未或已停止跑 agent loop，
-      // agent_end 不会到达，必须在此兜底清理 running/busy，否则会话永久卡死。
+      // agent_settled 不会到达，必须在此兜底清理 running/busy，否则会话永久卡死。
       if (isCurrentRun(runId)) {
         appendMessageToConversation(
           conversationId,
@@ -2494,8 +2522,8 @@ export default function App() {
         if (busyRef.current) setBusy(false);
       }
     } finally {
-      // 正常情况下 pi 的 agent_end 事件负责清理 running/busy（见 subscribePiEvents）。
-      // 但 agent loop 内部异步异常（LLM 网络错误、customTool 抛错）可能不发 agent_end/error，
+      // 正常情况下 pi 的 agent_settled 事件负责清理 running/busy（见 subscribePiEvents）。
+      // 但 agent loop 内部异步异常（LLM 网络错误、customTool 抛错）可能不发 agent_settled/error，
       // 此时 sendRpc 已成功返回但事件流静默中断。为防止 UI 永久卡死，加一个安全超时：
       // 若 5 分钟后该 run 仍在跑，强制清理。
       const runIdAtFinally = runId;
@@ -2620,7 +2648,8 @@ export default function App() {
       setConversationMessages(buffered);
       loadedConversationFingerprintRef.current = {
         id: task.id,
-        fingerprint: buildMessagesFingerprint(buffered),
+        messageFingerprint: buildMessagesFingerprint(buffered),
+        status: task.status,
       };
       setBusy(true);
       return;
@@ -2634,7 +2663,8 @@ export default function App() {
       if (!isCurrent()) return;
       loadedConversationFingerprintRef.current = {
         id: task.id,
-        fingerprint: buildMessagesFingerprint(loaded.messages),
+        messageFingerprint: buildMessagesFingerprint(loaded.messages),
+        status: loaded.summary.status,
       };
       rememberConversationMetadata(task.id, {
         agentId: loaded.summary.agentId,
@@ -2833,9 +2863,9 @@ export default function App() {
     if (conversationId) {
       setConversationRunning(conversationId, false);
     }
-    // 取消安全超时并清理 busy（abort 后 agent_end 可能仍会到达，但这里即时清理更稳）。
+    // 取消安全超时并清理 busy（abort 后 agent_settled 可能仍会到达，但这里即时清理更稳）。
     clearBusySafetyTimeout(activeRunIdRef.current);
-    activeRunIdRef.current += 1; // 使当前 run 失效，避免迟到的 agent_end 错误清理
+    activeRunIdRef.current += 1; // 使当前 run 失效，避免迟到的 agent_settled 错误清理
     setBusy(false);
     busyRef.current = false;
     setPrompt("");

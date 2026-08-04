@@ -181,7 +181,8 @@ export type RpcResponse =
 export type PiEvent =
   // pi 原生事件（透传）
   | { type: "agent_start"; sessionId: string }
-  | { type: "agent_end"; sessionId: string; messages?: unknown[] }
+  | { type: "agent_end"; sessionId: string; messages?: unknown[]; willRetry?: boolean }
+  | { type: "agent_settled"; sessionId: string }
   | { type: "turn_start"; sessionId: string }
   | { type: "turn_end"; sessionId: string }
   | { type: "message_start"; sessionId: string; message?: unknown }
@@ -281,7 +282,7 @@ export async function getSidecarHealth(): Promise<SidecarHealth> {
 }
 
 /**
- * 订阅 pi 事件流（message_update / tool_execution_* / agent_end / usage / risk_job_update / error）。
+ * 订阅 pi 事件流（message_update / tool_execution_* / agent_settled / usage / risk_job_update / error）。
  * 返回取消订阅函数。
  */
 export function subscribePiEvents(listener: (event: PiEvent) => void): () => void {

@@ -118,7 +118,8 @@ export type RpcResponse =
 export type RpcEvent =
   // pi 原生事件（透传 AgentSessionEvent 的核心子集）
   | { type: "agent_start"; sessionId: string }
-  | { type: "agent_end"; sessionId: string; messages?: unknown[] }
+  | { type: "agent_end"; sessionId: string; messages?: unknown[]; willRetry?: boolean }
+  | { type: "agent_settled"; sessionId: string }
   | { type: "turn_start"; sessionId: string }
   | { type: "turn_end"; sessionId: string }
   | { type: "message_start"; sessionId: string; message?: unknown }

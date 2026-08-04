@@ -2,7 +2,8 @@ import { createHash } from "node:crypto";
 import { lookup } from "node:dns/promises";
 import { mkdir, readFile, realpath, stat, writeFile } from "node:fs/promises";
 import { isIP } from "node:net";
-import { basename, extname, isAbsolute, join, relative, resolve, sep } from "node:path";
+import { basename, isAbsolute, join, relative, resolve, sep } from "node:path";
+import { extractMcpPayload } from "./payload.js";
 
 const MAX_IMAGE_BYTES = 25 * 1024 * 1024;
 const MAX_IMAGE_CANDIDATES = 8;
@@ -58,13 +59,33 @@ function imageInfo(bytes: Buffer, declaredMime = ""): { ext: string; mimeType: s
   return undefined;
 }
 
-function looksLikeImageUrl(raw: string, key = ""): boolean {
+const EXPLICIT_IMAGE_OUTPUT_KEYS = new Set([
+  "image",
+  "images",
+  "imageurl",
+  "imageurls",
+  "imageuri",
+  "imageuris",
+  "outputimage",
+  "outputimages",
+  "outputimageurl",
+  "outputimageurls",
+  "generatedimage",
+  "generatedimages",
+  "generatedimageurl",
+  "generatedimageurls",
+]);
+const IMAGE_VALUE_URL_KEYS = new Set(["url", "urls", "uri", "uris", "src", "href", "downloadurl"]);
+const IMAGE_VALUE_CONTAINER_KEYS = new Set(["data", "items", "outputs", "result"]);
+
+function normalizedKey(key: string): string {
+  return key.replace(/[-_]/g, "").toLowerCase();
+}
+
+function isHttpUrl(raw: string): boolean {
   try {
     const url = new URL(raw);
-    if (!/^(https?):$/.test(url.protocol)) return false;
-    const extension = extname(url.pathname).toLowerCase();
-    return [".png", ".jpg", ".jpeg", ".gif", ".webp", ".bmp", ".tif", ".tiff"].includes(extension)
-      || /image|thumbnail|preview/i.test(key);
+    return /^(https?):$/.test(url.protocol);
   } catch {
     return false;
   }
@@ -73,35 +94,38 @@ function looksLikeImageUrl(raw: string, key = ""): boolean {
 function collectCandidates(raw: unknown): ImageCandidate[] {
   const candidates: ImageCandidate[] = [];
   const urls = new Set<string>();
-  const seen = new WeakSet<object>();
+  const base64Images = new Set<string>();
 
   const pushUrl = (url: string) => {
-    if (candidates.length >= MAX_IMAGE_CANDIDATES || urls.has(url)) return;
+    if (candidates.length >= MAX_IMAGE_CANDIDATES || urls.has(url) || !isHttpUrl(url)) return;
     urls.add(url);
     candidates.push({ type: "url", url });
   };
 
-  const visit = (value: unknown, key = "", depth = 0) => {
-    if (depth > 10 || candidates.length >= MAX_IMAGE_CANDIDATES || value == null) return;
+  const pushBase64 = (data: string, mimeType: string) => {
+    if (
+      candidates.length >= MAX_IMAGE_CANDIDATES
+      || base64Images.has(data)
+      || !mimeType.toLowerCase().startsWith("image/")
+    ) return;
+    base64Images.add(data);
+    candidates.push({ type: "base64", data, mimeType });
+  };
+
+  const visitExplicitImageValue = (value: unknown, depth = 0): void => {
+    if (depth > 5 || candidates.length >= MAX_IMAGE_CANDIDATES || value == null) return;
     if (typeof value === "string") {
-      if (looksLikeImageUrl(value, key)) pushUrl(value);
-      if (value.length <= 1_000_000) {
-        for (const match of value.matchAll(/https?:\/\/[^\s"'<>]+/gi)) {
-          const candidate = match[0].replace(/[),.;]+$/, "");
-          if (looksLikeImageUrl(candidate, key)) pushUrl(candidate);
-        }
-        const trimmed = value.trim();
-        if ((trimmed.startsWith("{") || trimmed.startsWith("[")) && trimmed.length < 500_000) {
-          try { visit(JSON.parse(trimmed), key, depth + 1); } catch { /* plain text */ }
-        }
+      const trimmed = value.trim();
+      if (isHttpUrl(trimmed)) {
+        pushUrl(trimmed);
+      } else if ((trimmed.startsWith("{") || trimmed.startsWith("[")) && trimmed.length < 500_000) {
+        try { visitExplicitImageValue(JSON.parse(trimmed), depth + 1); } catch { /* not JSON */ }
       }
       return;
     }
     if (typeof value !== "object") return;
-    if (seen.has(value)) return;
-    seen.add(value);
     if (Array.isArray(value)) {
-      value.forEach((item) => visit(item, key, depth + 1));
+      value.forEach((item) => visitExplicitImageValue(item, depth + 1));
       return;
     }
     const node = value as Record<string, unknown>;
@@ -109,14 +133,68 @@ function collectCandidates(raw: unknown): ImageCandidate[] {
       node.type === "image"
       && typeof node.data === "string"
       && typeof node.mimeType === "string"
-      && candidates.length < MAX_IMAGE_CANDIDATES
     ) {
-      candidates.push({ type: "base64", data: node.data, mimeType: node.mimeType });
+      pushBase64(node.data, node.mimeType);
+    } else if (
+      typeof node.data === "string"
+      && typeof (node.mimeType ?? node.mime_type) === "string"
+    ) {
+      pushBase64(node.data, String(node.mimeType ?? node.mime_type));
+    } else if (typeof node.b64_json === "string") {
+      pushBase64(node.b64_json, "image/png");
     }
-    for (const [childKey, child] of Object.entries(node)) visit(child, childKey, depth + 1);
+    for (const [key, child] of Object.entries(node)) {
+      const normalized = normalizedKey(key);
+      if (IMAGE_VALUE_URL_KEYS.has(normalized)) {
+        if (typeof child === "string") pushUrl(child.trim());
+        else if (Array.isArray(child)) child.forEach((item) => {
+          if (typeof item === "string") pushUrl(item.trim());
+        });
+      } else if (
+        EXPLICIT_IMAGE_OUTPUT_KEYS.has(normalized)
+        || IMAGE_VALUE_CONTAINER_KEYS.has(normalized)
+      ) {
+        visitExplicitImageValue(child, depth + 1);
+      }
+    }
   };
 
-  visit(raw);
+  const visitContentBlocks = (value: unknown): void => {
+    if (!Array.isArray(value)) return;
+    for (const block of value) {
+      if (!block || typeof block !== "object") continue;
+      const node = block as Record<string, unknown>;
+      if (node.type === "image" && typeof node.data === "string" && typeof node.mimeType === "string") {
+        pushBase64(node.data, node.mimeType);
+      } else if (node.type === "image_url") {
+        visitExplicitImageValue(node.image_url ?? node.url);
+      }
+    }
+  };
+
+  const visitExplicitRoot = (value: unknown): void => {
+    if (typeof value === "string") {
+      const trimmed = value.trim();
+      if ((trimmed.startsWith("{") || trimmed.startsWith("[")) && trimmed.length < 500_000) {
+        try { visitExplicitRoot(JSON.parse(trimmed)); } catch { /* not JSON */ }
+      }
+      return;
+    }
+    if (!value || typeof value !== "object" || Array.isArray(value)) return;
+    for (const [key, child] of Object.entries(value as Record<string, unknown>)) {
+      if (EXPLICIT_IMAGE_OUTPUT_KEYS.has(normalizedKey(key))) {
+        visitExplicitImageValue(child);
+      }
+    }
+  };
+
+  if (raw && typeof raw === "object" && !Array.isArray(raw)) {
+    const envelope = raw as Record<string, unknown>;
+    visitContentBlocks(envelope.content);
+  }
+  // 兼容 structuredContent、FastMCP result JSON 字符串和直接业务对象；
+  // 解包后仍只读取根级明确图片字段，不递归扫描普通搜索结果。
+  visitExplicitRoot(extractMcpPayload(raw).data);
   return candidates;
 }
 
