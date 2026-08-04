@@ -1087,15 +1087,17 @@ export function SettingsPanel() {
               Nova v{appVersion}
             </p>
           ) : null}
-          <span
-            className={`sidecar-health-badge is-${sidecarHealth}`}
-            aria-label={sidecarHealthDetail}
-            aria-live="polite"
-            title={sidecarHealthDetail}
-          >
-            <i aria-hidden="true" />
-            {sidecarHealthLabel}
-          </span>
+          {sidecarHealth !== "online" ? (
+            <span
+              className={`sidecar-health-badge is-${sidecarHealth}`}
+              aria-label={sidecarHealthDetail}
+              aria-live="polite"
+              title={sidecarHealthDetail}
+            >
+              <i aria-hidden="true" />
+              {sidecarHealthLabel}
+            </span>
+          ) : null}
         </div>
       </header>
       <ModelSettingsPanel />
