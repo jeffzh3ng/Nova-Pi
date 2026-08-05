@@ -12,6 +12,10 @@
  * 源文件里再写一遍会导致 dist 里出现两个 shebang，ESM 解析报语法错。
  */
 
+// stdout 守卫必须最先导入：在任何可能触发第三方库（pdf2json 等）加载的 import 之前，
+// 封装 process.stdout.write，把非 JSON 输出转投 stderr，保护 RPC 通道不被污染。
+import "./stdout-guard.js";
+
 import { createInterface } from "node:readline";
 import { randomUUID } from "node:crypto";
 import { mkdirSync } from "node:fs";

@@ -322,7 +322,10 @@ fn start_sidecar_internal(app: &AppHandle, reset_watchdog_failures: bool) -> Res
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
         .env("NOVA_PI_HOST_MODE", &mode)
-        .env("NOVA_PI_PARENT_PID", std::process::id().to_string());
+        .env("NOVA_PI_PARENT_PID", std::process::id().to_string())
+        // host 据此激活 stdout 守卫：拦截 pdf2json 等第三方库的非 JSON stdout 写入，
+        // 保护 stdin/stdout 的 JSON-line RPC 通道不被污染（详见 host/src/stdout-guard.ts）。
+        .env("NOVA_PI_SIDECAR", "1");
     // Tauri 本身是 Windows GUI 程序。Node sidecar 若按默认控制台模式
     // 创建，会在应用启动或 watchdog 重启时短暂弹出黑色 cmd 窗口。
     #[cfg(windows)]

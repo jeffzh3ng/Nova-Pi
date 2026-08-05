@@ -16,6 +16,12 @@ const MAX_SELECTED_PAGES = 50;
 const MAX_XLSX_ROWS = 10_000;
 const MAX_XLSX_CELLS = 50_000;
 const MAX_PPTX_SLIDES = 200;
+/**
+ * pdf2json 解析超时。扫描版 PDF（无文本层、仅图片 XObject）会让 pdf2json 既不触发
+ * pdfParser_dataReady 也不触发 pdfParser_dataError，永久挂起。超时后销毁 parser 并
+ * reject，让 document 工具的 read 阶段优雅失败、引导走 OCR/vision，而非永久卡死。
+ */
+export const PDF_PARSE_TIMEOUT_MS = 30_000;
 
 const TEXT_EXTENSIONS = new Set([
   "txt", "log", "md", "markdown", "csv", "tsv", "json", "jsonl", "xml",
@@ -112,18 +118,42 @@ async function zipText(zip: JSZip, name: string): Promise<string> {
   return entry.async("text");
 }
 
+/**
+ * 用 pdf2json 解析 PDF（带超时）。扫描版 PDF 会让 pdf2json 永久挂起，故强制加超时：
+ * 超过 {@link PDF_PARSE_TIMEOUT_MS} 仍未 ready/error 时销毁 parser 并 reject。
+ * 同时响应外部 abort signal（document 工具被取消时立即终止解析）。
+ * 导出供 ocr-client 的 countPdfPages 复用，避免两处重复实现且各自漏超时。
+ */
+export function parsePdfWithTimeout(bytes: Buffer, signal?: AbortSignal, timeoutMs = PDF_PARSE_TIMEOUT_MS): Promise<Output> {
+  signal?.throwIfAborted();
+  return new Promise<Output>((resolve, reject) => {
+    const parser = new PDFParser(null, false);
+    let settled = false;
+    const cleanup = () => {
+      if (settled) return;
+      settled = true;
+      clearTimeout(timer);
+      signal?.removeEventListener("abort", onAbort);
+      parser.removeAllListeners();
+    };
+    const onAbort = () => { cleanup(); parser.destroy(); reject(new Error("document parsing aborted")); };
+    const timer = setTimeout(() => {
+      cleanup();
+      parser.destroy();
+      reject(new Error(`PDF 结构解析超时（${timeoutMs / 1000}s）——可能是扫描版或损坏文件，请改用 OCR`));
+    }, timeoutMs);
+    signal?.addEventListener("abort", onAbort, { once: true });
+    parser.once("pdfParser_dataReady", (result: Output) => { cleanup(); parser.destroy(); resolve(result); });
+    parser.once("pdfParser_dataError", () => { cleanup(); parser.destroy(); reject(new Error("PDF structure could not be read")); });
+    parser.parseBuffer(bytes, 0);
+  });
+}
+
 async function parsePdf(file: AgentAttachment, options: DocumentReadOptions): Promise<ParsedDocument> {
   options.signal?.throwIfAborted();
   if (options.pages && options.pages.length > MAX_SELECTED_PAGES) throw new Error("too many selected PDF pages");
   const bytes = options.bytes ?? await readFile(file.path);
-  const data = await new Promise<Output>((resolve, reject) => {
-    const parser = new PDFParser(null, false);
-    const abort = () => { parser.destroy(); reject(new Error("document parsing aborted")); };
-    options.signal?.addEventListener("abort", abort, { once: true });
-    parser.once("pdfParser_dataReady", (result) => { options.signal?.removeEventListener("abort", abort); parser.destroy(); resolve(result); });
-    parser.once("pdfParser_dataError", (_error) => { options.signal?.removeEventListener("abort", abort); parser.destroy(); reject(new Error("PDF structure could not be read")); });
-    parser.parseBuffer(bytes, 0);
-  });
+  const data = await parsePdfWithTimeout(bytes, options.signal);
   if (data.Pages.length > MAX_PDF_PAGES) throw new Error(`PDF page count exceeds ${MAX_PDF_PAGES}`);
   const wanted = options.pages?.length ? new Set(options.pages) : undefined;
   if (wanted && [...wanted].some((page) => page > data.Pages.length)) throw new Error("selected PDF page does not exist");

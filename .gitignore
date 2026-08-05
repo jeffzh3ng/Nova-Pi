@@ -10,6 +10,9 @@ host/runtime/
 src-tauri/target/
 app/src-tauri/target/
 
+# stdout-guard 测试临时脚本（host/src/stdout-guard.test.ts 运行时生成）
+host/src/.stdout-guard-tmp/
+
 # Tauri generated
 src-tauri/gen/
 app/src-tauri/gen/
