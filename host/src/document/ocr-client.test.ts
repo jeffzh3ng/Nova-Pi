@@ -110,13 +110,16 @@ test("ocr client rejects oversized files and unsupported formats without calling
   } finally { cleanup(); }
 });
 
-test("planBatches splits page count into ≤100-page ranges (1-based, closed)", () => {
+test("planBatches splits page count into ≤20-page ranges (1-based, closed)", () => {
   assert.deepEqual(planBatches(1), [{ start: 1, end: 1 }]);
-  assert.deepEqual(planBatches(100), [{ start: 1, end: 100 }]);
-  assert.deepEqual(planBatches(101), [{ start: 1, end: 100 }, { start: 101, end: 101 }]);
-  assert.deepEqual(planBatches(250), [{ start: 1, end: 100 }, { start: 101, end: 200 }, { start: 201, end: 250 }]);
-  assert.deepEqual(planBatches(134), [{ start: 1, end: 100 }, { start: 101, end: 134 }]);
-  assert.equal(MAX_PAGES_PER_BATCH, 100);
+  assert.deepEqual(planBatches(20), [{ start: 1, end: 20 }]);
+  assert.deepEqual(planBatches(21), [{ start: 1, end: 20 }, { start: 21, end: 21 }]);
+  assert.deepEqual(planBatches(81), [
+    { start: 1, end: 20 }, { start: 21, end: 40 }, { start: 41, end: 60 },
+    { start: 61, end: 80 }, { start: 81, end: 81 },
+  ]);
+  assert.deepEqual(planBatches(45), [{ start: 1, end: 20 }, { start: 21, end: 40 }, { start: 41, end: 45 }]);
+  assert.equal(MAX_PAGES_PER_BATCH, 20);
 });
 
 test("ocr client sends a single call without page params when page count is unknown or small", async () => {
@@ -144,7 +147,7 @@ test("ocr client sends a single call without page params when page count is unkn
 test("ocr client concatenates md_results across batches and tolerates partial failures", async () => {
   // planBatches 已覆盖分页区间计算；这里验证 runOcr 的多批拼接逻辑：
   // 用图片走单批路径无法触发分页，故直接验证 extractText 拼接与部分失败容错。
-  // 多批分页的端到端路径依赖真实 >100 页 PDF，在 planBatches 单测里已确定性覆盖。
+  // 多批分页的端到端路径依赖真实 >MAX_PAGES_PER_BATCH 页 PDF，在 planBatches 单测里已确定性覆盖。
   const { file, cleanup } = await tmpPng();
   try {
     const client = createOcrClient(() => "test-key");

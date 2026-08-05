@@ -12,7 +12,7 @@
  */
 
 import type { AgentAttachment } from "../attachments.js";
-import PDFParser, { type Output as PdfOutput } from "pdf2json";
+import { parsePdfWithTimeout } from "./parsers.js";
 
 /** OCR 运行结果。status 决定 document 工具的状态机走向。 */
 export type OcrOutcome = {
@@ -26,9 +26,18 @@ const GLM_OCR_ENDPOINT = "https://open.bigmodel.cn/api/paas/v4/layout_parsing";
 const GLM_OCR_MODEL = "glm-ocr";
 const MAX_IMAGE_BYTES = 10 * 1024 * 1024;
 const MAX_PDF_BYTES = 50 * 1024 * 1024;
-const OCR_TIMEOUT_MS = 120_000;
-/** 智谱单批最多处理 100 页 PDF，超过自动分批。导出供测试。 */
-export const MAX_PAGES_PER_BATCH = 100;
+/**
+ * 单次 OCR 调用超时。智谱对扫描版大 PDF 的处理耗时随页数增长：实测 81 页约 248s。
+ * 设为 300s（5 分钟）给大文件留足余量，避免 OCR 实际能成功却被超时判失败，
+ * 导致 LLM 误判 OCR 不可用、转而去试 vision/bash 等错误降级路径。
+ */
+const OCR_TIMEOUT_MS = 300_000;
+/**
+ * 智谱单批页数上限。官方支持单批≤100 页，但批次越大单次耗时越长（越易触发服务端慢/超时）。
+ * 实测 20 页约 130s、稳定可成功；调小到 20 页/批：单批更快返回，且某批超时只丢该批、其余可用。
+ * 导出供测试。
+ */
+export const MAX_PAGES_PER_BATCH = 20;
 
 /** 智谱 API 响应体（仅取需要解析的字段）。 */
 type GlmOcrResponse = {
@@ -169,7 +178,9 @@ async function callOnce(
     return { status: "success", text };
   } catch (error) {
     if (controller.signal.aborted && !signal?.aborted) {
-      return { status: "failed", text: "", warning: `智谱 OCR 调用超时（${OCR_TIMEOUT_MS / 1000}s）。` };
+      // 超时多数是服务仍在处理大文件（非真正失败）。用"仍在处理、建议重试"语气，
+      // 而非"失败"，避免 document 工具/LLM 误判 OCR 不可用而走错误降级（vision/bash）。
+      return { status: "failed", text: "", warning: `智谱 OCR 调用超时（${OCR_TIMEOUT_MS / 1000}s）——服务可能仍在处理大文件，可稍后重试 ocr，或缩小页码范围（pages 参数）分批识别。` };
     }
     const message = error instanceof Error ? error.message : String(error);
     return { status: "failed", text: "", warning: `智谱 OCR 调用失败：${message}` };
@@ -191,24 +202,9 @@ function extractText(payload: GlmOcrResponse): string {
   return parts.join("\n\n").trim();
 }
 
-/** 用 pdf2json 解析 PDF 总页数（仅取 Pages.length，不提取文本）。 */
+/** 用 pdf2json 解析 PDF 总页数（仅取 Pages.length，不提取文本）。复用 parsers 的带超时解析。 */
 function countPdfPages(bytes: Buffer, signal?: AbortSignal): Promise<number> {
-  return new Promise<number>((resolve, reject) => {
-    const parser = new PDFParser(null, false);
-    const abort = () => { parser.destroy(); reject(new Error("document parsing aborted")); };
-    signal?.addEventListener("abort", abort, { once: true });
-    parser.once("pdfParser_dataReady", (result: PdfOutput) => {
-      signal?.removeEventListener("abort", abort);
-      parser.destroy();
-      resolve(result.Pages.length);
-    });
-    parser.once("pdfParser_dataError", (error: unknown) => {
-      signal?.removeEventListener("abort", abort);
-      parser.destroy();
-      reject(error instanceof Error ? error : new Error("PDF structure could not be read"));
-    });
-    parser.parseBuffer(bytes, 0);
-  });
+  return parsePdfWithTimeout(bytes, signal).then((output) => output.Pages.length);
 }
 
 /** 把总页数切成每批不超过 100 页的区间（1-based，闭区间）。导出供测试。 */
