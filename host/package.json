@@ -1,6 +1,6 @@
 {
   "name": "@nova-pi/host",
-  "version": "0.2.5",
+  "version": "0.2.6",
   "private": true,
   "type": "module",
   "main": "./dist/main.js",
@@ -14,7 +14,7 @@
     "verify:bundle": "node scripts/verify-standalone-bundle.mjs",
     "start": "node dist/main.js",
     "typecheck": "tsc --noEmit",
-    "test": "tsx --test --test-concurrency=1 src/attachments.test.ts src/attachment-processing.test.ts src/document/document-tool.test.ts src/document/ocr-client.test.ts src/channel-reply-collector.test.ts src/computer-agent.test.ts src/models-manager.test.ts src/skills/runtime.test.ts src/mcp/client.test.ts src/mcp/client.integration.test.ts src/mcp/extension.integration.test.ts src/mcp/payload.test.ts src/mcp/image-artifacts.test.ts src/feishubot/transport.test.ts"
+    "test": "tsx --test --test-concurrency=1 src/stdout-guard.test.ts src/attachments.test.ts src/attachment-processing.test.ts src/document/parsers.test.ts src/document/document-tool.test.ts src/document/ocr-client.test.ts src/channel-reply-collector.test.ts src/computer-agent.test.ts src/model-setup.test.ts src/models-manager.test.ts src/skills/runtime.test.ts src/mcp/client.test.ts src/mcp/client.integration.test.ts src/mcp/extension.integration.test.ts src/mcp/payload.test.ts src/mcp/image-artifacts.test.ts src/feishubot/transport.test.ts"
   },
   "dependencies": {
     "@earendil-works/pi-ai": "^0.82.1",
