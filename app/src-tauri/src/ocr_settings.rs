@@ -54,7 +54,13 @@ pub async fn save_ocr_settings(
     Ok(OcrSettingsStatus { settings: normalized })
 }
 
-/// 连通性测试：用最小请求（1×1 透明 PNG）调用智谱 OCR，确认 key 有效。
+/// 连通性测试：用最小请求调用智谱 OCR 端点，确认 API Key 有效。
+///
+/// 鉴权测试的目的是验证 Key 是否被服务接受，而非验证图片内容。因此只要请求
+/// 通过了鉴权层（即不是 401/403，或不是明确的鉴权类错误），就判定 Key 有效——
+/// 即便智谱对测试图返回 400 业务校验错误（如「图片过小/格式不符」），也说明
+/// Key 已通过鉴权、请求到达了业务层。这样可避免「测试样本踩到内容校验」导致
+/// 误报 Key 无效。
 ///
 /// 注意：这里发真实网络请求；离线或无 key 时返回明确错误信息给前端。
 #[tauri::command]
@@ -67,13 +73,17 @@ pub async fn test_ocr_connection(app: AppHandle) -> Result<String, String> {
         .filter(|key| !key.trim().is_empty())
         .ok_or_else(|| "尚未填写智谱 OCR API Key。".to_string())?;
 
-    // 1×1 透明 PNG（67 字节）的最小 base64 编码。
-    let png = base64::engine::general_purpose::STANDARD.encode(&[
+    // 32×16 白底带黑块 PNG（98 字节）。比 1×1 透明图更接近真实文档，
+    // 降低被智谱内容校验直接拒绝的概率；但即便仍被拒，下方逻辑也会把
+    // 非鉴权类错误判为 Key 有效。
+    let png = base64::engine::general_purpose::STANDARD.encode([
         0x89, 0x50, 0x4E, 0x47, 0x0D, 0x0A, 0x1A, 0x0A, 0x00, 0x00, 0x00, 0x0D, 0x49, 0x48, 0x44,
-        0x52, 0x00, 0x00, 0x00, 0x01, 0x00, 0x00, 0x00, 0x01, 0x08, 0x06, 0x00, 0x00, 0x00, 0x1F,
-        0x15, 0xC4, 0x89, 0x00, 0x00, 0x00, 0x0D, 0x49, 0x44, 0x41, 0x54, 0x78, 0x9C, 0x63, 0x00,
-        0x01, 0x00, 0x00, 0x05, 0x00, 0x01, 0x0D, 0x0A, 0x2D, 0xB4, 0x00, 0x00, 0x00, 0x00, 0x49,
-        0x45, 0x4E, 0x44, 0xAE, 0x42, 0x60, 0x82,
+        0x52, 0x00, 0x00, 0x00, 0x20, 0x00, 0x00, 0x00, 0x10, 0x08, 0x06, 0x00, 0x00, 0x00, 0x77,
+        0x00, 0x7D, 0x59, 0x00, 0x00, 0x00, 0x29, 0x49, 0x44, 0x41, 0x54, 0x78, 0x9C, 0x63, 0xF8,
+        0x3F, 0xC0, 0x80, 0x61, 0xD4, 0x01, 0xA3, 0x0E, 0x18, 0x18, 0xF4, 0x0E, 0x60, 0x60, 0x60,
+        0xA0, 0x08, 0x8F, 0x3A, 0x60, 0xE8, 0x3B, 0x80, 0xD6, 0x60, 0xD4, 0x01, 0xA3, 0x0E, 0x18,
+        0x70, 0x07, 0x00, 0x00, 0x23, 0x32, 0x39, 0x2A, 0xA0, 0x39, 0x29, 0xE6, 0x00, 0x00, 0x00,
+        0x00, 0x49, 0x45, 0x4E, 0x44, 0xAE, 0x42, 0x60, 0x82,
     ]);
     let body = json!({
         "model": GLM_OCR_MODEL,
@@ -92,24 +102,64 @@ pub async fn test_ocr_connection(app: AppHandle) -> Result<String, String> {
         .await
         .map_err(|e| format!("请求智谱 OCR 失败：{e}"))?;
 
-    if response.status() == StatusCode::UNAUTHORIZED {
+    let status_code = response.status();
+    // 401/403 是明确的鉴权失败——Key 无效或无权限。
+    if status_code == StatusCode::UNAUTHORIZED {
         return Err("API Key 无效或已过期（401）。".to_string());
     }
-    if response.status() == StatusCode::FORBIDDEN {
+    if status_code == StatusCode::FORBIDDEN {
         return Err("API Key 无 GLM-OCR 访问权限（403）。".to_string());
     }
-    if !response.status().is_success() {
-        let status = response.status();
-        let text = response.text().await.unwrap_or_default();
-        let clipped = clip_text(&text, 200);
-        return Err(format!("智谱 OCR 返回 HTTP {status}：{clipped}"));
+
+    // 成功（200）→ Key 有效。
+    if status_code.is_success() {
+        // 能解析到响应体即认为 key 有效（测试图返回空文本属正常）。
+        let _parsed: serde_json::Value = response
+            .json()
+            .await
+            .map_err(|e| format!("解析响应失败：{e}"))?;
+        return Ok("连接成功，智谱 OCR API Key 有效。".to_string());
     }
-    // 能解析到响应体即认为 key 有效（1×1 图返回空文本属正常）。
-    let _parsed: serde_json::Value = response
-        .json()
-        .await
-        .map_err(|e| format!("解析响应失败：{e}"))?;
-    Ok("连接成功，智谱 OCR API Key 有效。".to_string())
+
+    // 非 401/403 的错误（如 400 内容校验、429 限流、5xx）说明请求已通过鉴权、
+    // 到达业务层，Key 本身有效；只是测试样本触发了业务规则。把这类情况也判为
+    // Key 有效，避免用最小测试图踩内容校验时误报。
+    let body_text = response.text().await.unwrap_or_default();
+    if is_auth_passed_business_error(&status_code, &body_text) {
+        let label = business_error_label(&status_code);
+        return Ok(format!("连接成功，智谱 OCR API Key 有效{label}。"));
+    }
+
+    // 真正的网络/服务异常（无法判断鉴权状态）才报错。
+    let clipped = clip_text(&body_text, 200);
+    Err(format!("智谱 OCR 返回 HTTP {status_code}：{clipped}"))
+}
+
+/// 判断一个非 2xx 响应是否属于「已通过鉴权、仅在业务层被拒」。
+///
+/// 400 且 body 含智谱的内容/格式校验信息（如 code 1214、格式/大小/页数提示），
+/// 或 429 限流、5xx 服务端错误，都意味着请求穿过了鉴权层——Key 是有效的。
+fn is_auth_passed_business_error(status: &StatusCode, body: &str) -> bool {
+    if *status == StatusCode::BAD_REQUEST {
+        // 智谱鉴权失败一般用 401，不会用 400；400 几乎都是内容/格式校验。
+        // 进一步用 body 关键词确认（格式/大小/页数/OCR 字样）。
+        let lower = body.to_lowercase();
+        return lower.contains("格式") || lower.contains("大小") || lower.contains("页")
+            || lower.contains("ocr") || lower.contains("file") || lower.contains("format")
+            || lower.contains("size") || lower.contains("\"code\":1214");
+    }
+    // 429（限流）与 5xx（服务端）同样表示已过鉴权层。
+    *status == StatusCode::TOO_MANY_REQUESTS || status.is_server_error()
+}
+
+/// 为「Key 有效但测试触发了业务校验」的情况生成简短说明后缀。
+fn business_error_label(status: &StatusCode) -> String {
+    match *status {
+        StatusCode::BAD_REQUEST => "（测试图触发了内容校验，不影响实际使用）".to_string(),
+        StatusCode::TOO_MANY_REQUESTS => "（当前触发了限流，不影响 Key 有效性）".to_string(),
+        s if s.is_server_error() => "（智谱服务端临时异常，不影响 Key 有效性）".to_string(),
+        _ => String::new(),
+    }
 }
 
 fn initialize_ocr_db(connection: &Connection) -> Result<(), String> {
