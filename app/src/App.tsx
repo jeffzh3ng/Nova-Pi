@@ -575,8 +575,11 @@ export default function App() {
   const busyRef = useRef(false);
   // busy 安全超时：agent_settled 正常会清 busy，但若 sidecar 崩溃/事件流静默中断，
   // 这里兜底防止 UI 永久卡死。key = `${runId}`。
+  // 设为 8 分钟：需覆盖长工具调用（智谱 OCR 81 页扫描件实测 ~4 分钟，加 read 超时与
+  // LLM 总结可达 5 分钟以上）。tool_execution_start 会重置本计时器给长工具续命，
+  // 故真正的崩溃仍能在"最后一次工具开始后 8 分钟"被兜底清理。
   const busySafetyTimersRef = useRef<Map<string, ReturnType<typeof setTimeout>>>(new Map());
-  const BUSY_SAFETY_TIMEOUT_MS = 5 * 60 * 1000;
+  const BUSY_SAFETY_TIMEOUT_MS = 8 * 60 * 1000;
 
   // conversationId ↔ pi sessionId 映射。pi 的 AgentSession 在 host 内部按 sessionId 管理，
   // 前端只持有这个映射，发 prompt 时把 sessionId 一起带给 host。
@@ -2179,6 +2182,14 @@ export default function App() {
             },
             "running",
           );
+          // 长工具调用（OCR/vision/大文件）可能持续数分钟且期间无事件回流。
+          // 此时 busy safety timeout 会在 5 分钟后误判"静默中断"而提前清掉 busy/running，
+          // 导致 UI 显示已完成、loading 消失，但 agent 实际仍在跑。每次工具开始时
+          // 重置当前 run 的安全超时，给长工具续命；真正的 sidecar 崩溃仍由"最后一次
+          // tool_execution_start 后 5 分钟无 settled"兜底。
+          if (activeRunIdRef.current && busyRef.current) {
+            scheduleBusySafetyTimeout(activeRunIdRef.current, conversationId);
+          }
           break;
         }
         case "tool_execution_update": {
@@ -2525,7 +2536,7 @@ export default function App() {
       // 正常情况下 pi 的 agent_settled 事件负责清理 running/busy（见 subscribePiEvents）。
       // 但 agent loop 内部异步异常（LLM 网络错误、customTool 抛错）可能不发 agent_settled/error，
       // 此时 sendRpc 已成功返回但事件流静默中断。为防止 UI 永久卡死，加一个安全超时：
-      // 若 5 分钟后该 run 仍在跑，强制清理。
+      // 若 BUSY_SAFETY_TIMEOUT_MS 后该 run 仍在跑，强制清理。
       const runIdAtFinally = runId;
       const conversationIdAtFinally = conversationId;
       scheduleBusySafetyTimeout(runIdAtFinally, conversationIdAtFinally);
@@ -2732,7 +2743,7 @@ export default function App() {
     fileAttachmentContextsRef.current[conversationId] = [...previous, ...uploaded];
     setBusy(false);
     await submitPrompt({
-      request: "请结合当前对话分析这些附件所对应的用户目的，并自主决定下一步处理。需要外部能力时，先发现并调用当前数字员工绑定的 MCP 服务；如果目的不明确，请先提出最少量的澄清问题。",
+      request: "用户刚刚上传了附件，但还没有说明要做什么。请判断：如果用户在本轮或之前的消息里已经明确表达了对这些附件的诉求（例如「分析/总结/提取/看一下/评估/研判/翻译/对比」等），就按诉求处理；否则**禁止读取、分析附件或调用 document/mcp 等任何处理工具**，只用一句话询问用户「您希望我对这份材料做什么？」并等待回复。不要主动猜测用户意图或先行读取附件。",
       skipUserMessage: true,
       conversationId,
     });
