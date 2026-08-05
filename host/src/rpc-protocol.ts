@@ -53,6 +53,8 @@ export type RpcCommand =
   | { id?: string; type: "mcp_call"; serviceId: string; toolName: string; args: Record<string, unknown>; timeoutSecs?: number }
   | { id?: string; type: "cache_remote_images"; conversationId: string; urls: string[]; label?: string }
   | { id?: string; type: "cache_sandbox_images"; conversationId: string; references: string[] }
+  // 智谱 OCR API Key 同步（null = 禁用内置 OCR，document 工具自动降级到 vision）
+  | { id?: string; type: "configure_ocr"; apiKey: string | null }
   // 技能
   | { id?: string; type: "list_skills" }
   | { id?: string; type: "reload_skills" }

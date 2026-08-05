@@ -511,6 +511,10 @@ fn start_sidecar_internal(app: &AppHandle, reset_watchdog_failures: bool) -> Res
                 &format!("initial MCP sync failed: {error}"),
             );
         }
+        // 同步智谱 OCR API Key 给新进程（watchdog 重启时 Node 内存清空，需重推）。
+        if let Err(error) = crate::sync_ocr_settings_to_sidecar(&app_for_sync).await {
+            eprintln!("[sidecar] 启动后同步 OCR 配置失败：{error}");
+        }
     });
 
     // spawn 成功：清零 watchdog 失败计数（无论本次是首次启动还是重启）。

@@ -61,6 +61,25 @@ import { TelegramBotManager } from "./telegrambot/manager.js";
 import type { TelegramConfig } from "./telegrambot/types.js";
 import { FeishuBotManager } from "./feishubot/manager.js";
 import { normalizeFeishuConfig, type FeishuConfig } from "./feishubot/types.js";
+import { mkdtemp, rm, writeFile } from "node:fs/promises";
+import { tmpdir } from "node:os";
+import { parseStructuredDocument } from "./document/parsers.js";
+
+if (process.argv.includes("--verify-document-pdf")) {
+  const smokeRoot = await mkdtemp(join(tmpdir(), "nova-pi-document-smoke-"));
+  try {
+    const stream = "BT /F1 12 Tf 72 720 Td (isolated PDF text) Tj ET";
+    const objects = ["<< /Type /Catalog /Pages 2 0 R >>", "<< /Type /Pages /Kids [3 0 R] /Count 1 >>", "<< /Type /Page /Parent 2 0 R /MediaBox [0 0 612 792] /Resources << /Font << /F1 5 0 R >> >> /Contents 4 0 R >>", `<< /Length ${Buffer.byteLength(stream)} >>\nstream\n${stream}\nendstream`, "<< /Type /Font /Subtype /Type1 /BaseFont /Helvetica >>"];
+    let body = "%PDF-1.4\n"; const offsets = [0];
+    objects.forEach((object, index) => { offsets.push(Buffer.byteLength(body)); body += `${index + 1} 0 obj\n${object}\nendobj\n`; });
+    const xref = Buffer.byteLength(body); body += `xref\n0 6\n0000000000 65535 f \n${offsets.slice(1).map((offset) => `${String(offset).padStart(10, "0")} 00000 n \n`).join("")}trailer\n<< /Size 6 /Root 1 0 R >>\nstartxref\n${xref}\n%%EOF\n`;
+    const pdfPath = join(smokeRoot, "smoke.pdf"); await writeFile(pdfPath, body);
+    const parsed = await parseStructuredDocument({ name: "smoke.pdf", path: pdfPath, ext: "pdf" }, {});
+    if (!parsed.blocks[0]?.text.includes("isolated PDF text")) throw new Error("isolated PDF extraction failed");
+    console.log("Standalone document PDF smoke passed.");
+  } finally { await rm(smokeRoot, { recursive: true, force: true }); }
+  process.exit(0);
+}
 
 // ── 初始化 ───────────────────────────────────────────────────────────────────
 
@@ -332,6 +351,12 @@ async function handleCommand(command: RpcCommand): Promise<void> {
       }
       case "get_state": {
         writeResponse(id, true, { status: "ready", nova: pool?.getNovaStatus() });
+        return;
+      }
+      case "configure_ocr": {
+        // Rust 保存/启动时把智谱 OCR API Key 推给 host；null 表示未配置，document 工具自动降级 vision。
+        pool?.setOcrApiKey(command.apiKey);
+        writeResponse(id, true);
         return;
       }
       case "configure_computer_agent": {

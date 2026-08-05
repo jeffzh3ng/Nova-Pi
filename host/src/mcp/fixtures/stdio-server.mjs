@@ -8,7 +8,7 @@ const tools = [
   "parse_pcap_file",
 ].map((name) => ({
   name,
-  description: `Test tool: ${name}`,
+  description: `Test tool: ${name}${name === "analyze_security_alert" ? " OCR" : ""}`,
   inputSchema: {
     type: "object",
     properties: {

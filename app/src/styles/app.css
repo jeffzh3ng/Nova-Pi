@@ -7087,6 +7087,17 @@ label.settings-preference-option > input {
   font-size: 12px;
 }
 
+.ocr-doc-link {
+  margin-left: 4px;
+  color: var(--color-accent);
+  text-decoration: none;
+  white-space: nowrap;
+}
+
+.ocr-doc-link:hover {
+  text-decoration: underline;
+}
+
 .computer-agent-master-toggle {
   display: flex;
   flex: 0 0 286px;

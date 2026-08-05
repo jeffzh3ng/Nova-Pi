@@ -16,6 +16,7 @@ mod files;
 mod llm_settings;
 mod mcp_settings;
 mod message_channels;
+mod ocr_settings;
 mod risk_http;
 mod rpc;
 mod secrets;
@@ -49,6 +50,9 @@ use mcp_settings::{
 use message_channels::{
     delete_message_channel, get_message_channel, list_message_channel_records,
     list_message_channels, save_message_channel,
+};
+use ocr_settings::{
+    get_ocr_settings, save_ocr_settings, test_ocr_connection,
 };
 use risk_http::{download_risk_assessment_matrix_template, download_risk_assessment_result};
 use rpc::{get_sidecar_health, send_rpc};
@@ -239,6 +243,20 @@ pub(crate) async fn sync_mcp_config_to_sidecar(app: &tauri::AppHandle) -> Result
     Ok(())
 }
 
+/// 把智谱 OCR API Key 同步给 sidecar（configure_ocr 命令）。
+///
+/// 保存配置后立即调用；sidecar 启动时也会兜底刷新一次（见 setup）。
+/// key 为 null 表示禁用内置 OCR，document 工具会自动降级到 vision。
+pub(crate) async fn sync_ocr_settings_to_sidecar(app: &tauri::AppHandle) -> Result<(), String> {
+    let settings = ocr_settings::get_ocr_settings(app.clone())?;
+    let command = json!({
+        "type": "configure_ocr",
+        "apiKey": settings.settings.api_key,
+    });
+    let _ = rpc::send_rpc_blocking(app, command).await?;
+    Ok(())
+}
+
 /// 构造注入给 MCP 子进程的环境变量条目（当前只有上传目录）。
 ///
 /// 返回 `serde_json::Map` 以便直接嵌入 `env` 字段；若 app_data_dir 不可解析则返回空 Map，
@@ -404,6 +422,10 @@ pub fn run() {
             reset_model_settings,
             test_model_connection,
             list_token_usage,
+            // 智谱 OCR 文档解析配置
+            get_ocr_settings,
+            save_ocr_settings,
+            test_ocr_connection,
             // 技能
             list_skills,
             list_skill_catalog,

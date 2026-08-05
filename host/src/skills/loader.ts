@@ -19,7 +19,8 @@ import {
 } from "@earendil-works/pi-coding-agent";
 import { createMcpExtension, type McpServiceScope } from "../mcp/extension.js";
 import type { AttachmentRuntime } from "../attachments.js";
-import { createAttachmentExtension } from "../attachment-processing.js";
+import type { DocumentRuntime } from "../document/document-runtime.js";
+import { createDocumentExtension } from "../document/document-tool.js";
 import type { ImageArtifactStore } from "../mcp/image-artifacts.js";
 import {
   filterEnabledSkills,
@@ -65,6 +66,7 @@ export async function createSessionResourceLoader(
   cwd = process.cwd(),
   allowSkills = false,
   attachments?: AttachmentRuntime,
+  documents?: DocumentRuntime,
   imageArtifacts?: ImageArtifactStore,
   channelExtension?: InlineExtension,
 ): Promise<ResourceLoader> {
@@ -95,9 +97,9 @@ export async function createSessionResourceLoader(
       return extras;
     },
     extensionFactories: [
-      ...(attachments ? [createAttachmentExtension(attachments)] : []),
+      ...(documents ? [createDocumentExtension(documents)] : []),
       ...(allowedMcpServices === "all" || allowedMcpServices.length > 0
-        ? [createMcpExtension(allowedMcpServices, attachments, imageArtifacts)]
+        ? [createMcpExtension(allowedMcpServices, attachments, imageArtifacts, documents)]
         : []),
       ...(channelExtension ? [channelExtension] : []),
     ],

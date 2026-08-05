@@ -139,6 +139,12 @@ try {
 
   await rpc({ type: "shutdown" });
   await waitForExit(child);
+  const documentSmoke = spawn(process.execPath, [isolatedEntry, "--verify-document-pdf"], { cwd: isolatedDir, stdio: ["ignore", "pipe", "pipe"], windowsHide: true });
+  let smokeOutput = "";
+  documentSmoke.stdout.setEncoding("utf8"); documentSmoke.stderr.setEncoding("utf8");
+  documentSmoke.stdout.on("data", (chunk) => { smokeOutput += chunk; }); documentSmoke.stderr.on("data", (chunk) => { smokeOutput += chunk; });
+  await new Promise((resolve, reject) => documentSmoke.once("exit", (code) => code === 0 ? resolve(code) : reject(new Error(`standalone document smoke failed: ${smokeOutput}`))));
+  if (!smokeOutput.includes("Standalone document PDF smoke passed.")) throw new Error(`standalone document smoke did not confirm extraction: ${smokeOutput}`);
   console.log("Standalone host bundle verification passed.");
 } finally {
   if (child && child.exitCode === null) {

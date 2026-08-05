@@ -328,6 +328,14 @@ function staysWithin(root: string, candidate: string): boolean {
 export class ImageArtifactStore {
   constructor(private readonly root: string) {}
 
+  async readArtifact(path: string): Promise<Buffer> {
+    const [canonicalRoot, canonicalPath] = await Promise.all([realpath(this.root), realpath(path)]).catch(() => { throw new Error("generated image artifact is unavailable"); });
+    if (!staysWithin(canonicalRoot, canonicalPath)) throw new Error("generated image artifact is outside its controlled store");
+    const info = await stat(canonicalPath);
+    if (!info.isFile() || info.size === 0 || info.size > MAX_IMAGE_BYTES) throw new Error("generated image artifact is invalid");
+    return readFile(canonicalPath);
+  }
+
   async persistFromMcpResult(raw: unknown, label: string, signal?: AbortSignal): Promise<PersistedImageResult> {
     const artifacts: LocalImageArtifact[] = [];
     const errors: string[] = [];

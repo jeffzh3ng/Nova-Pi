@@ -22,7 +22,9 @@ import { writeEvent, type ConversationAttachments } from "./rpc-protocol.js";
 import { createSessionResourceLoader } from "./skills/loader.js";
 import { AttachmentRuntime, type AgentAttachment } from "./attachments.js";
 import { MCP_PROXY_TOOL_NAME } from "./mcp/extension.js";
-import { ATTACHMENT_TOOL_NAME } from "./attachment-processing.js";
+import { DocumentRuntime } from "./document/document-runtime.js";
+import { DOCUMENT_TOOL_NAME } from "./document/document-tool.js";
+import { createOcrClient } from "./document/ocr-client.js";
 import { SEND_FILE_TOOL_NAME } from "./channel-tools.js";
 import { ImageArtifactStore, type PersistedImageResult } from "./mcp/image-artifacts.js";
 import {
@@ -50,6 +52,7 @@ type SessionEntry = {
   humanId: string;
   mcpServiceId?: string;
   attachments: AttachmentRuntime;
+  documents: DocumentRuntime;
   /**
    * 后台会话标记。true 表示不写入 conversationToSession（前端主路由找不到），
    * 也不落 SQLite 历史索引。供微信机器人这类"非用户对话"场景使用。
@@ -68,6 +71,8 @@ export class SessionPool {
   /** conversationId → sessionId（前端按 conversationId 索引） */
   private conversationToSession = new Map<string, string>();
   private modelSettings: HostModelSettings | null = null;
+  /** 智谱 OCR API Key（由 configure_ocr RPC 推送，null=未配置，内置 OCR 自动降级 vision）。 */
+  private ocrApiKey: string | null = null;
   /**
    * usage 事件的自增序号，与 sessionId 组合形成全局唯一 callId（幂等键）。
    * Rust 端按 callId 去重落库，防止 host 重启/事件重放导致 token 统计重复累加。
@@ -130,11 +135,23 @@ export class SessionPool {
       Array.from(this.sessions.values(), async (entry) => {
         try {
           await entry.session.setModel(model);
+          entry.documents.setVisionSupported(model.input.includes("image"));
         } catch (error) {
           console.error(`[session-pool] 切换会话模型失败（sessionId=${entry.sessionId}）：`, error);
         }
       }),
     );
+  }
+
+  /** 接收 Rust 推送的智谱 OCR API Key；影响所有后续 document.ocr 调用。 */
+  setOcrApiKey(apiKey: string | null): void {
+    const trimmed = apiKey?.trim();
+    this.ocrApiKey = trimmed && trimmed.length > 0 ? trimmed : null;
+  }
+
+  private ocrClient() {
+    // 箭头闭包按引用读取 this.ocrApiKey，configure_ocr 后即时生效。
+    return createOcrClient(() => this.ocrApiKey);
   }
 
   async configureComputerAgent(settings: unknown): Promise<ComputerAgentSettings> {
@@ -267,6 +284,7 @@ export class SessionPool {
     const imageArtifacts = new ImageArtifactStore(
       join(this.generatedImageRoot, this.safeConversationSegment(params.conversationId)),
     );
+    const documentRuntime = new DocumentRuntime(attachmentRuntime, model.input.includes("image"), (artifactPath) => imageArtifacts.readArtifact(artifactPath), this.ocrClient());
     const systemPromptWithHistory = this.computerAgentSystemPrompt(
       this.injectHistory(human.systemPrompt, params.resumeMessages),
       computerSetup,
@@ -277,6 +295,7 @@ export class SessionPool {
       computerSetup.cwd,
       computerSetup.allowSkills,
       attachmentRuntime,
+      documentRuntime,
       imageArtifacts,
     );
 
@@ -315,6 +334,7 @@ export class SessionPool {
       humanId: params.humanId,
       mcpServiceId: params.mcpServiceId,
       attachments: attachmentRuntime,
+      documents: documentRuntime,
       status: "idle",
       createdAt: now,
       lastActivityAt: now,
@@ -360,6 +380,7 @@ export class SessionPool {
     const imageArtifacts = new ImageArtifactStore(
       join(this.generatedImageRoot, this.safeConversationSegment(params.conversationId)),
     );
+    const documentRuntime = new DocumentRuntime(attachmentRuntime, model.input.includes("image"), (artifactPath) => imageArtifacts.readArtifact(artifactPath), this.ocrClient());
     const systemPromptWithHistory = this.computerAgentSystemPrompt(
       this.injectHistory(human.systemPrompt, params.resumeMessages),
       computerSetup,
@@ -370,6 +391,7 @@ export class SessionPool {
       computerSetup.cwd,
       computerSetup.allowSkills,
       attachmentRuntime,
+      documentRuntime,
       imageArtifacts,
       params.channelExtension,
     );
@@ -405,6 +427,7 @@ export class SessionPool {
       humanId: params.humanId,
       mcpServiceId: params.mcpServiceId,
       attachments: attachmentRuntime,
+      documents: documentRuntime,
       isBackground: true,
       status: "idle",
       createdAt: now,
@@ -461,14 +484,9 @@ export class SessionPool {
 
     entry.status = "running";
     entry.lastActivityAt = Date.now();
-    let message = await entry.attachments.buildPrompt(params.message, params.attachments);
-    const supportsImages = entry.session.model?.input.includes("image") === true;
-    const images = supportsImages ? await entry.attachments.currentImages() : [];
-    if (images.length > 0) {
-      message = `${message}\n\n当前轮图片已作为视觉输入附加，请直接识别图片内容。`;
-    }
+    const message = await entry.attachments.buildPrompt(params.message, params.attachments);
     try {
-      await entry.session.prompt(message, images.length > 0 ? { images } : undefined);
+      await entry.session.prompt(message);
     } catch (error) {
       entry.status = "idle";
       entry.activeTool = undefined;
@@ -557,7 +575,7 @@ export class SessionPool {
         ...builtInToolNamesForSettings(settings),
         ...customToolNamesForSettings(settings),
         MCP_PROXY_TOOL_NAME,
-        ATTACHMENT_TOOL_NAME,
+        DOCUMENT_TOOL_NAME,
         // 消息渠道后台会话注入的 send_file_to_channel 工具也需显式列入白名单，
         // 否则 computer-agent 的 tools 白名单会把它过滤掉。
         SEND_FILE_TOOL_NAME,

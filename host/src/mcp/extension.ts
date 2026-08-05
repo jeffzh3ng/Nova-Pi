@@ -5,6 +5,7 @@ import { readFile } from "node:fs/promises";
 import type { InlineExtension } from "@earendil-works/pi-coding-agent";
 import { Type } from "typebox";
 import type { AttachmentRuntime, AgentAttachment } from "../attachments.js";
+import type { DocumentRuntime } from "../document/document-runtime.js";
 import {
   extractMcpError,
   extractMcpModelContent,
@@ -36,6 +37,7 @@ type McpProxyDetails = {
   result?: unknown;
   artifacts?: LocalImageArtifact[];
   artifactErrors?: string[];
+  documentPageImageAttachmentIds?: string[];
 };
 
 function stringifyForModel(data: unknown): string {
@@ -238,6 +240,7 @@ export function createMcpExtension(
   scope: McpServiceScope,
   attachments?: AttachmentRuntime,
   imageArtifacts?: ImageArtifactStore,
+  documents?: DocumentRuntime,
 ): InlineExtension {
   return {
     name: "nova-mcp",
@@ -279,7 +282,8 @@ export function createMcpExtension(
           // Never infer an attachment from a broad tool-name/schema heuristic.
           // The model must explicitly reference the user-visible file name so a
           // screenshot cannot silently become a PCAP path or generic data value.
-          const file = input.attachment ? await attachments?.resolve(input.attachment) : undefined;
+          const documentFile = input.attachment ? await documents?.resolve(input.attachment) : undefined;
+          const file = documentFile ?? (input.attachment ? await attachments?.resolve(input.attachment) : undefined);
           let raw: unknown;
           if (
             file
@@ -307,6 +311,9 @@ export function createMcpExtension(
           const persistedImages = imageArtifacts
             ? await imageArtifacts.persistFromMcpResult(raw, entry.tool.name, signal)
             : { artifacts: [], errors: [] };
+          const documentPageImageAttachmentIds = documentFile
+            ? await documents?.registerPdfPageArtifacts(documentFile, persistedImages.artifacts)
+            : [];
           return {
             content: [{ type: "text", text: provenance }, ...modelContent],
             details: {
@@ -315,6 +322,7 @@ export function createMcpExtension(
               result: data,
               artifacts: persistedImages.artifacts,
               artifactErrors: persistedImages.errors,
+              documentPageImageAttachmentIds,
             } as McpProxyDetails,
           };
         },

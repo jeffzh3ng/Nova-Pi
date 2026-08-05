@@ -33,6 +33,7 @@ import { toUserFacingError } from "../services/uiError";
 import { showAppWarning } from "../services/appDialog";
 import { ComputerAgentSettingsPanel } from "./ComputerAgentSettingsPanel";
 import { MessageChannelsPanel } from "./MessageChannelsPanel";
+import { OcrSettingsPanel } from "./OcrSettingsPanel";
 import { TokenActivityCard } from "./TokenActivityCard";
 import {
   DEFAULT_APP_PREFERENCES,
@@ -1103,6 +1104,7 @@ export function SettingsPanel() {
       <ModelSettingsPanel />
       <MessageChannelsPanel />
       <ComputerAgentSettingsPanel />
+      <OcrSettingsPanel />
       <AppBehaviorSettingsPanel />
       <TokenActivityCard />
     </section>

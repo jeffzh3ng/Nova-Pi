@@ -12,6 +12,7 @@ import { createMcpExtension, MCP_PROXY_TOOL_NAME } from "./extension.js";
 import { mcpRegistry } from "./registry.js";
 import type { McpServerConfig } from "../rpc-protocol.js";
 import { AttachmentRuntime } from "../attachments.js";
+import { DocumentRuntime } from "../document/document-runtime.js";
 
 const repositoryRoot = path.basename(process.cwd()).toLowerCase() === "host"
   ? path.dirname(process.cwd())
@@ -53,6 +54,7 @@ test("pi ResourceLoader exposes one lazy MCP proxy instead of every remote tool"
 
     const proxy = mcp.tools.get("mcp")?.definition;
     assert.ok(proxy);
+
     const discovered = await proxy.execute(
       "test-discover",
       { search: "attack" },
@@ -200,11 +202,12 @@ test("MCP attachments are injected only when explicitly referenced", { timeout: 
   const agentDir = mkdtempSync(path.join(tmpdir(), "nova-pi-mcp-attachment-agent-"));
   const uploadRoot = mkdtempSync(path.join(tmpdir(), "nova-pi-mcp-attachment-root-"));
   const filePath = path.join(uploadRoot, "alert.png");
-  writeFileSync(filePath, "fixture image bytes");
+  writeFileSync(filePath, Buffer.from([137, 80, 78, 71, 13, 10, 26, 10]));
   const attachments = new AttachmentRuntime(uploadRoot);
   await attachments.buildPrompt("分析截图", {
     files: [{ name: "alert.png", path: filePath, ext: "png" }],
   });
+  const documents = new DocumentRuntime(attachments);
   const config: McpServerConfig = {
     serviceId: "anysearch-mcp",
     transport: "stdio",
@@ -220,7 +223,7 @@ test("MCP attachments are injected only when explicitly referenced", { timeout: 
     const loader = new DefaultResourceLoader({
       cwd: repositoryRoot,
       agentDir,
-      extensionFactories: [createMcpExtension(["anysearch-mcp"], attachments)],
+      extensionFactories: [createMcpExtension(["anysearch-mcp"], attachments, undefined, documents)],
       noSkills: true,
       noPromptTemplates: true,
       noThemes: true,
@@ -231,6 +234,10 @@ test("MCP attachments are injected only when explicitly referenced", { timeout: 
       .find((item) => item.path === "<inline:nova-mcp>")
       ?.tools.get("mcp")?.definition;
     assert.ok(proxy);
+
+    const documentFile = await documents.resolve("alert.png");
+    assert.ok(documentFile);
+    documents.markNeedsOcr(documentFile);
 
     const implicit = await proxy.execute(
       "test-no-implicit-attachment",
