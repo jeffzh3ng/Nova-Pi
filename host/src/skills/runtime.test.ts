@@ -6,8 +6,10 @@ import test from "node:test";
 import {
   createSkillTools,
   discoverEnabledSkills,
+  formatMcpInventoryForPrompt,
   initSkillRuntime,
 } from "./runtime.js";
+import type { RegisteredMcpTool } from "../mcp/registry.js";
 
 test("Skill runtime honors enable state and restricts reads/execution to the installed package", async () => {
   const root = mkdtempSync(path.join(os.tmpdir(), "nova-skill-runtime-"));
@@ -86,4 +88,83 @@ metadata:
   } finally {
     rmSync(root, { recursive: true, force: true });
   }
+});
+
+function makeTool(
+  overrides: Partial<RegisteredMcpTool["tool"]> & { name: string; serviceId?: string },
+): RegisteredMcpTool {
+  const { serviceId, name, ...rest } = overrides;
+  return {
+    serviceId: serviceId ?? "alert-analysis-mcp",
+    // server 字段不被 formatMcpInventoryForPrompt 读取，测试里置空即可。
+    server: null as never,
+    tool: {
+      name,
+      description: rest.description,
+      title: rest.title,
+      inputSchema: rest.inputSchema ?? { type: "object", properties: {}, required: [] },
+    } as RegisteredMcpTool["tool"],
+  };
+}
+
+test("formatMcpInventoryForPrompt 在空工具/空错误时返回空字符串", () => {
+  assert.equal(formatMcpInventoryForPrompt([], []), "");
+});
+
+test("formatMcpInventoryForPrompt 列出工具、参数与必填标注", () => {
+  const tools = [
+    makeTool({
+      serviceId: "alert-analysis-mcp",
+      name: "analyze_security_alert",
+      description: "Test tool: analyze_security_alert OCR",
+      inputSchema: {
+        type: "object",
+        properties: {
+          alertText: { type: "string" },
+          pcapFilePath: { type: "string" },
+        },
+        required: ["alertText"],
+      },
+    }),
+    makeTool({
+      serviceId: "alert-analysis-mcp",
+      name: "analyze_attack_ip",
+      description: "Test tool: analyze_attack_ip",
+      inputSchema: { type: "object", properties: { ip: { type: "string" } } },
+    }),
+  ];
+  const text = formatMcpInventoryForPrompt(tools, []);
+  assert.match(text, /共 2 个/);
+  // 完整 serviceId/toolName 形式可被 agent 直接复用为 tool 参数。
+  assert.match(text, /alert-analysis-mcp\/analyze_security_alert：Test tool: analyze_security_alert OCR/);
+  // 必填标注 + 类型；未在 required 列表中的 pcapFilePath 不带「必填」。
+  assert.match(text, /alertText\(string,必填\), pcapFilePath\(string\)/);
+  assert.match(text, /analyze_attack_ip：Test tool: analyze_attack_ip/);
+  assert.match(text, /ip\(string\)/);
+});
+
+test("formatMcpInventoryForPrompt 对超长描述进行截断", () => {
+  const longDescription = "描述".repeat(200); // 远超 120 字符
+  const tools = [makeTool({ name: "big_tool", description: longDescription })];
+  const text = formatMcpInventoryForPrompt(tools, []);
+  // 截断发生在第 120 个字符处；正文不应包含完整长描述。
+  assert.doesNotMatch(text, new RegExp(longDescription));
+  // 仍包含工具名。
+  assert.match(text, /alert-analysis-mcp\/big_tool/);
+});
+
+test("formatMcpInventoryForPrompt 把失败服务以重试提示形式拼接", () => {
+  const text = formatMcpInventoryForPrompt([], [
+    { serviceId: "offline-mcp", error: "connection refused\nmore detail" },
+  ]);
+  assert.match(text, /下列服务本次握手超时或失败/);
+  assert.match(text, /offline-mcp：connection refused more detail/);
+});
+
+test("formatMcpInventoryForPrompt 同时呈现就绪工具与失败服务", () => {
+  const tools = [makeTool({ serviceId: "ok-mcp", name: "do_thing", description: "可用的工具" })];
+  const errors = [{ serviceId: "bad-mcp", error: "timeout" }];
+  const text = formatMcpInventoryForPrompt(tools, errors);
+  assert.match(text, /ok-mcp\/do_thing：可用的工具/);
+  assert.match(text, /bad-mcp：timeout/);
 });

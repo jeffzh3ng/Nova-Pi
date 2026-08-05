@@ -69,6 +69,7 @@ export async function createSessionResourceLoader(
   documents?: DocumentRuntime,
   imageArtifacts?: ImageArtifactStore,
   channelExtension?: InlineExtension,
+  mcpInventory?: string,
 ): Promise<ResourceLoader> {
   if (!configuredAgentDir) {
     throw new Error("技能加载器尚未初始化。");
@@ -85,14 +86,14 @@ export async function createSessionResourceLoader(
     },
     appendSystemPromptOverride: (current) => {
       const inventory = allowSkills ? formatSkillInventoryForPrompt(enabledSkills) : "";
-      const extras = inventory ? [...current, inventory] : current;
+      const extras = inventory ? [...current, inventory] : [...current];
+      // 会话创建时 warm-up 得到的 MCP 工具清单：让 agent 首轮直接用完整
+      // serviceId/toolName 调用，绕开 mcp 代理工具的 search 关键词匹配。
+      if (mcpInventory) extras.push(mcpInventory);
       // 消息渠道后台会话注入了 send_file_to_channel 工具，补一句引导提升触发率。
       // 仅当有 channelExtension 时追加，不影响前端会话和非渠道后台会话。
       if (channelExtension) {
-        return [
-          ...extras,
-          "你可以使用 send_file_to_channel 工具向用户发送本地文件（如评估结果、生成的报表等）。当用户索要文件或任务产出需要交付时，先确认文件路径再调用该工具。",
-        ];
+        extras.push("你可以使用 send_file_to_channel 工具向用户发送本地文件（如评估结果、生成的报表等）。当用户索要文件或任务产出需要交付时，先确认文件路径再调用该工具。");
       }
       return extras;
     },

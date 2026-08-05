@@ -20,8 +20,10 @@ import { getDigitalHuman, makeGenericHuman } from "./digital-human.js";
 import { getModelRuntime, resolveModel, applyApiKey, type HostModelSettings } from "./model-setup.js";
 import { writeEvent, type ConversationAttachments } from "./rpc-protocol.js";
 import { createSessionResourceLoader } from "./skills/loader.js";
+import { formatMcpInventoryForPrompt } from "./skills/runtime.js";
 import { AttachmentRuntime, type AgentAttachment } from "./attachments.js";
 import { MCP_PROXY_TOOL_NAME } from "./mcp/extension.js";
+import { mcpRegistry, type RegisteredMcpTool } from "./mcp/registry.js";
 import { DocumentRuntime } from "./document/document-runtime.js";
 import { DOCUMENT_TOOL_NAME } from "./document/document-tool.js";
 import { createOcrClient } from "./document/ocr-client.js";
@@ -248,6 +250,46 @@ export class SessionPool {
     return { ok: true, message: `已释放会话 ${conversationId}，下次对话会重新创建。` };
   }
 
+  /** 会话创建时 MCP warm-up 的整体超时上限（握手 + tools/list）。 */
+  private static readonly MCP_WARMUP_TIMEOUT_MS = 8_000;
+
+  /**
+   * 会话创建时预连接该员工允许的 MCP 服务并拉取 tools/list，作为「首屏」工具清单
+   * 注入 system prompt。这样 agent 第一轮就能用完整 `serviceId/toolName` 直接调用，
+   * 绕开 mcp 代理工具的 search 关键词匹配（关键词猜不中时首次发现会返回空）。
+   *
+   * warm-up 只是一个会话创建时刻的快照：8s 内连上的进清单，超时/失败的服务跳过
+   * （不阻塞会话创建，仍可经 mcp({search}) 懒发现）。Nova 的 all 范围 late-binding
+   * 行为不变——discover 每次仍重算 all→当前已启用列表，会话后才启用的服务靠 search 兜底。
+   */
+  private async warmupMcpTools(
+    humanId: string,
+    mcpServiceId: string | undefined,
+  ): Promise<{ tools: RegisteredMcpTool[]; errors: Array<{ serviceId: string; error: string }> }> {
+    const human = getDigitalHuman(humanId) ?? makeGenericHuman(humanId, mcpServiceId);
+    const allowedServiceIds = human.allowedMcpServices === "all"
+      ? mcpRegistry.listConfiguredServiceIds()
+      : [...human.allowedMcpServices];
+    if (allowedServiceIds.length === 0) {
+      return { tools: [], errors: [] };
+    }
+
+    const discover = mcpRegistry.discoverTools(allowedServiceIds);
+    const empty: { tools: RegisteredMcpTool[]; errors: Array<{ serviceId: string; error: string }> } = {
+      tools: [],
+      errors: allowedServiceIds.map((serviceId) => ({
+        serviceId,
+        error: `warm-up 超时（${SessionPool.MCP_WARMUP_TIMEOUT_MS / 1000}s）`,
+      })),
+    };
+    return await Promise.race([
+      discover,
+      new Promise<typeof empty>((resolve) => {
+        setTimeout(() => resolve(empty), SessionPool.MCP_WARMUP_TIMEOUT_MS);
+      }),
+    ]);
+  }
+
   /** 创建新会话。返回 sessionId（供前端后续 prompt/abort 引用）。 */
   async createSession(params: {
     humanId: string;
@@ -289,6 +331,11 @@ export class SessionPool {
       this.injectHistory(human.systemPrompt, params.resumeMessages),
       computerSetup,
     );
+    // 预连接该员工允许的 MCP 服务，把已就绪工具作为「首屏」清单注入 system prompt，
+    // 让 agent 第一轮直接用 serviceId/toolName 调用，无需先 search。超时/失败的服务
+    // 跳过，仍可经 mcp({search}) 懒发现。
+    const mcpWarmup = await this.warmupMcpTools(params.humanId, params.mcpServiceId);
+    const mcpInventory = formatMcpInventoryForPrompt(mcpWarmup.tools, mcpWarmup.errors);
     const sessionResourceLoader = await createSessionResourceLoader(
       systemPromptWithHistory,
       human.allowedMcpServices,
@@ -297,6 +344,8 @@ export class SessionPool {
       attachmentRuntime,
       documentRuntime,
       imageArtifacts,
+      undefined,
+      mcpInventory,
     );
 
     const sessionId = `pi-${params.conversationId}-${Date.now().toString(36)}`;
@@ -385,6 +434,8 @@ export class SessionPool {
       this.injectHistory(human.systemPrompt, params.resumeMessages),
       computerSetup,
     );
+    const mcpWarmup = await this.warmupMcpTools(params.humanId, params.mcpServiceId);
+    const mcpInventory = formatMcpInventoryForPrompt(mcpWarmup.tools, mcpWarmup.errors);
     const sessionResourceLoader = await createSessionResourceLoader(
       systemPromptWithHistory,
       human.allowedMcpServices,
@@ -394,6 +445,7 @@ export class SessionPool {
       documentRuntime,
       imageArtifacts,
       params.channelExtension,
+      mcpInventory,
     );
 
     const sessionId = `bg-${params.conversationId}-${Date.now().toString(36)}`;

@@ -23,6 +23,7 @@ import {
   type ToolDefinition,
 } from "@earendil-works/pi-coding-agent";
 import { Type } from "typebox";
+import type { RegisteredMcpTool } from "../mcp/registry.js";
 
 const execFileAsync = promisify(execFile);
 const MAX_SKILL_FILE_BYTES = 256 * 1024;
@@ -662,6 +663,71 @@ export function formatSkillInventoryForPrompt(skills: Skill[]): string {
   ];
   for (const skill of skills) {
     lines.push(`- ${skill.name}：${skill.description}`);
+  }
+  return lines.join("\n");
+}
+
+/** 工具描述在清单中保留的最大字符数，避免过长描述膨胀 system prompt。 */
+const MCP_INVENTORY_DESC_MAX_CHARS = 120;
+
+/** 把工具 inputSchema 的属性压缩成 "name(type,必填)" 片段列表。 */
+function summarizeToolParams(entry: RegisteredMcpTool): string {
+  const schema = entry.tool.inputSchema as
+    | { properties?: Record<string, unknown>; required?: unknown }
+    | undefined;
+  const properties = schema?.properties;
+  if (!properties || typeof properties !== "object") return "";
+  const requiredNames = new Set(
+    Array.isArray(schema?.required)
+      ? (schema!.required as unknown[]).filter((item): item is string => typeof item === "string")
+      : [],
+  );
+  const parts: string[] = [];
+  for (const [name, descriptor] of Object.entries(properties)) {
+    const type = (descriptor as { type?: unknown })?.type;
+    const typeText = Array.isArray(type) ? type.join("|") : typeof type === "string" ? type : "any";
+    parts.push(requiredNames.has(name) ? `${name}(${typeText},必填)` : `${name}(${typeText})`);
+  }
+  return parts.join(", ");
+}
+
+/**
+ * 把会话创建时 warm-up 得到的 MCP 工具清单格式化为 system prompt 附录。
+ *
+ * 与 {@link formatSkillInventoryForPrompt} 平行：清单内的工具在会话起始就已完成
+ * 握手与 tools/list，可直接用完整 `serviceId/toolName` 调用，绕开 mcp 代理工具的
+ * search 关键词匹配。失败的连接以附注形式提示 agent 用 mcp({search}) 重试。
+ */
+export function formatMcpInventoryForPrompt(
+  tools: RegisteredMcpTool[],
+  errors: Array<{ serviceId: string; error: string }>,
+): string {
+  if (tools.length === 0 && errors.length === 0) return "";
+  const lines: string[] = [];
+  if (tools.length > 0) {
+    lines.push(
+      `【当前会话已就绪的 MCP 工具】（共 ${tools.length} 个，直接用 tool:"serviceId/toolName" 调用，无需先 search 发现）`,
+    );
+    for (const entry of tools) {
+      const description = (entry.tool.description || entry.tool.title || "").slice(0, MCP_INVENTORY_DESC_MAX_CHARS);
+      lines.push(`- ${entry.serviceId}/${entry.tool.name}：${description}`);
+      const params = summarizeToolParams(entry);
+      if (params) lines.push(`    参数：${params}`);
+    }
+    lines.push("");
+    lines.push("提示：");
+    lines.push("- 上述工具在会话创建时已就绪，调用时用完整 serviceId/toolName 作为 mcp 的 tool 参数即可。");
+    lines.push("- 若需使用清单外的新服务（例如会话后才启用的 MCP），用 mcp({search:\"关键词\"}) 重新发现。");
+  }
+  if (errors.length > 0) {
+    if (tools.length === 0) lines.push("【当前会话的 MCP 服务】");
+    lines.push("");
+    lines.push("下列服务本次握手超时或失败，暂不在清单内；如需调用请先用 mcp({search}) 重新发现：");
+    for (const item of errors) {
+      // 截断错误细节，避免把底层连接日志灌进 system prompt。
+      const brief = item.error.replace(/\s+/g, " ").trim().slice(0, 160);
+      lines.push(`- ${item.serviceId}：${brief}`);
+    }
   }
   return lines.join("\n");
 }
