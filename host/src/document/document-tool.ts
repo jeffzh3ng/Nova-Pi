@@ -41,7 +41,12 @@ export function createDocumentExtension(documents: DocumentRuntime): InlineExten
       pi.registerTool({
         name: DOCUMENT_TOOL_NAME,
         label: "会话文档",
-        description: "唯一的受控会话文档工具。按顺序进行结构化读取、内置 OCR（智谱 GLM-OCR）、视觉读取。图片/扫描件自动走内置 OCR；未配置 key 或 OCR 无文本时降级到 vision。不得猜测路径或跳过阶段。",
+        description: [
+          "唯一的受控会话文档工具。按顺序进行结构化读取、内置 OCR（智谱 GLM-OCR）、视觉读取。图片/扫描件自动走内置 OCR；未配置 key 或 OCR 无文本时降级到 vision。不得猜测路径或跳过阶段。",
+          "",
+          "前置条件（必须满足才能调用本工具）：用户当前消息必须已明确表达对附件的诉求，例如「分析/总结/提取/看一下/翻译/对比/评估/读取」等动词并指向该附件。",
+          "若用户只上传了文件却没说明要做什么（例如消息仅是「已上传附件：xxx」这类陈述），禁止调用本工具——必须先用一句话询问用户需要做什么并等待回复。",
+        ].join("\n"),
         parameters: Type.Object({
           action: Type.Union([
             Type.Literal("list"), Type.Literal("read"), Type.Literal("ocr"), Type.Literal("vision"),

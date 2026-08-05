@@ -4,6 +4,16 @@
  * pi 内置 DeepSeek provider（api.deepseek.com，openai-completions API），与原 Nova
  * 默认一致。OpenAI 兼容（qwen/local/自定义 baseUrl）通过 setRuntimeApiKey + models.json
  * 覆盖 baseUrl 实现。
+ *
+ * maxTokens：pi 的 agent loop 调模型时不传 options.maxTokens，最终由
+ * pi-ai 的 buildBaseOptions 用 `options?.maxTokens ?? model.maxTokens` 取值
+ *（见 node_modules/@earendil-works/pi-ai/dist/api/simple-options.js）。因此前端
+ * 设置的 max_tokens 必须覆盖到 model.maxTokens 才能生效——否则永远用 models.json
+ * 里的目录值（如 deepseek-v4-pro 的 4096），前端配置被静默忽略。
+ *
+ * temperature：pi-ai 的 buildBaseOptions 用 `options?.temperature`，而 agent loop
+ * 不传该 option、Model 接口也无此字段，故当前架构下前端 temperature 配置无法生效
+ *（属 SDK 限制，非本层可修复）。
  */
 
 import { ModelRuntime } from "@earendil-works/pi-coding-agent";
@@ -43,9 +53,18 @@ export function getModelRuntime(): ModelRuntime {
 export function resolveModel(settings: HostModelSettings): Model<any> {
   const runtime = getModelRuntime();
   const configuredModelId = settings.model || "default";
+  // 把前端配置的 baseUrl / maxTokens 覆盖到解析出的 model 上。
+  // - baseUrl：允许前端指向自建网关或镜像。
+  // - maxTokens：pi 的 agent loop 不传 options.maxTokens，最终由 buildBaseOptions
+  //   取 model.maxTokens（见文件头注释）。不覆盖则前端配置被静默忽略。
+  const applyOverrides = (model: Model<any>): Model<any> => ({
+    ...model,
+    ...(settings.baseUrl ? { baseUrl: settings.baseUrl } : {}),
+    ...(Number.isFinite(settings.maxTokens) && settings.maxTokens > 0 ? { maxTokens: settings.maxTokens } : {}),
+  });
   const runtimeModel = runtime.getModel(settings.provider, configuredModelId);
   if (runtimeModel) {
-    return settings.baseUrl ? { ...runtimeModel, baseUrl: settings.baseUrl } : runtimeModel;
+    return applyOverrides(runtimeModel);
   }
 
   // DeepSeek：pi 内置 provider，按 id 匹配
@@ -53,21 +72,21 @@ export function resolveModel(settings: HostModelSettings): Model<any> {
     const modelId = settings.model || "deepseek-v4-pro";
     // 优先用 runtime 注册的（可能已通过 models.json 自定义 baseUrl）
     const fromRuntime = runtime.getModel("deepseek", modelId);
-    if (fromRuntime) return fromRuntime as Model<any>;
+    if (fromRuntime) return applyOverrides(fromRuntime as Model<any>);
     // 回退到 pi 内置目录（getModel 的 modelId 是字面量联合，这里动态传入需 as any）
     const builtin = getModel("deepseek", modelId as never);
     if (builtin) {
-      return settings.baseUrl ? { ...builtin, baseUrl: settings.baseUrl } : builtin;
+      return applyOverrides(builtin);
     }
     // 未知 deepseek 模型：构造一个最小兼容模型
-    return makeOpenAiCompatModel("deepseek", modelId, settings.baseUrl || "https://api.deepseek.com");
+    return applyOverrides(makeOpenAiCompatModel("deepseek", modelId, settings.baseUrl || "https://api.deepseek.com"));
   }
 
   // qwen / local / openai-compatible：全部按 OpenAI 兼容处理
   const provider = settings.provider || "openai-compatible";
   const modelId = settings.model || "gpt-4.1-mini";
   const baseUrl = settings.baseUrl || defaultBaseUrlForProvider(provider);
-  return makeOpenAiCompatModel(provider, modelId, baseUrl);
+  return applyOverrides(makeOpenAiCompatModel(provider, modelId, baseUrl));
 }
 
 function defaultBaseUrlForProvider(provider: string): string {
