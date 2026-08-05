@@ -322,6 +322,55 @@ export async function sendFileMessage(params: {
 }
 
 /**
+ * 发送图片消息（type=2 IMAGE），微信会直接内联渲染预览，无需下载。
+ * 与 file_item 的差异：用 image_item，mid_size 是密文字节数（不是明文 len）。
+ */
+export async function sendImageMessage(params: {
+  baseUrl: string;
+  token?: string;
+  to: string;
+  clientId: string;
+  contextToken?: string;
+  /** CDN 下载凭证（encrypt_query_param）。 */
+  encryptQueryParam: string;
+  /** AES key，base64 编码。 */
+  aesKeyBase64: string;
+  /** 加密后文件大小（密文字节数，填 image_item.mid_size）。 */
+  ciphertextSize: number;
+}): Promise<void> {
+  await postRequest({
+    baseUrl: params.baseUrl,
+    endpoint: "ilink/bot/sendmessage",
+    body: JSON.stringify({
+      msg: {
+        from_user_id: "",
+        to_user_id: params.to,
+        client_id: params.clientId,
+        message_type: 2, // BOT
+        message_state: 2, // FINISH
+        item_list: [
+          {
+            type: 2, // IMAGE
+            image_item: {
+              media: {
+                encrypt_query_param: params.encryptQueryParam,
+                aes_key: params.aesKeyBase64,
+                encrypt_type: 1,
+              },
+              mid_size: params.ciphertextSize,
+            },
+          },
+        ],
+        context_token: params.contextToken ?? undefined,
+      },
+      base_info: buildBaseInfo(),
+    }),
+    token: params.token,
+    timeoutMs: DEFAULT_API_TIMEOUT_MS,
+  });
+}
+
+/**
  * 获取上传 URL
  */
 export async function getUploadUrl(params: {

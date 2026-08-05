@@ -17,6 +17,7 @@ import {
   getUpdates,
   sendMessage as sendWeixinMessage,
   sendFileMessage,
+  sendImageMessage,
   DEFAULT_BASE_URL,
   CDN_BASE_URL,
 } from "./weixin-api.js";
@@ -79,6 +80,9 @@ function generateClientId(): string {
 
 /** watchdog 超时：单条消息等 AI 回复的最大时长，超时强制推进队列避免死锁。 */
 const WATCHDOG_TIMEOUT_MS = 60_000;
+
+/** 图片扩展名集合：这些文件用 image_item 发送（微信内联预览），其他用 file_item（附件下载）。 */
+const IMAGE_EXTENSIONS = new Set(["jpg", "jpeg", "png", "gif", "webp", "bmp", "tiff", "ico"]);
 
 function getSessionId(): string {
   // Nova 后台 service 固定一个 sessionId 标识排他锁归属，避免每次启动随机。
@@ -393,16 +397,20 @@ export class WeixinBotService {
     const token = this.currentAccount.token;
     const fileName = filePath.split(/[/\\]/).pop() || "file";
 
-    // 1. 上传到 CDN（统一按 FILE 类型，不区分图片/视频）
+    // 按扩展名分流：图片走 image_item（微信内联预览），其他走 file_item（附件下载）
+    const isImage = IMAGE_EXTENSIONS.has(fileName.split(".").pop()?.toLowerCase() ?? "");
+
+    // 1. 上传到 CDN（图片用 media_type=IMAGE，文件用 media_type=FILE）
     const uploaded = await uploadMediaToCdn({
       filePath,
       toUserId: userId,
       baseUrl,
       token,
       cdnBaseUrl: CDN_BASE_URL,
-      mediaType: UploadMediaType.FILE,
-      label: "sendFile",
+      mediaType: isImage ? UploadMediaType.IMAGE : UploadMediaType.FILE,
+      label: isImage ? "sendImage" : "sendFile",
     });
+    const aesKey = Buffer.from(uploaded.aeskeyHex).toString("base64");
 
     // 2. 可选：caption 作为独立文本消息先发（与 openclaw-weixin sendMediaItems 一致）
     if (caption && caption.trim()) {
@@ -416,20 +424,32 @@ export class WeixinBotService {
       });
     }
 
-    // 3. 发送文件消息
-    await sendFileMessage({
-      baseUrl,
-      token,
-      to: userId,
-      clientId: generateClientId(),
-      contextToken,
-      fileName,
-      encryptQueryParam: uploaded.downloadEncryptedQueryParam,
-      // aes_key：与 openclaw-weixin 一致，把 hex 字符串按 UTF-8 编码再转 base64
-      // （不是 Buffer.from(hex, "hex") 解码回原始 16 字节，那样微信端解密会失败）
-      aesKeyBase64: Buffer.from(uploaded.aeskeyHex).toString("base64"),
-      fileSize: uploaded.fileSize,
-    });
+    // 3. 发送消息（图片用 image_item，其他用 file_item）
+    if (isImage) {
+      // image_item.mid_size 是密文字节数（与 file_item.len 用明文字节数不同）
+      await sendImageMessage({
+        baseUrl,
+        token,
+        to: userId,
+        clientId: generateClientId(),
+        contextToken,
+        encryptQueryParam: uploaded.downloadEncryptedQueryParam,
+        aesKeyBase64: aesKey,
+        ciphertextSize: uploaded.fileSizeCiphertext,
+      });
+    } else {
+      await sendFileMessage({
+        baseUrl,
+        token,
+        to: userId,
+        clientId: generateClientId(),
+        contextToken,
+        fileName,
+        encryptQueryParam: uploaded.downloadEncryptedQueryParam,
+        aesKeyBase64: aesKey,
+        fileSize: uploaded.fileSize,
+      });
+    }
     return fileName;
   }
 
