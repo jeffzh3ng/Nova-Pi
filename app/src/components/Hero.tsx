@@ -56,7 +56,7 @@ export function Hero({
   return (
     <section className="hero-section">
       <div className="hero-backdrop" aria-hidden="true">
-        <img src="/assets/digital-human-blueprint.png" alt="" />
+        <img src="/assets/hero-background.webp" alt="" />
       </div>
       <div className="hero-copy">
         <h1>{greetingByHour()}，需要我帮你做点什么？</h1>

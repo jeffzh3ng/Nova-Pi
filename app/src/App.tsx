@@ -1620,11 +1620,13 @@ export default function App() {
     const optimisticUpdatedAt = new Date().toISOString();
     setRecentTasks((items) => {
       const existing = items.find((item) => item.id === snapshot.id);
-      // titleSource 为 auto/manual 时，title 已由 LLM 提炼或用户手改确定，
-      // 后端 save_conversation_snapshot 的 ON CONFLICT 也不会覆盖它。
-      // 此处乐观更新必须同样保留，否则流式 delta 会把 UI 显示的标题盖回成
-      // buildConversationTitle（首条用户消息截断），看起来像自动提炼从未生效。
-      const preserveTitle = !!existing && existing.titleSource !== "pending";
+      // 标题在 LLM 提炼（titleSource → auto）或用户手改（manual）之前必须保持稳定。
+      // 流式 delta 会高频触发本乐观更新，若每次都用 buildConversationTitle 重算标题，
+      // 会与 queueSaveConversationState → upsertRecentSummary 的后端回写异步竞态，
+      // 表现为前几十秒侧栏标题在"首条用户消息"与"后端落库 title"之间来回闪烁。
+      // 与 createdAt 的处理一致：首次用 snapshot.title 推进（"新任务" → 首条消息），
+      // 之后一律保留 existing.title，直到 LLM 提炼/手改改写 titleSource。
+      const preserveTitle = !!existing;
       const optimisticSummary: ConversationSummary = {
         id: snapshot.id,
         title: preserveTitle ? existing!.title : snapshot.title,
@@ -2672,10 +2674,14 @@ export default function App() {
     try {
       const loaded = await loadConversation(task.id);
       if (!isCurrent()) return;
+      // 指纹的 status 必须与自动保存 useEffect 比较时用的口径一致（都按消息推导），
+      // 否则历史会话落库的 status（可能是上次流式保存的脏 "running"）与按消息推导的
+      // status 不等，会触发一次无意义的 save，后端无条件刷新 updated_at，
+      // 表现为"点开昨天的任务，时间变成今天"。
       loadedConversationFingerprintRef.current = {
         id: task.id,
         messageFingerprint: buildMessagesFingerprint(loaded.messages),
-        status: loaded.summary.status,
+        status: resolveConversationStatus(loaded.messages, false),
       };
       rememberConversationMetadata(task.id, {
         agentId: loaded.summary.agentId,
