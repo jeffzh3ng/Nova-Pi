@@ -793,6 +793,17 @@ export default function App() {
     [mcpCatalog],
   );
 
+  // Nova 智能员工对象：仅在启用时存在。既加入 effectiveDigitalHumans（卡片/@ 召唤），
+  // 也作为首页「未选员工」的默认会话目标（见 selectedHuman）。
+  const novaHuman = useMemo<DigitalHuman | undefined>(() => {
+    if (!computerAgentSettings?.enabled) return undefined;
+    return {
+      ...COMPUTER_AGENT_TEMPLATE,
+      name: computerAgentSettings.displayName || COMPUTER_AGENT_TEMPLATE.name,
+      status: "ready",
+    };
+  }, [computerAgentSettings]);
+
   const effectiveDigitalHumans = useMemo(
     () => {
       // 未启用时不显示内置智能员工（首页卡片、侧栏快捷入口、@ 召唤列表均由本数组派生）。
@@ -800,15 +811,9 @@ export default function App() {
         const resolved = resolveMcpStatus(human.status, human.mcpService);
         return { ...human, status: resolved.status, disabledReason: resolved.disabledReason ?? human.disabledReason };
       });
-      if (!computerAgentSettings?.enabled) return mcpHumans;
-      const computerHuman: DigitalHuman = {
-        ...COMPUTER_AGENT_TEMPLATE,
-        name: computerAgentSettings.displayName || COMPUTER_AGENT_TEMPLATE.name,
-        status: "ready",
-      };
-      return [computerHuman, ...mcpHumans];
+      return novaHuman ? [novaHuman, ...mcpHumans] : mcpHumans;
     },
-    [catalogDigitalHumans, computerAgentSettings, mcpAvailability],
+    [catalogDigitalHumans, novaHuman, mcpAvailability],
   );
 
   const effectiveQuickActions = useMemo(
@@ -847,7 +852,7 @@ export default function App() {
   // 1. 侧栏快捷动作选中的员工（直接进专业环境的入口）
   // 2. 输入框 @ 提及的员工（首页和对话内通用）
   // 3. 任务页会话绑定的员工（从 metadata 取，保证 header 名稳定）
-  // 4. 通用助手（首页默认，纯 LLM 对话）
+  // 4. 首页默认：已启用 Nova 时进入 Nova 会话，否则通用助手（纯 LLM 对话）
   // 5. EMPTY_DIGITAL_HUMAN（MCP 目录还在加载）
   const conversationBoundHuman = useMemo(
     () => {
@@ -863,12 +868,13 @@ export default function App() {
       selectedQuickActionHuman
       ?? mentionedHuman
       ?? conversationBoundHuman
+      ?? novaHuman
       ?? GENERAL_CHAT_HUMAN
       ?? EMPTY_DIGITAL_HUMAN,
-    [selectedQuickActionHuman, mentionedHuman, conversationBoundHuman],
+    [selectedQuickActionHuman, mentionedHuman, conversationBoundHuman, novaHuman],
   );
-  // 已选中的「专业数字员工」名（@ 提及或会话绑定），通用助手时为 undefined。
-  // 用于让 PromptComposer 的 placeholder 不再提示「@ 召唤」。
+  // 已选中的「专业数字员工」名（@ 提及、会话绑定、侧栏快捷动作），仅反映「明确选择」。
+  // 首页默认进入 Nova 时不算明确选择，因此保持 undefined，以沿用首页原始默认 placeholder。
   const selectedEmployeeName = useMemo(() => {
     const human = selectedQuickActionHuman ?? mentionedHuman ?? conversationBoundHuman;
     return human?.name;
