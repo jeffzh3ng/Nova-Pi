@@ -760,6 +760,7 @@ export default function App() {
 
   type ModalState =
     | { type: "delete"; task: RecentTask }
+    | { type: "delete-batch"; tasks: RecentTask[] }
     | { type: "archive"; task: RecentTask }
     | { type: "rename"; task: RecentTask }
     | null;
@@ -2949,6 +2950,7 @@ export default function App() {
   };
 
   const handleDeleteTask = (task: RecentTask) => setModal({ type: "delete", task });
+  const handleDeleteTasks = (tasks: RecentTask[]) => setModal({ type: "delete-batch", tasks });
   const handleRenameTask = (task: RecentTask) => setModal({ type: "rename", task });
   const handleArchiveTask = (task: RecentTask) => setModal({ type: "archive", task });
 
@@ -3048,6 +3050,47 @@ export default function App() {
 
   const handleModalConfirm = async (value?: string) => {
     if (!modal) return;
+
+    // 批量删除：独立分支，与单删解耦（单删走下方 task 解构路径）。
+    if (modal.type === "delete-batch") {
+      const targets = modal.tasks;
+      setModal(null);
+      if (targets.length === 0) return;
+      const targetIds = targets.map((item) => item.id);
+      const targetIdSet = new Set(targetIds);
+      // 先逐个停风评、登记黑名单、清理 ref；落库并发执行。
+      const results = await Promise.allSettled(
+        targets.map(async (task) => {
+          await stopPersistedRiskAssessment(task.id, false);
+          deletedConversationIdsRef.current.add(task.id);
+          archivedTaskIdsRef.current.delete(task.id);
+          cleanupConversationRefs(task.id);
+          await deleteConversation(task.id);
+          return task.id;
+        }),
+      );
+      const succeededIds = new Set(
+        results
+          .map((result) => (result.status === "fulfilled" ? result.value : null))
+          .filter((id): id is string => Boolean(id)),
+      );
+      // 失败的项回滚黑名单，使其继续出现在列表中。
+      for (const id of targetIds) {
+        if (!succeededIds.has(id)) deletedConversationIdsRef.current.delete(id);
+      }
+      setRecentTasks((items) => items.filter((item) => !succeededIds.has(item.id)));
+      setArchivedTasks((items) => items.filter((item) => !succeededIds.has(item.id)));
+      if (selectedTaskId && targetIdSet.has(selectedTaskId)) {
+        clearConversationView();
+        setActiveNav("home");
+      }
+      const failedCount = targetIds.length - succeededIds.size;
+      if (failedCount > 0) {
+        console.error(`批量删除：${failedCount} 个任务删除失败`);
+      }
+      return;
+    }
+
     const { type, task } = modal;
     const taskIsArchived = archivedTasks.some((item) => item.id === task.id);
     setModal(null);
@@ -3110,6 +3153,12 @@ export default function App() {
     }
   };
 
+  // 按类型收窄取值，供 ConfirmModal 的 message 使用。
+  const deleteTaskTitle = modal?.type === "delete" ? modal.task.title : "";
+  const batchDeleteCount = modal?.type === "delete-batch" ? modal.tasks.length : 0;
+  const archiveTaskTitle = modal?.type === "archive" ? modal.task.title : "";
+  const renameTaskTitle = modal?.type === "rename" ? modal.task.title : "";
+
   return (
     <div className="app-shell">
       {/* 外部链接守门人：点击走系统浏览器、右键菜单复制链接，兜底任何渲染路径 */}
@@ -3164,6 +3213,7 @@ export default function App() {
             onRenameTask={handleRenameTask}
             onArchiveTask={handleArchiveTask}
             onDeleteTask={handleDeleteTask}
+            onDeleteTasks={handleDeleteTasks}
           />
         ) : (activeNav === "tasks" || (activeNav === "projects" && selectedTaskId)) ? (
           <TaskConversation
@@ -3224,7 +3274,16 @@ export default function App() {
       <ConfirmModal
         open={modal?.type === "delete"}
         title="删除任务"
-        message={`确认删除任务「${modal?.task.title ?? ""}」？此操作不可恢复。`}
+        message={`确认删除任务「${deleteTaskTitle}」？此操作不可恢复。`}
+        confirmLabel="删除"
+        danger
+        onConfirm={handleModalConfirm}
+        onCancel={() => setModal(null)}
+      />
+      <ConfirmModal
+        open={modal?.type === "delete-batch"}
+        title="批量删除任务"
+        message={`确认删除选中的 ${batchDeleteCount} 个任务？此操作不可恢复。`}
         confirmLabel="删除"
         danger
         onConfirm={handleModalConfirm}
@@ -3233,7 +3292,7 @@ export default function App() {
       <ConfirmModal
         open={modal?.type === "archive"}
         title="归档任务"
-        message={`确认归档任务「${modal?.task.title ?? ""}」？归档后可从归档列表恢复。`}
+        message={`确认归档任务「${archiveTaskTitle}」？归档后可从归档列表恢复。`}
         confirmLabel="归档"
         onConfirm={handleModalConfirm}
         onCancel={() => setModal(null)}
@@ -3244,7 +3303,7 @@ export default function App() {
         message="为任务设置新名称："
         mode="input"
         inputLabel="任务名称"
-        inputDefault={modal?.task.title ?? ""}
+        inputDefault={renameTaskTitle}
         confirmLabel="保存"
         onConfirm={handleModalConfirm}
         onCancel={() => setModal(null)}

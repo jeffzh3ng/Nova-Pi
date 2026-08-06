@@ -3,10 +3,13 @@ import type { KeyboardEvent as ReactKeyboardEvent, MouseEvent as ReactMouseEvent
 import {
   Archive,
   ArrowUpDown,
+  Check,
   CheckCircle2,
   CirclePause,
   CirclePlay,
+  ChevronDown,
   ListFilter,
+  Loader2,
   MoreHorizontal,
   Pencil,
   Search,
@@ -34,6 +37,7 @@ type TaskCenterProps = {
   onRenameTask: (task: RecentTask) => void;
   onArchiveTask: (task: RecentTask) => void;
   onDeleteTask: (task: RecentTask) => void;
+  onDeleteTasks: (tasks: RecentTask[]) => Promise<void> | void;
 };
 
 const statusMeta = {
@@ -74,17 +78,31 @@ export function TaskCenter({
   onRenameTask,
   onArchiveTask,
   onDeleteTask,
+  onDeleteTasks,
 }: TaskCenterProps) {
   const [filter, setFilter] = useState<TaskFilter>("all");
   const [query, setQuery] = useState("");
   const [sort, setSort] = useState<TaskSort>("recent");
   const [agentFilter, setAgentFilter] = useState<string>("all");
   const [filterOpen, setFilterOpen] = useState(false);
+  // 多选删除：selectedTaskIds 非空即处于多选模式；bulkDeleting 标记批量删除进行中。
+  const [selectedTaskIds, setSelectedTaskIds] = useState<Set<string>>(new Set());
+  const [bulkDeleting, setBulkDeleting] = useState(false);
+  const selectionMode = selectedTaskIds.size > 0;
   const [draftFilter, setDraftFilter] = useState<TaskFilter>("all");
   const [draftAgentFilter, setDraftAgentFilter] = useState<string>("all");
+  const [sortOpen, setSortOpen] = useState(false);
   const [menuTaskId, setMenuTaskId] = useState<string>();
   const menuRef = useRef<HTMLDivElement>(null);
   const filterRef = useRef<HTMLDivElement>(null);
+  const sortRef = useRef<HTMLDivElement>(null);
+
+  const sortOptions: { id: TaskSort; label: string }[] = [
+    { id: "recent", label: "最近更新" },
+    { id: "oldest", label: "最早更新" },
+    { id: "title", label: "任务名称" },
+  ];
+  const sortLabel = sortOptions.find((item) => item.id === sort)?.label ?? "排序";
 
   useEffect(() => {
     if (!menuTaskId) return;
@@ -110,6 +128,32 @@ export function TaskCenter({
       window.removeEventListener("keydown", closeOnEscape);
     };
   }, [filterOpen]);
+
+  useEffect(() => {
+    if (!sortOpen) return;
+    const close = (event: MouseEvent) => {
+      if (!sortRef.current?.contains(event.target as Node)) setSortOpen(false);
+    };
+    const closeOnEscape = (event: KeyboardEvent) => {
+      if (event.key === "Escape") setSortOpen(false);
+    };
+    window.addEventListener("pointerdown", close);
+    window.addEventListener("keydown", closeOnEscape);
+    return () => {
+      window.removeEventListener("pointerdown", close);
+      window.removeEventListener("keydown", closeOnEscape);
+    };
+  }, [sortOpen]);
+
+  // 多选模式下 Esc 清空选中。删除进行中不响应。
+  useEffect(() => {
+    if (!selectionMode || bulkDeleting) return;
+    const onKey = (event: KeyboardEvent) => {
+      if (event.key === "Escape") setSelectedTaskIds(new Set());
+    };
+    window.addEventListener("keydown", onKey);
+    return () => window.removeEventListener("keydown", onKey);
+  }, [selectionMode, bulkDeleting]);
 
   const counts = useMemo(
     () => ({
@@ -217,11 +261,39 @@ export function TaskCenter({
     onSelectTask(task);
   };
 
+  // 切换某项选中态（多选模式下使用）。
+  const toggleTaskSelection = (taskId: string) => {
+    setSelectedTaskIds((current) => {
+      const next = new Set(current);
+      if (next.has(taskId)) next.delete(taskId);
+      else next.add(taskId);
+      return next;
+    });
+  };
+
+  const handleBulkDelete = async () => {
+    if (bulkDeleting) return;
+    const targets = tasks.filter((task) => selectedTaskIds.has(task.id));
+    if (targets.length === 0) return;
+    setBulkDeleting(true);
+    try {
+      await onDeleteTasks(targets);
+    } finally {
+      setBulkDeleting(false);
+      setSelectedTaskIds(new Set());
+    }
+  };
+
   const handleRowKeyDown = (task: RecentTask) => (event: ReactKeyboardEvent<HTMLDivElement>) => {
     if (event.target !== event.currentTarget) return;
     if (event.key === "Enter" || event.key === " ") {
       event.preventDefault();
-      openTask(task);
+      // 多选模式下 Enter/Space 切换选中，不打开会话。
+      if (selectionMode || event.ctrlKey || event.metaKey) {
+        toggleTaskSelection(task.id);
+      } else {
+        openTask(task);
+      }
     }
   };
 
@@ -266,6 +338,30 @@ export function TaskCenter({
             ))}
           </div>
           <div className="task-center-tools">
+            {selectionMode ? (
+              <div className="task-bulk-bar" role="toolbar" aria-label="批量操作">
+                <button
+                  type="button"
+                  className="task-bulk-delete"
+                  onClick={handleBulkDelete}
+                  disabled={selectedTaskIds.size === 0 || bulkDeleting}
+                >
+                  {bulkDeleting
+                    ? <Loader2 size={14} className="spin" />
+                    : <Trash2 size={14} />}
+                  删除{selectedTaskIds.size > 0 ? ` ${selectedTaskIds.size}` : ""}
+                </button>
+                <button
+                  type="button"
+                  className="task-bulk-cancel"
+                  onClick={() => setSelectedTaskIds(new Set())}
+                  disabled={bulkDeleting}
+                >
+                  <X size={14} />
+                  取消选中
+                </button>
+              </div>
+            ) : null}
             <label className="task-search">
               <Search size={16} />
               <input
@@ -347,14 +443,39 @@ export function TaskCenter({
                 </section>
               ) : null}
             </div>
-            <label className="task-sort-control">
-              <ArrowUpDown size={15} />
-              <select value={sort} aria-label="任务排序" onChange={(event) => setSort(event.target.value as TaskSort)}>
-                <option value="recent">最近更新</option>
-                <option value="oldest">最早更新</option>
-                <option value="title">任务名称</option>
-              </select>
-            </label>
+            <div className="task-sort-control" ref={sortRef}>
+              <button
+                type="button"
+                className={`task-sort-trigger ${sortOpen ? "active" : ""}`}
+                aria-haspopup="listbox"
+                aria-expanded={sortOpen}
+                aria-label="任务排序"
+                onClick={() => setSortOpen((open) => !open)}
+              >
+                <ArrowUpDown size={15} />
+                <span>{sortLabel}</span>
+                <ChevronDown size={13} className="task-sort-caret" />
+              </button>
+              {sortOpen ? (
+                <ul className="task-sort-popover" role="listbox" aria-label="排序方式">
+                  {sortOptions.map((item) => (
+                    <li key={item.id} role="option" aria-selected={sort === item.id}>
+                      <button
+                        type="button"
+                        className={sort === item.id ? "selected" : ""}
+                        onClick={() => {
+                          setSort(item.id);
+                          setSortOpen(false);
+                        }}
+                      >
+                        <span>{item.label}</span>
+                        {sort === item.id ? <Check size={13} /> : null}
+                      </button>
+                    </li>
+                  ))}
+                </ul>
+              ) : null}
+            </div>
           </div>
         </div>
         {activeFilterCount > 0 ? (
@@ -382,7 +503,18 @@ export function TaskCenter({
             <span>{tasks.length === 0 ? "请从首页选择数字员工创建任务。" : "请调整筛选条件或搜索关键词。"}</span>
           </div>
         ) : (
-          <div className="task-center-groups">
+          <div
+            className="task-center-groups"
+            onClick={() => {
+              // 点击列表空白区域（分组标题、网格间隙等非卡片处）退出多选。
+              // 卡片 onClick 已 stopPropagation，不会冒泡到这里；能冒泡到容器的都是空白。
+              // 注意：必须用 onClick 而非 onPointerDown——pointerdown 先于 click 触发，
+              // 会在卡片 click 处理前就把选中清空，导致多选失效。
+              if (selectionMode && !bulkDeleting) {
+                setSelectedTaskIds(new Set());
+              }
+            }}
+          >
             {taskGroups.map((group) => (
               <section className="task-center-group" key={group.id}>
                 <header className="task-center-group-header">
@@ -395,13 +527,26 @@ export function TaskCenter({
                     const meta = statusMeta[task.status];
                     const StatusIcon = meta.icon;
                     const menuOpen = menuTaskId === task.id;
+                    const isSelected = selectedTaskIds.has(task.id);
+                    const handleRowClick = (event: ReactMouseEvent<HTMLDivElement>) => {
+                      // 删除进行中不响应任何点击。
+                      if (bulkDeleting) return;
+                      // Ctrl/⌘+点击 或 已在多选模式 → 切换选中，不打开会话。
+                      if (event.ctrlKey || event.metaKey || selectionMode) {
+                        event.stopPropagation();
+                        toggleTaskSelection(task.id);
+                        return;
+                      }
+                      openTask(task);
+                    };
                     return (
                       <div
-                        className={`task-center-row ${task.status}`}
+                        className={`task-center-row ${task.status}${isSelected ? " selected" : ""}`}
                         key={task.id}
                         role="button"
+                        aria-pressed={selectionMode ? isSelected : undefined}
                         tabIndex={0}
-                        onClick={() => openTask(task)}
+                        onClick={handleRowClick}
                         onKeyDown={handleRowKeyDown(task)}
                         onContextMenu={handleRowContextMenu(task)}
                       >

@@ -592,6 +592,76 @@ body.is-resizing-sidebar * {
   gap: 8px;
 }
 
+/* 多选模式批量操作条：与筛选/排序按钮同款轻量风格。 */
+.task-bulk-bar {
+  display: inline-flex;
+  align-items: center;
+  gap: 7px;
+}
+
+.task-bulk-bar button {
+  display: inline-flex;
+  align-items: center;
+  gap: 7px;
+  height: 36px;
+  padding: 0 11px;
+  color: #58687a;
+  background: #ffffff;
+  border: 1px solid var(--color-line);
+  border-radius: 8px;
+  font-size: 12px;
+  font-weight: 700;
+  cursor: pointer;
+  transition: color 140ms ease, background-color 140ms ease, border-color 140ms ease, opacity 140ms ease;
+}
+
+.task-bulk-bar .spin {
+  animation: task-bulk-spin 0.9s linear infinite;
+}
+
+@keyframes task-bulk-spin {
+  to {
+    transform: rotate(360deg);
+  }
+}
+
+/* 删除按钮：淡红字 + 淡红底（默认即原 hover 档），hover 再加深。 */
+/* 带 .task-bulk-bar 前缀提升优先级，压过通用 .task-bulk-bar button 规则。 */
+.task-bulk-bar .task-bulk-delete {
+  color: #b53236;
+  border-color: #e7aeb1;
+  background: #fbeef0;
+}
+
+.task-bulk-bar .task-bulk-delete svg {
+  color: inherit;
+}
+
+.task-bulk-bar .task-bulk-delete:hover:not(:disabled) {
+  color: #9c2b2f;
+  background: #f7e3e6;
+  border-color: #db8f93;
+}
+
+.task-bulk-bar .task-bulk-delete:disabled {
+  color: #c9a2a4;
+  background: #fafafa;
+  border-color: var(--color-line);
+  cursor: not-allowed;
+  opacity: 0.7;
+}
+
+.task-bulk-bar .task-bulk-cancel:hover:not(:disabled) {
+  color: #14766f;
+  background: #f4fbf9;
+  border-color: #99cec6;
+}
+
+.task-bulk-bar .task-bulk-cancel:disabled {
+  cursor: not-allowed;
+  opacity: 0.6;
+}
+
 .task-filter-group button {
   position: relative;
   display: inline-flex;
@@ -666,8 +736,7 @@ body.is-resizing-sidebar * {
   position: relative;
 }
 
-.task-filter-trigger,
-.task-sort-control {
+.task-filter-trigger {
   display: inline-flex;
   align-items: center;
   gap: 7px;
@@ -687,7 +756,9 @@ body.is-resizing-sidebar * {
 .task-filter-trigger:hover,
 .task-filter-trigger.active,
 .task-filter-trigger[aria-expanded="true"],
-.task-sort-control:hover {
+.task-sort-trigger:hover,
+.task-sort-trigger.active,
+.task-sort-trigger[aria-expanded="true"] {
   color: #14766f;
   background: #f4fbf9;
   border-color: #99cec6;
@@ -707,24 +778,94 @@ body.is-resizing-sidebar * {
 }
 
 .task-sort-control {
-  padding-left: 10px;
+  position: relative;
 }
 
-.task-sort-control select {
-  height: 34px;
-  padding: 0 30px 0 0;
-  color: inherit;
-  background-color: transparent;
-  background-image: url("data:image/svg+xml;utf8,<svg xmlns='http://www.w3.org/2000/svg' width='14' height='14' viewBox='0 0 24 24' fill='none' stroke='%237b8798' stroke-width='2.2' stroke-linecap='round' stroke-linejoin='round'><polyline points='6 9 12 15 18 9'/></svg>");
-  background-repeat: no-repeat;
-  background-position: right 10px center;
-  border: 0;
-  outline: 0;
+.task-sort-trigger {
+  display: inline-flex;
+  align-items: center;
+  gap: 7px;
+  height: 36px;
+  padding: 0 11px;
+  color: #58687a;
+  background: #ffffff;
+  border: 1px solid var(--color-line);
+  border-radius: 8px;
   font-size: 12px;
   font-weight: 700;
-  appearance: none;
-  -webkit-appearance: none;
   cursor: pointer;
+  transition: color 0.15s ease, background-color 0.15s ease, border-color 0.15s ease;
+}
+
+.task-sort-trigger > span {
+  max-width: 120px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.task-sort-caret {
+  color: #7b8798;
+  transition: transform 0.18s ease, color 0.15s ease;
+}
+
+.task-sort-trigger.active .task-sort-caret,
+.task-sort-trigger[aria-expanded="true"] .task-sort-caret {
+  transform: rotate(180deg);
+}
+
+.task-sort-popover {
+  position: absolute;
+  right: 0;
+  top: calc(100% + 8px);
+  z-index: 32;
+  display: grid;
+  gap: 2px;
+  min-width: 168px;
+  margin: 0;
+  padding: 6px;
+  list-style: none;
+  color: #344054;
+  background: #ffffff;
+  border: 1px solid #d8e3e7;
+  border-radius: 11px;
+  box-shadow: 0 18px 42px rgba(18, 48, 55, 0.16);
+}
+
+.task-sort-popover > li {
+  display: block;
+}
+
+.task-sort-popover button {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+  width: 100%;
+  padding: 8px 10px;
+  color: #5f6f82;
+  background: transparent;
+  border: 0;
+  border-radius: 7px;
+  font-size: 12px;
+  font-weight: 600;
+  text-align: left;
+  cursor: pointer;
+}
+
+.task-sort-popover button:hover {
+  color: #14766f;
+  background: #edf8f5;
+}
+
+.task-sort-popover button.selected {
+  color: #14766f;
+  background: #edf8f5;
+  font-weight: 700;
+}
+
+.task-sort-popover button.selected svg {
+  color: var(--color-cyan);
 }
 
 .task-filter-popover {
@@ -992,6 +1133,14 @@ body.is-resizing-sidebar * {
   transform: translateY(-1px);
   border-color: #a9cedd;
   box-shadow: 0 10px 24px rgba(32, 83, 106, 0.09);
+}
+
+/* 多选选中态：淡红边缘高光，优先级高于 hover。 */
+.task-center-row.selected {
+  z-index: 3;
+  transform: none;
+  border-color: #e89ba0;
+  box-shadow: 0 0 0 3px rgba(213, 71, 77, 0.12), 0 6px 18px rgba(32, 83, 106, 0.06);
 }
 
 .task-card-header {
@@ -4945,7 +5094,7 @@ label.settings-preference-option > input {
   }
 
   .task-filter-trigger,
-  .task-sort-control {
+  .task-sort-trigger {
     justify-content: center;
     width: 100%;
   }
